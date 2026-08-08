@@ -1,0 +1,25 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Veritabanı / indeks artefaktları
+*.db
+*.db-shm
+*.db-wal
+/data
+
+# Yapılandırma (yerel gizli)
+config.local.toml
+.env
+
+# Python (plugin geliştirme)
+__pycache__/
+*.pyc
+.venv/
+
+# Editör / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

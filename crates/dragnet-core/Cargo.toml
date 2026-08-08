@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
