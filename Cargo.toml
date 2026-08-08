@@ -4,8 +4,8 @@ resolver = "2"
 members = [
     "crates/dragnet-core",
     "crates/dragnet-dht",
+    "crates/dragnet-meta",
     # Fazlarda eklenecek:
-    # "crates/dragnet-meta",
     # "crates/dragnet-store",
     # "crates/dragnet-api",
     # "bin/dragnetd",
@@ -21,6 +21,8 @@ authors = ["Mehmet Gilik (LordOfTheMachines) <gilikmehmet@gmail.com>"]
 [workspace.dependencies]
 # Ortak bağımlılıklar fazlarda buraya toplanacak (tokio, serde, tracing, ...).
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_bencode = "0.2"
+thiserror = "2"

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-meta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dragnet-core = { path = "../dragnet-core" }
+# mainline: infohash için DHT'den peer bulma (get_peers) ve Id.
+mainline = "8"
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_bencode = { workspace = true }
+thiserror = { workspace = true }
+sha1_smol = "1"
+futures-lite = "2"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "fetch"
+path = "examples/fetch.rs"

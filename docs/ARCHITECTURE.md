@@ -139,7 +139,25 @@ okuma" yüzeyini kullanılabilir biçimde vermiyor. Bu yüzden:
 Çözümleme `serde_bencode::Value` ile toleranslı; üretim ise bencode anahtar sıralaması
 için elle yapılıyor.
 
-### 7.2 Hâlâ açık kararlar
+### 7.2 Metadata wire implementasyonu (Faz 2 spike — KARAR VERİLDİ)
 
-- Metadata: `librqbit` sarmalamak mı, minimal kendi wire implementasyonu mu? → Faz 2 spike.
+**Karar:** `librqbit` sarmalamak yerine **minimal kendi wire katmanı** yazıldı
+(`crates/dragnet-meta/src/wire.rs`).
+
+**Gerekçe:**
+- `librqbit` olgun ama **tam bir torrent istemcisidir** (piece indirme, disk I/O,
+  seçim algoritmaları…). Bizim tek ihtiyacımız metadata değişimi (BEP-9); bu ağır
+  bağımlılık gereksiz yüzey ve derleme yükü getirir.
+- DHT harvester'da (Faz 1) zaten kendi KRPC katmanımızı yazdık; aynı yaklaşımla
+  BEP-3 handshake + BEP-10 extension + BEP-9 `ut_metadata` yazmak küçük (~300 satır),
+  test edilebilir ve tam kontrol sağlar.
+- Peer bulma için `mainline`'ın `get_peers` istemcisini kullanıyoruz (Faz 1'de temel
+  olarak seçilmişti) — böylece DHT tarafını yeniden yazmıyoruz.
+
+**Doğrulama:** Canlı ağda Sintel ve Big Buck Bunny infohash'lerinden isim + dosya
+listesi + boyut başarıyla çekildi; indirilen metadata'nın SHA-1'i infohash ile doğrulandı.
+
+### 7.3 Hâlâ açık kararlar
+
 - BitTorrent v2 (SHA-256 infohash) desteği ne zaman? → v1 çalıştıktan sonra.
+- Daemon'da (Faz 5) harvester ile fetcher aynı DHT düğümünü mü paylaşmalı? → Faz 5'te ölçülecek.

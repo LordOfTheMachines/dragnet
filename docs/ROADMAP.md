@@ -20,19 +20,21 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
 - **DoD:** ✅ `cargo run -p dragnet-dht --example harvest` ile birkaç dakikada terminale
   gerçek infohash'ler akıyor (canlı ağda doğrulandı).
 
-## Faz 2 — Metadata Fetcher (`dragnet-meta`)
-- [ ] Metadata spike: `librqbit` sarmalamak mı, minimal wire mı — karar
-- [ ] Infohash → peer bul → BEP-10 handshake → BEP-9 `ut_metadata` çek
-- [ ] Metadata'yı infohash ile doğrula, bencode çöz → `TorrentRecord`
-- [ ] Zaman aşımı, yeniden deneme, `unreachable` işaretleme
-- **DoD:** Bilinen bir infohash verilince doğru isim + dosya listesi dönüyor.
+## Faz 2 — Metadata Fetcher (`dragnet-meta`) — TAMAMLANDI
+- [x] Metadata spike: minimal kendi wire katmanı seçildi (ARCHITECTURE §7.2)
+- [x] Infohash → peer bul (`get_peers`) → BEP-10 handshake → BEP-9 `ut_metadata` çek
+- [x] Metadata'yı infohash ile SHA-1 doğrula, bencode çöz → `TorrentRecord`
+- [x] Zaman aşımı (peer başına + genel), çok-peer eşzamanlı deneme
+- **DoD:** ✅ Sintel & Big Buck Bunny infohash'lerinden doğru isim + dosya listesi + boyut
+  canlı ağdan çekildi (`cargo run -p dragnet-meta --example fetch -- <infohash>`).
 
-## Faz 3 — Depolama + İndeks (`dragnet-store`)
-- [ ] `sqlx` + SQLite şeması (`torrents`, `files`, `torrents_fts`)
-- [ ] Idempotent upsert (tekrar görülende `last_seen`/`seen_count` güncelle)
-- [ ] FTS5 tam metin arama sorgusu
-- [ ] Migration altyapısı
-- **DoD:** Harvest+fetch sonuçları kalıcı yazılıyor; `name` üzerinden arama çalışıyor.
+## Faz 3 — Depolama + İndeks (`dragnet-store`) — TAMAMLANDI
+- [x] `sqlx` + SQLite şeması (`torrents`, `files`, `torrents_fts`)
+- [x] Idempotent upsert (tekrar görülende `last_seen`/`seen_count` güncelle)
+- [x] FTS5 tam metin arama sorgusu (önek + sanitize)
+- [x] Şema kurulumu (`IF NOT EXISTS` migration) + harvester `record_sighting` yolu
+- **DoD:** ✅ Harvest+fetch sonuçları kalıcı yazılıyor; `name` üzerinden arama çalışıyor
+  (5 offline test: upsert/get, idempotent seen_count, FTS önek, pending→fetched geçişi).
 
 ## Faz 4 — Arama API (`dragnet-api`)
 - [ ] `axum` sunucu: `/search`, `/healthz`, `/stats`
