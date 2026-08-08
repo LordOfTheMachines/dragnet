@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-dht"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dragnet-core = { path = "../dragnet-core" }
+# mainline: BEP-42 uyumlu düğüm kimliği (Id) üretimi ve bootstrap düğüm listesi için.
+# Pasif hasat için mainline'ın Dht'sini KULLANMIYORUZ (gerekçe: docs/ARCHITECTURE.md §7);
+# gelen sorgu gövdelerini görebilmek adına kendi ince KRPC dinleyicimizi yazıyoruz.
+mainline = "8"
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_bencode = "0.2"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "harvest"
+path = "examples/harvest.rs"

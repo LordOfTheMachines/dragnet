@@ -10,13 +10,15 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
 - [x] AGPLv3 + ticari lisans dosyaları
 - [x] nova3 plugin taslağı (`plugins/qbittorrent/dragnet.py`)
 
-## Faz 1 — DHT Harvester (`dragnet-dht`)
-- [ ] DHT crate spike: `mainline` vs `rustydht-lib` — birini seç
-- [ ] Mainline DHT'ye katıl, bootstrap düğümlerinden ağa gir
-- [ ] `get_peers`/`announce_peer` trafiğinden infohash hasat et (pasif mod)
-- [ ] Node ID rotasyonu + rate limit
-- [ ] Çıktı: sınırlı kanaldan (bounded channel) benzersiz infohash akışı
-- **DoD:** `cargo run` ile birkaç dakikada terminale gerçek infohash'ler akıyor.
+## Faz 1 — DHT Harvester (`dragnet-dht`) — TAMAMLANDI
+- [x] DHT crate spike: `mainline` vs `rustydht-lib` — `mainline` temel alındı, pasif
+      hasat kendi KRPC katmanıyla (gerekçe: `docs/ARCHITECTURE.md` §7.1)
+- [x] Mainline DHT'ye katıl, bootstrap düğümlerinden ağa gir
+- [x] `get_peers`/`announce_peer` trafiğinden infohash hasat et (pasif mod)
+- [x] Node ID rotasyonu + rate limit (token-bucket)
+- [x] Çıktı: sınırlı kanaldan (bounded channel) benzersiz infohash akışı (LRU dedup)
+- **DoD:** ✅ `cargo run -p dragnet-dht --example harvest` ile birkaç dakikada terminale
+  gerçek infohash'ler akıyor (canlı ağda doğrulandı).
 
 ## Faz 2 — Metadata Fetcher (`dragnet-meta`)
 - [ ] Metadata spike: `librqbit` sarmalamak mı, minimal wire mı — karar

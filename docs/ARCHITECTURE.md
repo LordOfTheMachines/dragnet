@@ -109,8 +109,37 @@
 - İçerik filtreleme (engellenecek infohash/kelime listeleri) opsiyonel bir katman olarak
   planlanır (Faz 4+). Sorumlu kullanım kullanıcının yükümlülüğüdür.
 
-## 7. Açık kararlar (ileride netleşecek)
+## 7. Kararlar
 
-- DHT crate: `mainline` mi `rustydht-lib` mi? → Faz 1 spike ile ölçülecek.
+### 7.1 DHT crate seçimi (Faz 1 spike — KARAR VERİLDİ)
+
+**Karar:** Temel bağımlılık olarak **`mainline`** (pubky/mainline) seçildi; ancak pasif
+infohash hasadı **kendi ince KRPC dinleyicimizle** yapılıyor (`crates/dragnet-dht`).
+
+**Değerlendirme:**
+
+| Ölçüt | `mainline` v8.0.0 | `rustydht-lib` |
+|---|---|---|
+| Bakım | Aktif; Pubky altyapısında üretimde (crates.io'da 400k+ indirme, son sürüm 2026-08) | **Terk edilmiş** — crates.io'da yok, GitHub deposu (raptorswing/rustydht-lib) 404 |
+| BEP-5 kapsamı | Tam (Kademlia, get/put, BEP-42 güvenli node Id, BEP-44) | Tam (daha alt seviye) |
+| Async | `tokio` uyumlu (`async` feature, `flume`) | Eski/bakımsız |
+| **Pasif trafik dinleme** | **Yetersiz** — `RequestFilter::allow_request` yalnız `bool` döndürür; gelen sorgunun `info_hash`'ini taşıyan `RequestTypeSpecific` tipi crate dışına export **edilmemiştir** (`mod rpc;` private). Filtre sorguyu görebilir ama içeriğini okuyamaz. | Tasarımı gereği gelen ham paketleri açar (bu işe uygundu) ama artık kullanılamaz |
+
+**Sonuç:** İki aday da pasif hasat için "gelen `get_peers`/`announce_peer` gövdesini
+okuma" yüzeyini kullanılabilir biçimde vermiyor. Bu yüzden:
+
+- `mainline`'ı **temel** olarak alıyoruz: BEP-42 uyumlu `Id` üretimi, `DEFAULT_BOOTSTRAP_NODES`
+  listesi ve **Faz 2**'de metadata için gereken `get_peers` istemcisi buradan gelecek.
+- Pasif dinleme için `tokio::net::UdpSocket` üzerinde **kendi minimal KRPC katmanımızı**
+  (`krpc.rs`) yazdık. Böylece gelen her paketi görüp infohash çıkarabiliyoruz; ayrıca
+  node ID rotasyonu ve rate-limit üzerinde tam kontrol sağlıyoruz. Bu, magnetico'nun
+  "indexing service" yaklaşımıyla aynı: aktif `find_node` ile yönlendirme tablolarına
+  girip pasif olarak `get_peers`/`announce_peer` trafiği hasat etmek.
+
+Çözümleme `serde_bencode::Value` ile toleranslı; üretim ise bencode anahtar sıralaması
+için elle yapılıyor.
+
+### 7.2 Hâlâ açık kararlar
+
 - Metadata: `librqbit` sarmalamak mı, minimal kendi wire implementasyonu mu? → Faz 2 spike.
 - BitTorrent v2 (SHA-256 infohash) desteği ne zaman? → v1 çalıştıktan sonra.
