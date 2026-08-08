@@ -1,0 +1,332 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! dragnet-api — HTTP arama API'si (Faz 4).
+//!
+//! `axum` tabanlı REST. Uç noktalar:
+//! - `GET /search?q=<sorgu>&cat=<kategori>&limit=<n>` → JSON sonuç listesi.
+//! - `GET /healthz` → sağlık kontrolü.
+//! - `GET /stats` → indeks büyüklüğü.
+//!
+//! Bu, qBittorrent plugin'inin konuştuğu tek yüzeydir; JSON sözleşmesi
+//! `docs/INTEGRATION.md` ile hizalıdır. Varsayılan bind `127.0.0.1`'dir;
+//! opsiyonel bir bearer token ile korunabilir.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+use tracing::info;
+
+use dragnet_store::Store;
+
+/// API yapılandırması.
+#[derive(Debug, Clone)]
+pub struct ApiConfig {
+    /// Dinlenecek adres. Varsayılan `127.0.0.1:8080`.
+    pub bind: SocketAddr,
+    /// Ayarlanırsa `/search` ve `/stats` için `Authorization: Bearer <token>` gerekir.
+    pub token: Option<String>,
+    /// `limit` parametresi için üst sınır.
+    pub max_limit: usize,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            bind: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            token: None,
+            max_limit: 500,
+        }
+    }
+}
+
+/// Paylaşılan uygulama durumu.
+#[derive(Clone)]
+struct AppState {
+    store: Store,
+    token: Option<String>,
+    max_limit: usize,
+}
+
+/// `/search` sorgu parametreleri.
+#[derive(Debug, Deserialize)]
+struct SearchParams {
+    #[serde(default)]
+    q: String,
+    /// Kategori (şimdilik yok sayılır; kategorilendirme Faz 7+).
+    #[serde(default)]
+    #[allow(dead_code)]
+    cat: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Tek bir arama sonucu (INTEGRATION.md JSON sözleşmesi).
+#[derive(Debug, Serialize)]
+struct SearchItem {
+    infohash: String,
+    name: String,
+    size: u64,
+    /// DHT crawl'ından seed/leech gelmez; -1 = bilinmiyor.
+    seeds: i64,
+    leech: i64,
+    /// Son görülme (unix ts) — yayın tarihi vekili.
+    pub_date: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResponse {
+    results: Vec<SearchItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct StatsResponse {
+    fetched_torrents: i64,
+    total_infohashes: i64,
+}
+
+/// Verilen store ve yapılandırmayla axum router'ı kurar.
+pub fn router(store: Store, config: &ApiConfig) -> Router {
+    let state = AppState {
+        store,
+        token: config.token.clone(),
+        max_limit: config.max_limit,
+    };
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/search", get(search))
+        .route("/stats", get(stats))
+        .with_state(Arc::new(state))
+}
+
+/// API'yi başlatır ve bloklar (sunucu sonlanana kadar).
+pub async fn serve(config: ApiConfig, store: Store) -> std::io::Result<()> {
+    let app = router(store, &config);
+    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    let addr = listener.local_addr()?;
+    info!(%addr, "dragnet-api dinliyor");
+    axum::serve(listener, app).await
+}
+
+async fn healthz() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
+/// Opsiyonel bearer token doğrulaması. Token ayarlı değilse her istek geçer.
+/// Reddedilirse `Some(<401 yanıtı>)`, geçerse `None` döner.
+fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    let expected = state.token.as_ref()?;
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match provided {
+        Some(t) if t == expected => None,
+        _ => Some((StatusCode::UNAUTHORIZED, "yetkisiz").into_response()),
+    }
+}
+
+async fn search(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+
+    let limit = params
+        .limit
+        .unwrap_or(100)
+        .min(state.max_limit)
+        .max(1);
+
+    match state.store.search(&params.q, limit as i64).await {
+        Ok(rows) => {
+            let results = rows
+                .into_iter()
+                .map(|r| SearchItem {
+                    infohash: r.infohash.to_hex(),
+                    name: r.name,
+                    size: r.total_size,
+                    seeds: -1,
+                    leech: -1,
+                    pub_date: r.last_seen,
+                })
+                .collect();
+            Json(SearchResponse { results }).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "arama hatası");
+            (StatusCode::INTERNAL_SERVER_ERROR, "arama hatası").into_response()
+        }
+    }
+}
+
+async fn stats(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let fetched = state.store.count_fetched().await.unwrap_or(0);
+    let total = state.store.count_total().await.unwrap_or(0);
+    Json(StatsResponse {
+        fetched_torrents: fetched,
+        total_infohashes: total,
+    })
+    .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use dragnet_core::{InfoHash, TorrentFile, TorrentRecord};
+    use tower::ServiceExt; // oneshot
+
+    fn record(hex: &str, name: &str, size: u64) -> TorrentRecord {
+        TorrentRecord {
+            infohash: InfoHash::from_hex(hex).unwrap(),
+            name: name.to_string(),
+            total_size: size,
+            files: vec![TorrentFile { path: name.to_string(), size }],
+            first_seen: 1000,
+            last_seen: 2000,
+            seen_count: 5,
+        }
+    }
+
+    async fn seeded_store() -> Store {
+        let store = Store::in_memory().await.unwrap();
+        store
+            .upsert_torrent(&record(
+                "1111111111111111111111111111111111111111",
+                "Ubuntu 24.04 Desktop",
+                4096,
+            ))
+            .await
+            .unwrap();
+        store
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let app = router(Store::in_memory().await.unwrap(), &ApiConfig::default());
+        let resp = app
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn search_returns_matching_results() {
+        let app = router(seeded_store().await, &ApiConfig::default());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/search?q=ubuntu&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["name"], "Ubuntu 24.04 Desktop");
+        assert_eq!(results[0]["size"], 4096);
+        assert_eq!(results[0]["seeds"], -1);
+        assert_eq!(
+            results[0]["infohash"],
+            "1111111111111111111111111111111111111111"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_empty_for_no_match() {
+        let app = router(seeded_store().await, &ApiConfig::default());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/search?q=nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["results"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn stats_reports_counts() {
+        let app = router(seeded_store().await, &ApiConfig::default());
+        let resp = app
+            .oneshot(Request::builder().uri("/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["fetched_torrents"], 1);
+        assert_eq!(json["total_infohashes"], 1);
+    }
+
+    #[tokio::test]
+    async fn auth_enforced_when_token_set() {
+        let config = ApiConfig {
+            token: Some("secret123".into()),
+            ..Default::default()
+        };
+        let store = seeded_store().await;
+
+        // Token yok → 401.
+        let resp = router(store.clone(), &config)
+            .oneshot(Request::builder().uri("/search?q=ubuntu").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Yanlış token → 401.
+        let resp = router(store.clone(), &config)
+            .oneshot(
+                Request::builder()
+                    .uri("/search?q=ubuntu")
+                    .header("Authorization", "Bearer wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Doğru token → 200.
+        let resp = router(store, &config)
+            .oneshot(
+                Request::builder()
+                    .uri("/search?q=ubuntu")
+                    .header("Authorization", "Bearer secret123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // healthz auth gerektirmez.
+        let resp = router(seeded_store().await, &config)
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}

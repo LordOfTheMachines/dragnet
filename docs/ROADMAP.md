@@ -36,12 +36,13 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
 - **DoD:** ✅ Harvest+fetch sonuçları kalıcı yazılıyor; `name` üzerinden arama çalışıyor
   (5 offline test: upsert/get, idempotent seen_count, FTS önek, pending→fetched geçişi).
 
-## Faz 4 — Arama API (`dragnet-api`)
-- [ ] `axum` sunucu: `/search`, `/healthz`, `/stats`
-- [ ] JSON sonuç şeması (bkz. INTEGRATION.md)
-- [ ] Varsayılan `127.0.0.1` bind + opsiyonel token auth
-- [ ] (Ops.) sorgu anında DHT `get_peers` ile seed tahmini
-- **DoD:** `curl "localhost:PORT/search?q=..."` gerçek sonuç döndürüyor.
+## Faz 4 — Arama API (`dragnet-api`) — TAMAMLANDI
+- [x] `axum` sunucu: `/search`, `/healthz`, `/stats`
+- [x] JSON sonuç şeması (INTEGRATION.md ile hizalı)
+- [x] Varsayılan `127.0.0.1` bind + opsiyonel bearer token auth
+- [ ] (Ops.) sorgu anında DHT `get_peers` ile seed tahmini → ertelendi (Faz 7+)
+- **DoD:** ✅ `/search?q=...` gerçek sonuç döndürüyor (5 test: search, boş sonuç,
+  stats, token auth 401/200, healthz).
 
 ## Faz 5 — Daemon (`dragnetd`)
 - [ ] Tüm crate'leri tek süreçte birleştir (harvester→kuyruk→fetcher havuzu→store→api)

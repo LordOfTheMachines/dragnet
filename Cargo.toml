@@ -6,6 +6,7 @@ members = [
     "crates/dragnet-dht",
     "crates/dragnet-meta",
     "crates/dragnet-store",
+    "crates/dragnet-api",
     # Fazlarda eklenecek:
     # "crates/dragnet-store",
     # "crates/dragnet-api",
