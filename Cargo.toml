@@ -15,8 +15,8 @@ members = [
 version = "0.0.1"
 edition = "2021"
 license = "AGPL-3.0-only"
-repository = ""
-authors = ["<TELİF HAKKI SAHİBİ>"]
+repository = "https://github.com/LordOfTheMachines/dragnet"
+authors = ["Mehmet Gilik (LordOfTheMachines) <gilikmehmet@gmail.com>"]
 
 [workspace.dependencies]
 # Ortak bağımlılıklar fazlarda buraya toplanacak (tokio, serde, tracing, ...).

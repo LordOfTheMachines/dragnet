@@ -44,7 +44,8 @@ Her kaynak dosyanın en üstüne SPDX satırı eklenir:
 
 ## 5. Yapılacaklar
 
-- [ ] `LICENSE` dosyasına AGPLv3'ün **tam kanonik metnini** yerleştir
-      (şu an başlık + resmî bağlantı var; tam metin https://www.gnu.org/licenses/agpl-3.0.txt).
-- [ ] Telif hakkı sahibi adını/yılını `LICENSE` ve dosya başlıklarında netleştir.
-- [ ] `COMMERCIAL-LICENSE.md` fiyat/kapsam politikasını doldur.
+- [x] `LICENSE` dosyasına AGPLv3'ün **tam kanonik metnini** yerleştir
+      (kısa telif/çift-lisans önsözü + birebir kanonik AGPL-3.0 metni).
+- [x] Telif hakkı sahibi: **Mehmet Gilik (LordOfTheMachines)**, yıl 2026 — `LICENSE` ve
+      `Cargo.toml` `authors` alanında netleştirildi.
+- [ ] `COMMERCIAL-LICENSE.md` fiyat/kapsam politikasını doldur (iletişim kanalı eklendi).

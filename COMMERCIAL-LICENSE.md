@@ -25,7 +25,8 @@ Ticari lisans **gereklidir** eğer:
 
 ## İletişim
 
-Ticari lisans talepleri için: `<İLETİŞİM E-POSTASI>`
+Telif hakkı sahibi: **Mehmet Gilik (LordOfTheMachines)**
+Ticari lisans talepleri için: **gilikmehmet@gmail.com**
 
 > Not: Çift lisans satabilmek için tüm katkıların telif hakkının lisanslanabilir olması gerekir.
 > Dış katkı kabul edilmeden önce bir CLA/DCO süreci kurulmalıdır (bkz. docs/LICENSING.md §3).
