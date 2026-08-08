@@ -7,10 +7,7 @@ members = [
     "crates/dragnet-meta",
     "crates/dragnet-store",
     "crates/dragnet-api",
-    # Fazlarda eklenecek:
-    # "crates/dragnet-store",
-    # "crates/dragnet-api",
-    # "bin/dragnetd",
+    "bin/dragnetd",
 ]
 
 [workspace.package]

@@ -44,11 +44,13 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
 - **DoD:** ✅ `/search?q=...` gerçek sonuç döndürüyor (5 test: search, boş sonuç,
   stats, token auth 401/200, healthz).
 
-## Faz 5 — Daemon (`dragnetd`)
-- [ ] Tüm crate'leri tek süreçte birleştir (harvester→kuyruk→fetcher havuzu→store→api)
-- [ ] `figment` yapılandırma + `tracing` log
-- [ ] Zarif kapanış, backpressure ayarları
-- **DoD:** Tek komutla (`cargo run -p dragnetd`) uçtan uca çalışan servis.
+## Faz 5 — Daemon (`dragnetd`) — TAMAMLANDI
+- [x] Tüm crate'leri tek süreçte birleştir (harvester→sighting→fetcher havuzu→store→api)
+- [x] `figment` yapılandırma (varsayılan→toml→env) + `tracing` log
+- [x] Zarif kapanış (Ctrl+C), Semaphore ile bounded fetcher havuzu (backpressure)
+- [x] Bonus: `seed_infohashes` ile başlangıçta indeks ısıtma
+- **DoD:** ✅ Tek komutla uçtan uca servis; canlı smoke test: seed Sintel çekildi →
+  `/healthz`=ok, `/stats`={fetched:1}, `/search?q=sintel` doğru sonucu döndürdü.
 
 ## Faz 6 — qBittorrent Entegrasyonu
 - [ ] `dragnet.py` plugin'ini gerçek API'ye bağla

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnetd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dragnetd"
+path = "src/main.rs"
+
+[dependencies]
+dragnet-core = { path = "../../crates/dragnet-core" }
+dragnet-dht = { path = "../../crates/dragnet-dht" }
+dragnet-meta = { path = "../../crates/dragnet-meta" }
+dragnet-store = { path = "../../crates/dragnet-store" }
+dragnet-api = { path = "../../crates/dragnet-api" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+figment = { version = "0.10", features = ["toml", "env"] }

@@ -259,6 +259,18 @@ impl Store {
         Ok(out)
     }
 
+    /// Bu infohash için metadata çekilmiş mi? (Dosyaları yüklemeden hızlı kontrol.)
+    pub async fn has_metadata(&self, infohash: InfoHash) -> Result<bool, StoreError> {
+        let hex = infohash.to_hex();
+        let row = sqlx::query(
+            "SELECT 1 AS x FROM torrents WHERE infohash = ?1 AND metadata_status = 'fetched'",
+        )
+        .bind(&hex)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// Metadata'sı çekilmiş (aranabilir) torrent sayısı.
     pub async fn count_fetched(&self) -> Result<i64, StoreError> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'fetched'")
@@ -382,6 +394,7 @@ mod tests {
         store.record_sighting(ih, 600).await.unwrap();
         assert_eq!(store.count_total().await.unwrap(), 1);
         assert_eq!(store.count_fetched().await.unwrap(), 0);
+        assert!(!store.has_metadata(ih).await.unwrap());
         assert!(store.search("slackware", 10).await.unwrap().is_empty());
 
         // Sonra metadata gelir → aranabilir olur.
@@ -389,6 +402,7 @@ mod tests {
         rec.first_seen = 500;
         store.upsert_torrent(&rec).await.unwrap();
         assert_eq!(store.count_fetched().await.unwrap(), 1);
+        assert!(store.has_metadata(ih).await.unwrap());
         let hits = store.search("slackware", 10).await.unwrap();
         assert_eq!(hits.len(), 1);
         // first_seen, ilk görülme (500) korunmalı.

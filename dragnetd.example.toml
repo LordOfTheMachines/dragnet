@@ -1,0 +1,26 @@
+# dragnetd örnek yapılandırması.
+# Kullanım: bu dosyayı `dragnetd.toml` olarak kopyalayın ve düzenleyin.
+# Ortam değişkeni ile de geçersiz kılınabilir, örn: DRAGNET_API_BIND=0.0.0.0:9000
+
+# SQLite veritabanı dosyası (yoksa oluşturulur).
+db_path = "dragnet.db"
+
+# Arama API'sinin dinleyeceği adres. Güvenlik için varsayılan yereldir.
+api_bind = "127.0.0.1:8080"
+
+# API için opsiyonel bearer token. Ayarlanırsa /search ve /stats
+# "Authorization: Bearer <token>" başlığı ister. Yorumda bırakılırsa auth kapalı.
+# api_token = "degistir-beni"
+
+# DHT harvester UDP portu (0 = işletim sisteminin atadığı efemer port).
+# Sabit + yönlendirilmiş (port-forward) bir port pasif hasadı artırır.
+harvester_port = 0
+
+# Aynı anda metadata çekilecek azami infohash sayısı (fetcher havuzu boyutu).
+fetch_workers = 8
+
+# Tek bir metadata çekiminde denenecek eşzamanlı peer sayısı.
+fetch_peer_concurrency = 20
+
+# Başlangıçta çekilip indekslenecek infohash'ler (indeksi ısıtmak / test için).
+# seed_infohashes = ["08ada5a7a6183aae1e09d831df6748d566095a10"]  # Sintel
