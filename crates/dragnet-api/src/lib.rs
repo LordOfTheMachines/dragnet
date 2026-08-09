@@ -150,10 +150,11 @@ async fn search(
             let results = rows
                 .into_iter()
                 .map(|r| SearchItem {
+                    // Canlılık scrape'inden peer sayısı; henüz kontrol edilmediyse -1.
+                    seeds: r.peer_count.unwrap_or(-1),
                     infohash: r.infohash.to_hex(),
                     name: r.name,
                     size: r.total_size,
-                    seeds: -1,
                     leech: -1,
                     pub_date: r.last_seen,
                 })

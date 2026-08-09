@@ -69,7 +69,9 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       (grafik + tablolar + ağ sağlığı), arama, ayarlar, ed25519 oto-güncelleme
 - [x] Nazik varsayılanlar (router conntrack koruması) + port çakışma fallback'i
 - [x] `unreachable` işaretleme (ölü torrent'leri tekrar denememe)
-- [ ] Torrent canlılık kontrolü (DHT scrape ile seed/leech tahmini) — Faz C
+- [x] **Faz C: Torrent canlılık kontrolü** — nazik DHT scrape ile canlı peer sayısı;
+      store peer_count/last_check, API `seeds` alanı, app'te canlı/ölü göstergesi
+      (Tears of Steel canlıda 16 peer doğrulandı)
 - [ ] Semantik arama (yerel embedding + doğal dil sorgu) — Faz D
 - [ ] Web arayüzü (magneticow benzeri gözat/ara)
 - [ ] İçerik filtreleme katmanı (engel listeleri)

@@ -106,6 +106,31 @@ impl MetadataFetcher {
         peers
     }
 
+    /// Canlılık scrape'i: bir infohash için DHT'de `get_peers` yapıp benzersiz
+    /// peer sayısını döner (canlı seeder/leecher vekili). Metadata çekmez.
+    pub async fn count_peers(&self, infohash: InfoHash, timeout: Duration) -> usize {
+        let id = Id::from_bytes(infohash.as_bytes()).expect("infohash 20 bayttır");
+        let mut stream = self.dht.get_peers(id);
+        let mut seen = HashSet::new();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match tokio::time::timeout(deadline - now, stream.next()).await {
+                Ok(Some(batch)) => {
+                    for p in batch {
+                        seen.insert(p);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        seen.len()
+    }
+
     /// Peer'leri sınırlı eşzamanlılıkla dener; ilk başarılı metadata kazanır.
     async fn try_peers(
         &self,

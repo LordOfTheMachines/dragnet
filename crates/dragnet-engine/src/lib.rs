@@ -131,6 +131,37 @@ impl Engine {
             }
         }
 
+        // Canlılık kontrolü (nazik): indekslenen torrent'leri periyodik DHT scrape
+        // ile kontrol edip canlı peer sayısını güncelle. Böylece "hangisi indirilebilir"
+        // bilinir (ölüler 0 peer). Küçük batch + kısa timeout → düşük ek yük.
+        {
+            let store = store.clone();
+            let fetcher = Arc::clone(&fetcher);
+            tasks.push(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(6));
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let batch = match store.torrents_to_check(2).await {
+                        Ok(b) if !b.is_empty() => b,
+                        _ => continue,
+                    };
+                    let mut handles = Vec::new();
+                    for ih in batch {
+                        let store = store.clone();
+                        let fetcher = Arc::clone(&fetcher);
+                        handles.push(tokio::spawn(async move {
+                            let n = fetcher.count_peers(ih, Duration::from_secs(8)).await;
+                            let _ = store.update_liveness(ih, n as i64, now_unix()).await;
+                        }));
+                    }
+                    for h in handles {
+                        let _ = h.await;
+                    }
+                }
+            }));
+        }
+
         // Ana boru hattı: harvester akışını tüket, sighting yaz, gerekirse çek.
         {
             let store = store.clone();

@@ -31,12 +31,19 @@ function copyMagnet(magnet) {
   );
 }
 
+function peerCell(p) {
+  if (p == null) return `<span class="muted" title="Henüz kontrol edilmedi">–</span>`;
+  if (p <= 0) return `<span class="dead" title="Canlı peer yok (indirilemez olabilir)">ölü</span>`;
+  return `<span class="alive"><span class="dot ok"></span>${p}</span>`;
+}
+
 function rowsHtml(items) {
   if (!items.length) return `<tr><td class="muted">Henüz veri yok</td></tr>`;
   return items.map((r) => `
     <tr>
       <td class="name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</td>
       <td class="num">${humanSize(r.size)}</td>
+      <td class="num">${peerCell(r.peers)}</td>
       <td class="num"><span class="copy" data-magnet="${escapeAttr(r.magnet)}">magnet</span></td>
     </tr>`).join("");
 }
@@ -131,6 +138,7 @@ $("search-form").addEventListener("submit", async (e) => {
       <tr>
         <td class="name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</td>
         <td class="num">${humanSize(x.size)}</td>
+        <td class="num">${peerCell(x.peers)}</td>
         <td class="num">${x.files}</td>
         <td class="num">${x.seen}</td>
         <td class="num"><span class="copy" data-magnet="${escapeAttr(x.magnet)}">magnet</span></td>

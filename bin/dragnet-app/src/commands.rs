@@ -19,6 +19,7 @@ fn summary_json(s: &TorrentSummary) -> Value {
         "size": s.total_size,
         "files": s.file_count,
         "seen": s.seen_count,
+        "peers": s.peer_count, // null = henüz kontrol edilmedi, 0 = ölü, N = canlı
         "magnet": s.infohash.to_magnet(Some(&s.name)),
     })
 }

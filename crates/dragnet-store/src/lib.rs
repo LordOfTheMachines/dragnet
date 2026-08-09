@@ -40,6 +40,10 @@ pub struct TorrentSummary {
     pub seen_count: u64,
     pub first_seen: i64,
     pub last_seen: i64,
+    /// Son DHT scrape'inde görülen canlı peer sayısı (None = henüz kontrol edilmedi).
+    pub peer_count: Option<i64>,
+    /// Son canlılık kontrolü zamanı (unix ts, None = hiç).
+    pub last_check: Option<i64>,
 }
 
 /// SQLite tabanlı indeks deposu.
@@ -83,11 +87,20 @@ impl Store {
                 first_seen      INTEGER NOT NULL,
                 last_seen       INTEGER NOT NULL,
                 seen_count      INTEGER NOT NULL,
-                metadata_status TEXT NOT NULL DEFAULT 'pending'
+                metadata_status TEXT NOT NULL DEFAULT 'pending',
+                peer_count      INTEGER DEFAULT NULL,
+                last_check      INTEGER DEFAULT NULL
             );"#,
         )
         .execute(&self.pool)
         .await?;
+        // Eski veritabanları için kolonları ekle (varsa hata yok sayılır).
+        let _ = sqlx::query("ALTER TABLE torrents ADD COLUMN peer_count INTEGER DEFAULT NULL")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE torrents ADD COLUMN last_check INTEGER DEFAULT NULL")
+            .execute(&self.pool)
+            .await;
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS files (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -230,7 +243,7 @@ impl Store {
         }
         let rows = sqlx::query(
             r#"SELECT t.infohash, t.name, t.total_size, t.file_count,
-                      t.seen_count, t.first_seen, t.last_seen
+                      t.seen_count, t.first_seen, t.last_seen, t.peer_count, t.last_check
                  FROM torrents_fts f
                  JOIN torrents t ON t.infohash = f.infohash
                 WHERE f.name MATCH ?1 AND t.metadata_status = 'fetched'
@@ -243,6 +256,42 @@ impl Store {
         .await?;
 
         rows.iter().map(row_to_summary).collect()
+    }
+
+    /// Canlılık kontrolü için sıradaki torrent'ler: en eski kontrol edilenler
+    /// (hiç kontrol edilmeyenler = NULL, önce gelir). Nazik yeniden-tarama.
+    pub async fn torrents_to_check(&self, limit: i64) -> Result<Vec<InfoHash>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT infohash FROM torrents WHERE metadata_status = 'fetched'
+              ORDER BY last_check ASC LIMIT ?1",
+        )
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let hex: String = r.get("infohash");
+            if let Some(ih) = InfoHash::from_hex(&hex) {
+                out.push(ih);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Bir torrent'in canlı peer sayısını ve kontrol zamanını günceller.
+    pub async fn update_liveness(
+        &self,
+        infohash: InfoHash,
+        peer_count: i64,
+        ts: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE torrents SET peer_count = ?2, last_check = ?3 WHERE infohash = ?1")
+            .bind(infohash.to_hex())
+            .bind(peer_count)
+            .bind(ts)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Popülerliğe (`seen_count`) göre en çok görülen torrent'ler (dashboard).
@@ -268,7 +317,8 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<TorrentSummary>, StoreError> {
         let sql = format!(
-            "SELECT infohash, name, total_size, file_count, seen_count, first_seen, last_seen
+            "SELECT infohash, name, total_size, file_count, seen_count, first_seen, last_seen,
+                    peer_count, last_check
                FROM torrents WHERE metadata_status = 'fetched'
               ORDER BY {order_col} DESC LIMIT ?1"
         );
@@ -361,6 +411,8 @@ fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<TorrentSummary, StoreEr
         seen_count: r.get::<i64, _>("seen_count") as u64,
         first_seen: r.get::<i64, _>("first_seen"),
         last_seen: r.get::<i64, _>("last_seen"),
+        peer_count: r.get::<Option<i64>, _>("peer_count"),
+        last_check: r.get::<Option<i64>, _>("last_check"),
     })
 }
 
@@ -484,6 +536,30 @@ mod tests {
         // first_seen, ilk görülme (500) korunmalı.
         let got = store.get(ih).await.unwrap().unwrap();
         assert_eq!(got.first_seen, 500);
+    }
+
+    #[tokio::test]
+    async fn liveness_check_and_update() {
+        let store = Store::in_memory().await.unwrap();
+        let rec = record("4444444444444444444444444444444444444444", "Live Test", 100);
+        store.upsert_torrent(&rec).await.unwrap();
+
+        // Yeni kayıt: last_check NULL → kontrol edilecekler listesinde, peer_count None.
+        let todo = store.torrents_to_check(10).await.unwrap();
+        assert_eq!(todo.len(), 1);
+        assert_eq!(todo[0], rec.infohash);
+        let before = store.search("live", 10).await.unwrap();
+        assert_eq!(before[0].peer_count, None);
+
+        // Canlılık güncelle → peer_count 7, last_check set.
+        store.update_liveness(rec.infohash, 7, 1234).await.unwrap();
+        let after = store.search("live", 10).await.unwrap();
+        assert_eq!(after[0].peer_count, Some(7));
+        assert_eq!(after[0].last_check, Some(1234));
+
+        // Artık kontrol edildi → listenin sonuna düşer (tek kayıt olduğu için hâlâ var ama last_check dolu).
+        let todo2 = store.torrents_to_check(10).await.unwrap();
+        assert_eq!(todo2.len(), 1); // tekrar kontrol edilebilir (en eski)
     }
 
     #[tokio::test]
