@@ -242,21 +242,57 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let hex: String = r.get("infohash");
-            let infohash = InfoHash::from_hex(&hex).ok_or(StoreError::BadInfoHash(hex))?;
-            out.push(TorrentSummary {
-                infohash,
-                name: r.get::<String, _>("name"),
-                total_size: r.get::<i64, _>("total_size") as u64,
-                file_count: r.get::<i64, _>("file_count") as u64,
-                seen_count: r.get::<i64, _>("seen_count") as u64,
-                first_seen: r.get::<i64, _>("first_seen"),
-                last_seen: r.get::<i64, _>("last_seen"),
-            });
-        }
-        Ok(out)
+        rows.iter().map(row_to_summary).collect()
+    }
+
+    /// Popülerliğe (`seen_count`) göre en çok görülen torrent'ler (dashboard).
+    pub async fn top_by_seen(&self, limit: i64) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.top_summaries("seen_count", limit).await
+    }
+
+    /// Boyuta göre en büyük torrent'ler (dashboard).
+    pub async fn top_by_size(&self, limit: i64) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.top_summaries("total_size", limit).await
+    }
+
+    /// En son indekslenen torrent'ler (dashboard).
+    pub async fn recent(&self, limit: i64) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.top_summaries("first_seen", limit).await
+    }
+
+    /// Verilen sütuna göre azalan sırada özet listesi. `order_col` yalnız kod içi
+    /// sabittir (kullanıcı girdisi değil) → SQL enjeksiyonu yok.
+    async fn top_summaries(
+        &self,
+        order_col: &str,
+        limit: i64,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
+        let sql = format!(
+            "SELECT infohash, name, total_size, file_count, seen_count, first_seen, last_seen
+               FROM torrents WHERE metadata_status = 'fetched'
+              ORDER BY {order_col} DESC LIMIT ?1"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(limit.max(0))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(row_to_summary).collect()
+    }
+
+    /// Günlük keşif sayıları (grafik için): `(gün_başlangıcı_unix, sayı)`, en yeni önce.
+    pub async fn daily_discovery(&self, days: i64) -> Result<Vec<(i64, i64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT (first_seen / 86400) * 86400 AS day, COUNT(*) AS n
+               FROM torrents WHERE metadata_status = 'fetched'
+              GROUP BY day ORDER BY day DESC LIMIT ?1",
+        )
+        .bind(days.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<i64, _>("day"), r.get::<i64, _>("n")))
+            .collect())
     }
 
     /// Bu infohash için metadata çekilmiş mi? (Dosyaları yüklemeden hızlı kontrol.)
@@ -311,6 +347,21 @@ impl Store {
             .await?;
         Ok(row.get::<i64, _>("n"))
     }
+}
+
+/// Bir SQLite satırını [`TorrentSummary`]'ye çevirir (özet sorguları için ortak).
+fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<TorrentSummary, StoreError> {
+    let hex: String = r.get("infohash");
+    let infohash = InfoHash::from_hex(&hex).ok_or(StoreError::BadInfoHash(hex))?;
+    Ok(TorrentSummary {
+        infohash,
+        name: r.get::<String, _>("name"),
+        total_size: r.get::<i64, _>("total_size") as u64,
+        file_count: r.get::<i64, _>("file_count") as u64,
+        seen_count: r.get::<i64, _>("seen_count") as u64,
+        first_seen: r.get::<i64, _>("first_seen"),
+        last_seen: r.get::<i64, _>("last_seen"),
+    })
 }
 
 /// Kullanıcı sorgusunu güvenli bir FTS5 MATCH ifadesine çevirir.
@@ -433,6 +484,30 @@ mod tests {
         // first_seen, ilk görülme (500) korunmalı.
         let got = store.get(ih).await.unwrap().unwrap();
         assert_eq!(got.first_seen, 500);
+    }
+
+    #[tokio::test]
+    async fn dashboard_queries_order_correctly() {
+        let store = Store::in_memory().await.unwrap();
+        // A: küçük ama çok görülen; B: büyük ama az görülen.
+        let mut a = record("1111111111111111111111111111111111111111", "Alpha", 100);
+        a.seen_count = 50;
+        let mut b = record("2222222222222222222222222222222222222222", "Beta", 9_000_000);
+        b.seen_count = 2;
+        store.upsert_torrent(&a).await.unwrap();
+        store.upsert_torrent(&b).await.unwrap();
+
+        let by_seen = store.top_by_seen(10).await.unwrap();
+        assert_eq!(by_seen[0].name, "Alpha"); // en çok görülen önce
+
+        let by_size = store.top_by_size(10).await.unwrap();
+        assert_eq!(by_size[0].name, "Beta"); // en büyük önce
+
+        assert_eq!(store.recent(10).await.unwrap().len(), 2);
+        // Günlük keşif: iki kayıt da aynı gün → tek kova, sayı 2 (upsert seen_count'u
+        // artırdığı için not: her ikisi de bir kez upsert edildi).
+        let daily = store.daily_discovery(30).await.unwrap();
+        assert_eq!(daily.iter().map(|(_, n)| n).sum::<i64>(), 2);
     }
 
     #[test]
