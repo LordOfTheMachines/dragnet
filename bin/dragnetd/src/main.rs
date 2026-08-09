@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // DHT harvester.
     let mut harvester = dragnet_dht::spawn(HarvesterConfig {
         port: cfg.harvester_port,
+        max_queries_per_sec: cfg.harvester_max_queries_per_sec,
         ..Default::default()
     })
     .await?;

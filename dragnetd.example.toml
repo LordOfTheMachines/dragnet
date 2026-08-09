@@ -16,11 +16,18 @@ api_bind = "127.0.0.1:8080"
 # Sabit + yönlendirilmiş (port-forward) bir port pasif hasadı artırır.
 harvester_port = 0
 
+# Harvester'ın saniyedeki azami giden DHT sorgusu.
+# !!! İnternetin yavaşlıyor/kilitleniyorsa bu değeri DÜŞÜR (örn. 20-30). !!!
+# Yüksek değerler ev router'larının bağlantı-izleme tablosunu doldurabilir.
+# Port-forward + iyi bağlantıda 150-300'e çıkarılabilir.
+harvester_max_queries_per_sec = 50
+
 # Aynı anda metadata çekilecek azami infohash sayısı (fetcher havuzu boyutu).
-fetch_workers = 8
+# Düşük tut; her biri birçok eşzamanlı TCP bağlantısı açar.
+fetch_workers = 2
 
 # Tek bir metadata çekiminde denenecek eşzamanlı peer sayısı.
-fetch_peer_concurrency = 20
+fetch_peer_concurrency = 6
 
 # Başlangıçta çekilip indekslenecek infohash'ler (indeksi ısıtmak / test için).
 # seed_infohashes = ["08ada5a7a6183aae1e09d831df6748d566095a10"]  # Sintel

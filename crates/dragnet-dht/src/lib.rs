@@ -78,9 +78,12 @@ impl Default for HarvesterConfig {
             bind_address: Ipv4Addr::UNSPECIFIED,
             port: 0,
             channel_capacity: 1024,
-            max_queries_per_sec: 300.0,
-            crawl_tick: Duration::from_millis(50),
-            crawl_batch: 15,
+            // Nazik varsayılan: ev router'larının bağlantı-izleme (conntrack)
+            // tablosunu doldurup interneti kilitlememek için düşük tutuldu.
+            // Port-forward + iyi bağlantısı olanlar artırabilir.
+            max_queries_per_sec: 50.0,
+            crawl_tick: Duration::from_millis(100),
+            crawl_batch: 4,
             id_rotation: Duration::from_secs(600),
             dedup_capacity: 1 << 18,
             node_queue_capacity: 8192,

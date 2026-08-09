@@ -19,6 +19,9 @@ pub struct Config {
     pub api_token: Option<String>,
     /// DHT harvester UDP portu (0 = efemer).
     pub harvester_port: u16,
+    /// Harvester'ın saniyedeki azami giden DHT sorgusu. **İnternetin kilitleniyorsa
+    /// bu değeri düşür.** Nazik varsayılan: 50. Port-forward + iyi bağlantıda artırılabilir.
+    pub harvester_max_queries_per_sec: f64,
     /// Aynı anda metadata çekilecek azami infohash sayısı (fetcher havuzu).
     pub fetch_workers: usize,
     /// Tek bir metadata çekiminde denenecek eşzamanlı peer sayısı.
@@ -35,8 +38,9 @@ impl Default for Config {
             api_bind: "127.0.0.1:8080".to_string(),
             api_token: None,
             harvester_port: 0,
-            fetch_workers: 8,
-            fetch_peer_concurrency: 20,
+            harvester_max_queries_per_sec: 50.0,
+            fetch_workers: 2,
+            fetch_peer_concurrency: 6,
             seed_infohashes: Vec::new(),
         }
     }

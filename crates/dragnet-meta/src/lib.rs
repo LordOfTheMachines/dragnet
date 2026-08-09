@@ -41,9 +41,11 @@ impl Default for FetchConfig {
     fn default() -> Self {
         Self {
             peer_gather_timeout: Duration::from_secs(20),
-            max_peers: 100,
-            per_peer_timeout: Duration::from_secs(10),
-            concurrency: 20,
+            // Nazik varsayılanlar: eşzamanlı TCP peer bağlantısını düşük tutarak
+            // router bağlantı-izleme tablosunu ve yükü sınırlar.
+            max_peers: 50,
+            per_peer_timeout: Duration::from_secs(8),
+            concurrency: 6,
         }
     }
 }
