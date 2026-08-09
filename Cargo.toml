@@ -8,6 +8,7 @@ members = [
     "crates/dragnet-store",
     "crates/dragnet-api",
     "bin/dragnetd",
+    "bin/dragnet-tray",
 ]
 
 [workspace.package]

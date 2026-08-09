@@ -167,6 +167,17 @@ cargo run -p dragnet-dht --example harvest
 cargo run -p dragnet-meta --example fetch -- 08ada5a7a6183aae1e09d831df6748d566095a10
 ```
 
+**Windows sistem tepsisi (tray):** `dragnetd`'yi arka planda yönetmek için:
+
+```bash
+cargo run -p dragnet-tray
+```
+
+Tepsi simgesine tıkla → **Taramayı Başlat/Durdur**, canlı durum (indekslenen/bilinen),
+**Ayarları Düzenle**, **Windows'ta Başlangıçta Başlat**, **Durumu Tarayıcıda Aç**, **Çıkış**.
+Tray, `dragnetd.exe`'yi ve `dragnetd.toml`'u kendi bulunduğu dizinden yukarı doğru arar
+(dağıtımda üçünü aynı klasöre koyun).
+
 > **İpucu:** Pasif hasat verimi, sabit ve **yönlendirilmiş (port-forward)** bir UDP
 > portuyla belirgin artar (`HarvesterConfig.port`). NAT arkasında da çalışır ama
 > gelen `get_peers` trafiği daha azdır.
@@ -182,6 +193,7 @@ dragnet/
 │  ├─ dragnet-store/   # SQLite + FTS5 kalıcılık ve arama indeksi            ✅ Faz 3
 │  └─ dragnet-api/     # axum HTTP arama API                                 ✅ Faz 4
 ├─ bin/dragnetd/       # her şeyi birleştiren daemon                         ✅ Faz 5
+├─ bin/dragnet-tray/   # Windows sistem tepsisi kontrolcüsü (daemon yönetimi) ✅
 ├─ plugins/qbittorrent/
 │  ├─ dragnet.py       # nova3 arama plugin'i                                ✅ Faz 6
 │  └─ test_dragnet.py  # plugin için offline testler

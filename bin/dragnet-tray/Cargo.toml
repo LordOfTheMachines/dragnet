@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dragnet-tray"
+path = "src/main.rs"
+
+[dependencies]
+tao = "0.36.0"
+tray-icon = "0.24.2"
+winreg = "0.56.0"

@@ -62,6 +62,8 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
   plugin'i kurmasıyla tamamlanır — otomasyonla test edilemez.
 
 ## Faz 7+ — Olgunlaştırma (opsiyonel)
+- [x] Windows sistem tepsisi (tray) kontrolcüsü — `bin/dragnet-tray` (Başlat/Durdur,
+      canlı durum, ayarlar, başlangıçta başlat)
 - [ ] Web arayüzü (magneticow benzeri gözat/ara)
 - [ ] İçerik filtreleme katmanı (engel listeleri)
 - [ ] BitTorrent v2 (SHA-256 infohash)
