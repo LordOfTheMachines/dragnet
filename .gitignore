@@ -31,3 +31,6 @@ dragnet-app.log
 
 # Tauri otomatik üretilen
 /bin/dragnet-app/gen/
+
+# AI çalışma dosyası — GitHuba girmez
+CLAUDE.md
