@@ -28,3 +28,6 @@ Thumbs.db
 # dragnet-app yerel dosyaları
 dragnet-settings.json
 dragnet-app.log
+
+# Tauri otomatik üretilen
+/bin/dragnet-app/gen/
