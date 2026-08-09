@@ -10,7 +10,9 @@
 
 use std::str::FromStr;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::{Row, SqlitePool};
 use tracing::debug;
 
@@ -94,8 +96,13 @@ pub struct Store {
 impl Store {
     /// Bir dosya yolundan depo açar (yoksa oluşturur) ve şemayı hazırlar.
     pub async fn open(path: &str) -> Result<Self, StoreError> {
+        // PRAGMA'lar connect options'ta: her havuz bağlantısı bunları devralır
+        // (migrate tek bağlantıda çalıştığından PRAGMA-per-query etkisiz kalırdı).
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))?
             .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .foreign_keys(true)
             .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().max_connections(5).connect_with(opts).await?;
         let store = Self { pool };
@@ -106,7 +113,7 @@ impl Store {
     /// Test için paylaşımlı bellek-içi (in-memory) depo.
     pub async fn in_memory() -> Result<Self, StoreError> {
         // max_connections(1): bellek-içi DB tek bağlantıya bağlıdır.
-        let opts = SqliteConnectOptions::from_str("sqlite::memory:")?;
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
         let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await?;
         let store = Self { pool };
         store.migrate().await?;
@@ -115,11 +122,7 @@ impl Store {
 
     /// Şemayı oluşturur (idempotent — `IF NOT EXISTS`).
     async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::query("PRAGMA journal_mode=WAL;").execute(&self.pool).await.ok();
-        // WAL + NORMAL: her commit'te fsync yok (yalnız son işlem güç kesintisinde
-        // kaybolabilir, bozulma olmaz). Sighting yazma yolu için büyük kazanç.
-        sqlx::query("PRAGMA synchronous=NORMAL;").execute(&self.pool).await.ok();
-        sqlx::query("PRAGMA foreign_keys=ON;").execute(&self.pool).await?;
+        // journal_mode/synchronous/foreign_keys artık connect options'ta (her bağlantı).
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS torrents (
                 infohash        TEXT PRIMARY KEY,

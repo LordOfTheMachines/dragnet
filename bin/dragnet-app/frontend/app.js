@@ -41,7 +41,7 @@ function rowsHtml(items) {
   if (!items.length) return `<tr><td colspan="5" class="muted">Henüz veri yok — tarama sürdükçe dolar</td></tr>`;
   return items.map((r) => `
     <tr>
-      <td class="name" title="${esc(r.name)}">${esc(r.name)}</td>
+      <td class="name" title="${escAttr(r.name)}">${esc(r.name)}</td>
       <td>${catChip(r.category)}</td>
       <td class="r num">${humanSize(r.size)}</td>
       <td class="r num">${peerCell(r.peers)}</td>
@@ -170,7 +170,7 @@ $("search-form").addEventListener("submit", async (e) => {
     $("search-empty").classList.toggle("hidden", rows.length > 0);
     $("tbl-results").innerHTML = rows.map((x) => `
       <tr>
-        <td class="name" title="${esc(x.name)}">${esc(x.name)}</td>
+        <td class="name" title="${escAttr(x.name)}">${esc(x.name)}</td>
         <td>${catChip(x.category)}</td>
         <td class="r num">${humanSize(x.size)}</td>
         <td class="r num">${peerCell(x.peers)}</td>

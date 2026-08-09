@@ -186,6 +186,9 @@ struct Shared {
     dedup: Mutex<RecentSet>,
     stats: Arc<Stats>,
     sink: mpsc::Sender<InfoHash>,
+    /// Giden yanıtlar (ping/find_node/get_peers ack) — ayrı gönderici task drenajlar,
+    /// böylece yanıt gönderimi paket ALIMINI bloklamaz (yük altında UDP kaybını azaltır).
+    reply_tx: mpsc::Sender<(Vec<u8>, SocketAddrV4)>,
     node_queue_capacity: usize,
     txid: AtomicU32,
 }
@@ -245,6 +248,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     info!(%local_addr, "dragnet-dht dinliyor");
 
     let (tx, rx) = mpsc::channel(config.channel_capacity);
+    let (reply_tx, reply_rx) = mpsc::channel::<(Vec<u8>, SocketAddrV4)>(512);
     let stats = Arc::new(Stats::default());
 
     let shared = Arc::new(Shared {
@@ -255,6 +259,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         dedup: Mutex::new(RecentSet::new(config.dedup_capacity)),
         stats: Arc::clone(&stats),
         sink: tx,
+        reply_tx,
         node_queue_capacity: config.node_queue_capacity,
         txid: AtomicU32::new(0),
     });
@@ -264,6 +269,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
 
     let tasks = vec![
         tokio::spawn(recv_loop(Arc::clone(&shared))),
+        tokio::spawn(reply_loop(Arc::clone(&shared), reply_rx)),
         tokio::spawn(crawl_loop(Arc::clone(&shared), config.clone())),
         tokio::spawn(rotate_loop(Arc::clone(&shared), config.id_rotation)),
     ];
@@ -318,6 +324,14 @@ async fn recv_loop(shared: Arc<Shared>) {
     }
 }
 
+/// Giden yanıt kuyruğunu drenajlayan ayrı görev — gönderim gecikmesi recv_loop'u
+/// bloklamaz (aynı sokette eşzamanlı send/recv güvenlidir).
+async fn reply_loop(shared: Arc<Shared>, mut rx: mpsc::Receiver<(Vec<u8>, SocketAddrV4)>) {
+    while let Some((pkt, addr)) = rx.recv().await {
+        let _ = shared.socket.send_to(&pkt, addr).await;
+    }
+}
+
 /// Tek bir gelen paketi işler: infohash hasat eder ve gerektiğinde yanıt yollar.
 async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
     let msg = match krpc::parse(data) {
@@ -350,7 +364,9 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 }
             };
             if let Some(pkt) = reply {
-                let _ = shared.socket.send_to(&pkt, from).await;
+                // Gönderimi kuyruğa koy (bloklamadan); reply_loop drenajlar.
+                // Kuyruk doluysa yanıtı düşür (backpressure) — recv asla bloklanmaz.
+                let _ = shared.reply_tx.try_send((pkt, from));
             }
         }
         Message::Response(r) => {

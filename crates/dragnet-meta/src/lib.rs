@@ -156,6 +156,12 @@ pub fn parse_info_dict(
 ) -> Result<TorrentRecord, PeerError> {
     use serde_bencode::value::Value;
 
+    // Güvenilmeyen: saldırgan infohash=SHA1(M) seçip derin iç içe M sunabilir; SHA-1
+    // doğrulaması geçse bile serde'ye vermeden ÖNCE derinlik/sınır doğrula (stack overflow
+    // → süreç abort önlenir). Metadata tek bir info sözlüğüdür → tüm tamponu kaplamalı.
+    if dragnet_core::bencode_value_len(info_bytes) != Some(info_bytes.len()) {
+        return Err(PeerError::Bencode);
+    }
     let value: Value = serde_bencode::from_bytes(info_bytes).map_err(|_| PeerError::Bencode)?;
     let Value::Dict(dict) = value else {
         return Err(PeerError::BadInfoDict("info bir sözlük değil"));
@@ -189,7 +195,7 @@ pub fn parse_info_dict(
                 }
                 _ => return Err(PeerError::BadInfoDict("files.path")),
             }
-            total += size;
+            total = total.saturating_add(size);
             files.push(TorrentFile {
                 path: parts.join("/"),
                 size,

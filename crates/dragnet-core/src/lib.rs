@@ -228,6 +228,67 @@ fn has_episode(s: &str) -> bool {
     false
 }
 
+/// İç içe bencode kaplarında azami özyineleme derinliği. Kötü niyetli uzak
+/// düğüm/peer'in derin iç içe `d`/`l` göndererek stack overflow (→ süreç abort)
+/// tetiklemesini önler. serde_bencode'un kendi derinlik sınırı YOKTUR, bu yüzden
+/// güvenilmeyen bencode `serde_bencode::from_bytes`'a verilmeden ÖNCE bununla
+/// doğrulanmalıdır.
+pub const MAX_BENCODE_DEPTH: usize = 100;
+
+/// `b[0..]` konumundaki ilk tam bencode değerinin bayt uzunluğunu döner.
+/// Derinlik sınırlı ve string uzunlukları sınır-kontrollüdür (güvenilmeyen veri).
+/// `None` = bozuk, çok derin ya da sınır dışı → çağıran veriyi reddetmeli.
+pub fn bencode_value_len(b: &[u8]) -> Option<usize> {
+    fn scan(b: &[u8], i: usize, depth: usize) -> Option<usize> {
+        if depth > MAX_BENCODE_DEPTH {
+            return None;
+        }
+        match b.get(i)? {
+            b'i' => {
+                let mut j = i + 1;
+                while *b.get(j)? != b'e' {
+                    j += 1;
+                }
+                Some(j + 1)
+            }
+            b'l' | b'd' => {
+                let mut j = i + 1;
+                loop {
+                    if *b.get(j)? == b'e' {
+                        return Some(j + 1);
+                    }
+                    j = scan(b, j, depth + 1)?;
+                }
+            }
+            b'0'..=b'9' => {
+                let mut j = i;
+                let mut len = 0usize;
+                while b.get(j)?.is_ascii_digit() {
+                    len = len.checked_mul(10)?.checked_add((b[j] - b'0') as usize)?;
+                    j += 1;
+                }
+                if *b.get(j)? != b':' {
+                    return None;
+                }
+                j += 1;
+                let end = j.checked_add(len)?;
+                if end > b.len() {
+                    return None;
+                }
+                Some(end)
+            }
+            _ => None,
+        }
+    }
+    scan(b, 0, 0)
+}
+
+/// Bir bencode tamponunun `serde_bencode`'a güvenle verilebilecek kadar sığ ve
+/// sınır-içi olup olmadığını kontrol eder (derinlik/uzunluk saldırılarına karşı).
+pub fn bencode_is_safe(b: &[u8]) -> bool {
+    bencode_value_len(b).is_some()
+}
+
 fn hex_val(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),

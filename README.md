@@ -196,7 +196,6 @@ dragnet/
 ├─ bin/dragnetd/       # başsız daemon (çekirdeğin ince sarmalayıcısı)           ✅ Faz 5
 ├─ bin/dragnet-app/    # Tauri masaüstü uygulaması: tray+dashboard+arama (tek exe) ✅ Faz B
 ├─ bin/dragnet-sign/   # oto-güncelleme ed25519 imza aracı                        ✅
-├─ bin/dragnet-tray/   # hafif native tray (dragnet-app'e alternatif)             ✅
 ├─ plugins/qbittorrent/
 │  ├─ dragnet.py       # nova3 arama plugin'i                                ✅ Faz 6
 │  └─ test_dragnet.py  # plugin için offline testler

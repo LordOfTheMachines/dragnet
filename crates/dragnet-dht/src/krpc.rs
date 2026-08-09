@@ -60,6 +60,9 @@ pub enum Message {
 
 /// Ham UDP yükünü bir [`Message`]'a çözer. Bozuk/ilgisiz paketlerde `None`.
 pub fn parse(buf: &[u8]) -> Option<Message> {
+    // Ham UDP (güvenilmez): serde_bencode'a vermeden derinlik/sınır doğrula —
+    // derin iç içe bir paket serde özyinelemesini stack overflow'a sürükleyebilir.
+    dragnet_core::bencode_value_len(buf)?;
     let value: Value = serde_bencode::from_bytes(buf).ok()?;
     let dict = as_dict(&value)?;
 

@@ -268,59 +268,9 @@ fn push_int(out: &mut Vec<u8>, i: i64) {
     out.push(b'e');
 }
 
-/// İç içe bencode kaplarında azami özyineleme derinliği. Kötü niyetli bir peer'in
-/// derin iç içe `d`/`l` göndererek stack overflow (→ süreç abort) tetiklemesini önler.
-const MAX_BENCODE_DEPTH: usize = 100;
-
-/// `b[0..]` konumundaki ilk tam bencode değerinin bayt uzunluğunu döner.
-/// ut_metadata data mesajında sözlük ile ardından gelen ham parça baytlarını
-/// ayırmak için gerekir. Derinlik sınırlı ve string uzunlukları sınır-kontrollüdür
-/// (güvenilmeyen peer verisi).
-fn bencode_value_len(b: &[u8]) -> Option<usize> {
-    fn scan(b: &[u8], i: usize, depth: usize) -> Option<usize> {
-        if depth > MAX_BENCODE_DEPTH {
-            return None;
-        }
-        match b.get(i)? {
-            b'i' => {
-                let mut j = i + 1;
-                while *b.get(j)? != b'e' {
-                    j += 1;
-                }
-                Some(j + 1)
-            }
-            b'l' | b'd' => {
-                let mut j = i + 1;
-                loop {
-                    if *b.get(j)? == b'e' {
-                        return Some(j + 1);
-                    }
-                    j = scan(b, j, depth + 1)?;
-                }
-            }
-            b'0'..=b'9' => {
-                let mut j = i;
-                let mut len = 0usize;
-                while b.get(j)?.is_ascii_digit() {
-                    len = len.checked_mul(10)?.checked_add((b[j] - b'0') as usize)?;
-                    j += 1;
-                }
-                if *b.get(j)? != b':' {
-                    return None;
-                }
-                j += 1;
-                // Bildirilen uzunluk tampon sınırını aşıyorsa reddet (slice paniği önlenir).
-                let end = j.checked_add(len)?;
-                if end > b.len() {
-                    return None;
-                }
-                Some(end)
-            }
-            _ => None,
-        }
-    }
-    scan(b, 0, 0)
-}
+// Bencode güvenlik doğrulaması (derinlik/uzunluk sınırlı) dragnet-core'da paylaşılır:
+// dragnet_core::bencode_value_len. serde_bencode'a güvenilmeyen veri vermeden önce çağrılır.
+use dragnet_core::bencode_value_len;
 
 /// Extended handshake sözlüğünden `(m.ut_metadata, metadata_size)` çıkarır.
 fn parse_extended_handshake(v: &serde_bencode::value::Value) -> Option<(u8, i64)> {
