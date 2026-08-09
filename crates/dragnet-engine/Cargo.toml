@@ -10,7 +10,6 @@ dragnet-core = { path = "../dragnet-core" }
 dragnet-dht = { path = "../dragnet-dht" }
 dragnet-meta = { path = "../dragnet-meta" }
 dragnet-store = { path = "../dragnet-store" }
-dragnet-api = { path = "../dragnet-api" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

@@ -38,8 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = Engine::start(EngineConfig {
         db_path: cfg.db_path.clone(),
-        api_bind,
-        api_token: cfg.api_token.clone(),
         harvester_port: cfg.harvester_port,
         harvester_max_queries_per_sec: cfg.harvester_max_queries_per_sec,
         fetch_workers: cfg.fetch_workers,
@@ -48,6 +46,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await?;
     info!(addr = %engine.harvester_addr(), "boru hattı çalışıyor (Ctrl+C ile durur)");
+
+    // Arama API'si çekirdekten AYRI (uzun ömürlü) — indeks deposuna karşı sunar.
+    {
+        let api_cfg = dragnet_api::ApiConfig {
+            bind: api_bind,
+            token: cfg.api_token.clone(),
+            ..Default::default()
+        };
+        let api_store = engine.store();
+        tokio::spawn(async move {
+            if let Err(e) = dragnet_api::serve(api_cfg, api_store).await {
+                tracing::error!(error = %e, "API sunucusu durdu");
+            }
+        });
+    }
 
     // Periyodik durum logu + zarif kapanış.
     let mut ticker = tokio::time::interval(Duration::from_secs(30));

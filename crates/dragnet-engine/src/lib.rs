@@ -15,7 +15,6 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use dragnet_api::ApiConfig;
 use dragnet_core::InfoHash;
 use dragnet_dht::{HarvesterConfig, StatsSnapshot};
 use dragnet_meta::{FetchConfig, MetadataFetcher};
@@ -24,11 +23,12 @@ use dragnet_store::Store;
 pub use dragnet_store::TorrentSummary;
 
 /// Çekirdek yapılandırması (figment/dosya bağımlılığı yok; çağıran doldurur).
+/// Çekirdek yapılandırması. API sunucusu ARTIK çekirdekte DEĞİL — tarama durunca
+/// (Engine drop) arama API'sinin de düşmesini önlemek için çağıran (daemon/app)
+/// API'yi ayrı ve uzun-ömürlü çalıştırır (`Engine::store()`'a karşı).
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub db_path: String,
-    pub api_bind: SocketAddr,
-    pub api_token: Option<String>,
     pub harvester_port: u16,
     pub harvester_max_queries_per_sec: f64,
     pub fetch_workers: usize,
@@ -40,8 +40,6 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             db_path: "dragnet.db".to_string(),
-            api_bind: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            api_token: None,
             harvester_port: 0,
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 2,
@@ -100,20 +98,8 @@ impl Engine {
 
         let mut tasks = Vec::new();
 
-        // Arama API'si.
-        {
-            let api_cfg = ApiConfig {
-                bind: config.api_bind,
-                token: config.api_token.clone(),
-                ..Default::default()
-            };
-            let api_store = store.clone();
-            tasks.push(tokio::spawn(async move {
-                if let Err(e) = dragnet_api::serve(api_cfg, api_store).await {
-                    error!(error = %e, "API sunucusu durdu");
-                }
-            }));
-        }
+        // NOT: Arama API'si burada DEĞİL — çağıran (daemon/app) ayrı ve uzun-ömürlü
+        // çalıştırır, böylece tarama durunca arama erişimi kesilmez.
 
         // Şema-öncesi indekslenmiş kayıtların kategorilerini bir kez düzelt (arka planda).
         {

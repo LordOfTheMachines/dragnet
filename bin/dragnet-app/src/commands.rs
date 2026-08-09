@@ -80,7 +80,7 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
     // BEP-51 örnek/sn (delta).
     let samples = harvester.as_ref().map(|h| h.samples_seen).unwrap_or(0);
     let sample_rate = {
-        let mut prev = state.rate_prev.lock().unwrap();
+        let mut prev = state.rate_prev.lock().unwrap_or_else(|p| p.into_inner());
         let dt = prev.1.elapsed().as_secs_f64();
         let rate = if dt > 0.1 && samples >= prev.0 {
             (samples - prev.0) as f64 / dt
@@ -185,8 +185,8 @@ pub async fn start_scan(state: State<'_, AppState>) -> Result<Value, String> {
     let mut guard = state.engine.lock().await;
     if guard.is_none() {
         let cfg = {
-            let s = state.settings.lock().unwrap();
-            s.to_engine_config()?
+            let s = state.settings.lock().unwrap_or_else(|p| p.into_inner());
+            s.to_engine_config(state.db_path.clone())
         };
         let engine = Engine::start(cfg).await.map_err(|e| e.to_string())?;
         *guard = Some(engine);
@@ -205,7 +205,7 @@ pub async fn stop_scan(state: State<'_, AppState>) -> Result<Value, String> {
 /// Mevcut ayarlar.
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Value {
-    let s = state.settings.lock().unwrap().clone();
+    let s = state.settings.lock().unwrap_or_else(|p| p.into_inner()).clone();
     serde_json::to_value(s).unwrap_or(Value::Null)
 }
 
@@ -213,18 +213,21 @@ pub fn get_settings(state: State<'_, AppState>) -> Value {
 #[tauri::command]
 pub async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<Value, String> {
     {
-        let mut s = state.settings.lock().unwrap();
+        let mut s = state.settings.lock().unwrap_or_else(|p| p.into_inner());
         *s = settings.clone();
         let _ = s.save();
     }
     let _ = autostart::set(settings.autostart);
 
-    // Tarama açıksa yeni ayarlarla yeniden başlat.
+    // Tarama açıksa yeni ayarlarla yeniden başlat. Yeni çekirdeği bırakmadan-ÖNCE
+    // ayağa kaldır: başlatma başarısız olursa eski tarama çalışmaya devam etsin.
+    // (db_path açılışta sabitlendiğinden değişse bile etkin depo tutarlı kalır;
+    // yeni yol yeniden başlatınca geçerli olur.)
     let mut guard = state.engine.lock().await;
     if guard.is_some() {
-        *guard = None;
-        let cfg = settings.to_engine_config()?;
-        *guard = Some(Engine::start(cfg).await.map_err(|e| e.to_string())?);
+        let cfg = settings.to_engine_config(state.db_path.clone());
+        let new_engine = Engine::start(cfg).await.map_err(|e| e.to_string())?;
+        *guard = Some(new_engine); // eski çekirdek burada drop olur
     }
     Ok(json!({ "ok": true }))
 }
@@ -233,7 +236,7 @@ pub async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Res
 #[tauri::command]
 pub fn set_autostart(state: State<'_, AppState>, enabled: bool) -> Result<Value, String> {
     autostart::set(enabled).map_err(|e| e.to_string())?;
-    let mut s = state.settings.lock().unwrap();
+    let mut s = state.settings.lock().unwrap_or_else(|p| p.into_inner());
     s.autostart = enabled;
     let _ = s.save();
     Ok(json!({ "autostart": enabled }))

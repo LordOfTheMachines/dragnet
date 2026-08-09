@@ -65,8 +65,15 @@ impl Settings {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(settings_path(), json)
+        // Serileştirme hatasında dosyayı ASLA boş yazma (veri kaybı) — hatayı yükselt.
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // Atomik yaz: önce geçici dosyaya, sonra yerine taşı — yarıda kesilirse
+        // eski ayar bozulmadan kalır.
+        let path = settings_path();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &path)
     }
 
     /// Göreli db yolunu exe dizinine göre mutlaklaştırır.
@@ -79,21 +86,25 @@ impl Settings {
         }
     }
 
-    pub fn to_engine_config(&self) -> Result<EngineConfig, String> {
-        let api_bind = self
-            .api_bind
-            .parse()
-            .map_err(|e| format!("geçersiz api_bind: {e}"))?;
-        Ok(EngineConfig {
-            db_path: self.resolved_db_path(),
-            api_bind,
-            api_token: None,
+    /// Motor yapılandırması. `db_path` çağırandan gelir (uygulama açılışta sabitler;
+    /// çalışan depo/API ile tutarlılığı korur — ayar değişse de yeniden başlatana dek
+    /// aynı dosyaya yazılır). API alanı YOK: arama API'si çekirdekten ayrı sunulur.
+    pub fn to_engine_config(&self, db_path: String) -> EngineConfig {
+        EngineConfig {
+            db_path,
             harvester_port: self.harvester_port,
             harvester_max_queries_per_sec: self.harvester_max_queries_per_sec,
             fetch_workers: self.fetch_workers,
             fetch_peer_concurrency: self.fetch_peer_concurrency,
             seed_infohashes: self.seed_infohashes.clone(),
-        })
+        }
+    }
+
+    /// Arama API'sinin dinleyeceği adresi çözer.
+    pub fn api_addr(&self) -> Result<std::net::SocketAddr, String> {
+        self.api_bind
+            .parse()
+            .map_err(|e| format!("geçersiz api_bind: {e}"))
     }
 
     /// Sorgu deposu için mutlak db yolu.

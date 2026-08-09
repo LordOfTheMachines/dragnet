@@ -28,6 +28,10 @@ use settings::Settings;
 pub struct AppState {
     /// Sorgu deposu — tarama açık/kapalı fark etmeksizin okunur.
     pub store: Store,
+    /// Açılışta sabitlenen etkin db yolu. Ayarlarda db_path değişse bile çalışan
+    /// depo/motor/API tutarlı kalsın diye motor hep buna yazar; yeni yol yeniden
+    /// başlatınca geçerli olur.
+    pub db_path: String,
     /// Çalışan çekirdek (tarama açıkken `Some`).
     pub engine: TokioMutex<Option<Engine>>,
     pub settings: StdMutex<Settings>,
@@ -46,20 +50,42 @@ fn main() {
         .setup(|app| {
             let settings = Settings::load();
 
-            let store = tauri::async_runtime::block_on(Store::open(&settings.db_path_abs()))?;
+            // Etkin db yolunu açılışta sabitle (depo + API + motor aynı dosyayı görsün).
+            let db_path = settings.db_path_abs();
+            let store = match tauri::async_runtime::block_on(Store::open(&db_path)) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, path = %db_path, "veritabanı açılamadı");
+                    return Err(format!("Veritabanı açılamadı ({db_path}): {e}").into());
+                }
+            };
 
-            // İsteğe göre taramayı açılışta başlat.
-            let engine = if settings.auto_scan {
-                match settings.to_engine_config() {
-                    Ok(cfg) => match tauri::async_runtime::block_on(Engine::start(cfg)) {
-                        Ok(e) => Some(e),
-                        Err(e) => {
-                            tracing::error!(error = %e, "çekirdek başlatılamadı");
-                            None
+            // Arama API'si çekirdekten AYRI, uzun ömürlü: tarama durdurulsa bile
+            // (qBittorrent eklentisi dahil) arama erişimi kesilmez. Depoya karşı sunar.
+            match settings.api_addr() {
+                Ok(bind) => {
+                    let api_cfg = dragnet_api::ApiConfig {
+                        bind,
+                        token: None,
+                        ..Default::default()
+                    };
+                    let api_store = store.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = dragnet_api::serve(api_cfg, api_store).await {
+                            tracing::error!(error = %e, "API sunucusu durdu");
                         }
-                    },
+                    });
+                }
+                Err(e) => tracing::error!(error = %e, "API başlatılamadı (geçersiz adres)"),
+            }
+
+            // İsteğe göre taramayı açılışta başlat (etkin db yoluna).
+            let engine = if settings.auto_scan {
+                let cfg = settings.to_engine_config(db_path.clone());
+                match tauri::async_runtime::block_on(Engine::start(cfg)) {
+                    Ok(e) => Some(e),
                     Err(e) => {
-                        tracing::error!(error = %e, "geçersiz ayar, tarama başlatılmadı");
+                        tracing::error!(error = %e, "çekirdek başlatılamadı");
                         None
                     }
                 }
@@ -69,6 +95,7 @@ fn main() {
 
             app.manage(AppState {
                 store,
+                db_path,
                 engine: TokioMutex::new(engine),
                 settings: StdMutex::new(settings),
                 rate_prev: StdMutex::new((0, Instant::now())),

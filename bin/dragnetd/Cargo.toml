@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 dragnet-engine = { path = "../../crates/dragnet-engine" }
+dragnet-api = { path = "../../crates/dragnet-api" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
