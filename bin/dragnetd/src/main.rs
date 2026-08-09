@@ -58,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Metadata fetcher (kendi DHT istemcisi).
     let fetcher = Arc::new(MetadataFetcher::new(FetchConfig {
         concurrency: cfg.fetch_peer_concurrency,
+        // Ölü torrent'lerde işçiyi çabuk serbest bırak → daha çok isim çekilir.
+        peer_gather_timeout: std::time::Duration::from_secs(12),
         ..Default::default()
     })?);
 
@@ -151,11 +153,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     debug!(error = %e, "record_sighting hatası");
                 }
 
-                // Zaten metadata'sı varsa yeniden çekme.
-                match store.has_metadata(infohash).await {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(e) => { debug!(error = %e, "has_metadata hatası"); continue; }
+                // Yalnız durumu 'pending' ise çek (fetched/unreachable'ı atla).
+                match store.needs_metadata(infohash).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => { debug!(error = %e, "needs_metadata hatası"); continue; }
                 }
 
                 // Havuzda yer varsa çekimi başlat; yoksa düşür (backpressure).
@@ -182,7 +184,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Bir infohash için metadata çeker ve başarılıysa depoya yazar.
+/// Bir infohash için metadata çeker ve başarılıysa depoya yazar; başarısızsa
+/// `unreachable` işaretler (tekrar tekrar denenmesin diye).
 async fn fetch_and_store(infohash: InfoHash, store: &Store, fetcher: &MetadataFetcher) {
     match fetcher.fetch(infohash).await {
         Ok(record) => {
@@ -195,7 +198,10 @@ async fn fetch_and_store(infohash: InfoHash, store: &Store, fetcher: &MetadataFe
                 Err(e) => error!(error = %e, "torrent yazılamadı"),
             }
         }
-        Err(e) => debug!(infohash = %infohash, error = %e, "metadata çekilemedi"),
+        Err(e) => {
+            debug!(infohash = %infohash, error = %e, "metadata çekilemedi");
+            let _ = store.mark_unreachable(infohash).await;
+        }
     }
 }
 

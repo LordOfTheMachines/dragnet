@@ -226,8 +226,21 @@ impl Shared {
 /// Bir hasatçı başlatır. Soketi bağlar (bağlama hataları burada yüzeye çıkar),
 /// arka plan görevlerini spawn eder ve infohash alıcısını döndürür.
 pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
-    let bind = SocketAddrV4::new(config.bind_address, config.port);
-    let socket = UdpSocket::bind(bind).await?;
+    // İstenen porta bağlan; başka uygulama (ör. qBittorrent 6881) tutuyorsa
+    // çökmek yerine efemer porta düş.
+    let socket = match UdpSocket::bind(SocketAddrV4::new(config.bind_address, config.port)).await {
+        Ok(s) => s,
+        Err(e) if config.port != 0 => {
+            warn!(
+                port = config.port,
+                error = %e,
+                "harvester portu bağlanamadı (başka uygulama kullanıyor olabilir, \
+                 örn. qBittorrent 6881); efemer porta düşülüyor"
+            );
+            UdpSocket::bind(SocketAddrV4::new(config.bind_address, 0)).await?
+        }
+        Err(e) => return Err(e),
+    };
     let local_addr = socket.local_addr()?;
     info!(%local_addr, "dragnet-dht dinliyor");
 

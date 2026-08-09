@@ -271,6 +271,31 @@ impl Store {
         Ok(row.is_some())
     }
 
+    /// Bu infohash metadata çekmeyi hak ediyor mu? Yalnız durumu `pending` ise `true`
+    /// (yani `fetched` ya da `unreachable` değilse). Ölü torrent'leri tekrar denememek için.
+    pub async fn needs_metadata(&self, infohash: InfoHash) -> Result<bool, StoreError> {
+        let hex = infohash.to_hex();
+        let row = sqlx::query("SELECT metadata_status FROM torrents WHERE infohash = ?1")
+            .bind(&hex)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(matches!(row, Some(r) if r.get::<String, _>("metadata_status") == STATUS_PENDING))
+    }
+
+    /// Metadata çekilemeyen bir infohash'i `unreachable` işaretler (yalnız `pending` ise).
+    /// Böylece gelecekte tekrar tekrar denenmez.
+    pub async fn mark_unreachable(&self, infohash: InfoHash) -> Result<(), StoreError> {
+        let hex = infohash.to_hex();
+        sqlx::query(
+            "UPDATE torrents SET metadata_status = 'unreachable' \
+             WHERE infohash = ?1 AND metadata_status = 'pending'",
+        )
+        .bind(&hex)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Metadata'sı çekilmiş (aranabilir) torrent sayısı.
     pub async fn count_fetched(&self) -> Result<i64, StoreError> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'fetched'")
