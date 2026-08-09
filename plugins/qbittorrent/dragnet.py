@@ -1,29 +1,34 @@
-# VERSION: 0.1.0
+# VERSION: 0.2.0
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# Dragnet — qBittorrent nova3 arama plugin'i (TASLAK)
+# Dragnet — qBittorrent nova3 arama plugin'i
 #
 # Bu dosya qBittorrent'in arama-plugin (nova3 `engines/`) dizinine kopyalanır.
 # qBittorrent kaynağına HİÇBİR değişiklik gerektirmez. Yerelde çalışan Dragnet
-# HTTP API'sine sorgu atar ve sonuçları nova3 sözleşmesine göre yazdırır.
+# HTTP API'sine (dragnetd) sorgu atar ve sonuçları nova3 sözleşmesine göre yazdırır.
 #
-# Sözleşme ayrıntısı: docs/INTEGRATION.md
+# Kurulum ve sözleşme ayrıntısı: docs/INTEGRATION.md
 
 import json
+import os
 import urllib.parse
 import urllib.request
 
 # nova3 çalışma zamanında bu modülleri sağlar (qBittorrent plugin dizininde bulunur).
 from novaprinter import prettyPrinter  # type: ignore
 
+# Dragnet API kök adresi. Öncelik: DRAGNET_API_URL ortam değişkeni, yoksa varsayılan.
+# dragnetd'nin api_bind değeriyle eşleşmelidir.
+_BASE_URL = os.environ.get("DRAGNET_API_URL", "http://127.0.0.1:8080")
+
 
 class dragnet:
     """Dragnet DHT indeksine karşı arama yapan nova3 motoru."""
 
-    # Yerelde çalışan Dragnet API'si. Gerekirse değiştirin.
-    base_url: str = "http://127.0.0.1:8080"
+    # Yerelde çalışan Dragnet API'si. Gerekirse doğrudan burayı düzenleyin.
+    base_url: str = _BASE_URL
 
-    url: str = "http://127.0.0.1:8080"
+    url: str = _BASE_URL
     name: str = "Dragnet"
     supported_categories: dict[str, str] = {
         "all": "all",

@@ -59,14 +59,37 @@ koyar. Bu, qBittorrent'in `.torrent` dosyası indirmesine bile gerek bırakmaz.
 
 `base_url` plugin dosyasının başında yapılandırılır (varsayılan `http://127.0.0.1:8080`).
 
-## 4. Kurulum (kullanıcı adımları — Faz 6'da netleşecek)
+## 4. Kurulum (kullanıcı adımları)
 
-1. `dragnetd` servisini çalıştır (indeks üretir + API sunar).
-2. `plugins/qbittorrent/dragnet.py` dosyasını qBittorrent'in arama-plugin dizinine kopyala
-   (qBittorrent > Arama > Arama motorları > Plugin ekle, ya da doğrudan `engines/` klasörüne).
-3. qBittorrent arama sekmesinde "Dragnet" motoru görünür ve sorgulanabilir.
+1. **Servisi çalıştır.** İndeks üretir ve API'yi sunar:
+   ```bash
+   cargo run -p dragnetd            # ya da derlenmiş: ./target/release/dragnetd
+   ```
+   Varsayılan API adresi `http://127.0.0.1:8080`'dir. Değiştirmek için `dragnetd.toml`
+   (`api_bind`) veya `DRAGNET_API_BIND=...` ortam değişkeni kullanın
+   (bkz. `dragnetd.example.toml`).
+
+2. **Plugin'i qBittorrent'e ekle.** İki yol:
+   - **GUI:** qBittorrent > *Arama* sekmesi > *Arama eklentileri…* > *Yeni eklenti kur* >
+     *Yerel dosya* > `plugins/qbittorrent/dragnet.py` dosyasını seç.
+   - **Elle:** dosyayı qBittorrent'in nova3 `engines/` dizinine kopyala
+     (Windows'ta genelde `%LOCALAPPDATA%\qBittorrent\nova3\engines\`).
+
+3. **Adresi eşle (gerekirse).** dragnetd varsayılan `127.0.0.1:8080` dışında bir adreste
+   çalışıyorsa, `dragnet.py` içindeki `base_url`'i düzenle **veya** qBittorrent'i
+   `DRAGNET_API_URL=http://host:port` ortam değişkeniyle başlat.
+
+4. qBittorrent arama sekmesinde **"Dragnet"** motoru görünür ve sorgulanabilir.
 
 > qBittorrent'in kendi kaynağı hiçbir aşamada değiştirilmez. Bağ tamamen plugin + HTTP API'dir.
+
+### Plugin testi (qBittorrent olmadan)
+
+Plugin'in API sözleşmesine uyumu, sahte bir HTTP sunucusuna karşı offline test edilebilir:
+
+```bash
+py plugins/qbittorrent/test_dragnet.py      # veya: python -m unittest ...
+```
 
 ## 5. Neden bu sınır doğru
 

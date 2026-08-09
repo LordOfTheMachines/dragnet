@@ -52,11 +52,14 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
 - **DoD:** ✅ Tek komutla uçtan uca servis; canlı smoke test: seed Sintel çekildi →
   `/healthz`=ok, `/stats`={fetched:1}, `/search?q=sintel` doğru sonucu döndürdü.
 
-## Faz 6 — qBittorrent Entegrasyonu
-- [ ] `dragnet.py` plugin'ini gerçek API'ye bağla
-- [ ] qBittorrent'e kurulum talimatı (kullanıcı plugin'i nova3 dizinine kopyalar)
-- [ ] Uçtan uca test: qBittorrent arama kutusundan Dragnet sonuçları
-- **DoD:** qBittorrent arama sekmesinde Dragnet motoru sonuç veriyor.
+## Faz 6 — qBittorrent Entegrasyonu — TAMAMLANDI (GUI adımı kullanıcıda)
+- [x] `dragnet.py` plugin'ini gerçek API'ye bağla (JSON → prettyPrinter magnet satırı)
+- [x] Kurulum talimatı (INTEGRATION.md §4: GUI + elle kurulum, adres eşleme)
+- [x] Plugin↔API sözleşme testi: canlı API'ye karşı doğrulandı + offline unit test
+      (`plugins/qbittorrent/test_dragnet.py`, 2 test)
+- **DoD:** ✅ Plugin canlı `/search`'ten gelen sonucu doğru magnet satırına çeviriyor.
+  Son adım (qBittorrent GUI'sinde motoru görmek) kullanıcının kendi qBittorrent'inde
+  plugin'i kurmasıyla tamamlanır — otomasyonla test edilemez.
 
 ## Faz 7+ — Olgunlaştırma (opsiyonel)
 - [ ] Web arayüzü (magneticow benzeri gözat/ara)
