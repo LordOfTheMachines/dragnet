@@ -57,12 +57,35 @@ struct AppState {
 struct SearchParams {
     #[serde(default)]
     q: String,
-    /// Kategori (şimdilik yok sayılır; kategorilendirme Faz 7+).
+    /// Kategori (qBittorrent kategorisi ya da doğrudan bizim kategori adımız).
     #[serde(default)]
-    #[allow(dead_code)]
     cat: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Yalnız canlı (peer > 0) sonuçlar.
+    #[serde(default)]
+    alive: Option<bool>,
+    /// Yetişkin içeriği gizle.
+    #[serde(default)]
+    hide_adult: Option<bool>,
+}
+
+/// qBittorrent kategorisini (ya da bizim adımızı) iç kategoriye eşler. `all`/boş → None.
+fn map_category(cat: Option<String>) -> Option<String> {
+    let c = cat?.to_lowercase();
+    let mapped = match c.as_str() {
+        "all" | "" => return None,
+        "movies" | "tv" | "anime" | "video" => "video",
+        "music" | "audio" => "audio",
+        "games" | "game" => "game",
+        "software" | "apps" => "software",
+        "books" | "book" => "book",
+        "adult" => "adult",
+        "archive" => "archive",
+        "other" => "other",
+        _ => return None,
+    };
+    Some(mapped.to_string())
 }
 
 /// Tek bir arama sonucu (INTEGRATION.md JSON sözleşmesi).
@@ -147,7 +170,12 @@ async fn search(
         .min(state.max_limit)
         .max(1);
 
-    match state.store.search(&params.q, limit as i64, &Filter::default()).await {
+    let filter = Filter {
+        only_alive: params.alive.unwrap_or(false),
+        hide_adult: params.hide_adult.unwrap_or(false),
+        category: map_category(params.cat),
+    };
+    match state.store.search(&params.q, limit as i64, &filter).await {
         Ok(rows) => {
             let results = rows
                 .into_iter()

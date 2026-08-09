@@ -63,11 +63,6 @@ impl MetadataFetcher {
         Ok(Self { dht, config })
     }
 
-    /// Test/enjeksiyon için hazır bir DHT istemcisiyle oluşturur.
-    pub fn with_dht(dht: mainline::async_dht::AsyncDht, config: FetchConfig) -> Self {
-        Self { dht, config }
-    }
-
     /// Bir infohash için metadata çeker ve `TorrentRecord` döner.
     pub async fn fetch(&self, infohash: InfoHash) -> Result<TorrentRecord, FetchError> {
         let peers = self.gather_peers(infohash).await;
@@ -78,57 +73,44 @@ impl MetadataFetcher {
         self.try_peers(infohash, peers).await
     }
 
-    /// DHT'den bu infohash için peer toplar (zaman/sayı sınırıyla).
-    async fn gather_peers(&self, infohash: InfoHash) -> Vec<SocketAddrV4> {
+    /// DHT `get_peers` akışını verilen süre/sayı sınırına kadar benzersiz peer'lere
+    /// boşaltır. Hem metadata için peer bulma hem canlılık scrape'i bunu kullanır.
+    async fn drain_peers(
+        &self,
+        infohash: InfoHash,
+        deadline: Instant,
+        max: usize,
+    ) -> HashSet<SocketAddrV4> {
         let id = Id::from_bytes(infohash.as_bytes()).expect("infohash 20 bayttır");
         let mut stream = self.dht.get_peers(id);
-        let mut peers = Vec::new();
         let mut seen = HashSet::new();
-        let deadline = Instant::now() + self.config.peer_gather_timeout;
-
         loop {
             let now = Instant::now();
-            if now >= deadline || peers.len() >= self.config.max_peers {
+            if now >= deadline || seen.len() >= max {
                 break;
             }
             match tokio::time::timeout(deadline - now, stream.next()).await {
-                Ok(Some(batch)) => {
-                    for p in batch {
-                        if seen.insert(p) {
-                            peers.push(p);
-                        }
-                    }
-                }
-                Ok(None) => break, // sorgu bitti
-                Err(_) => break,   // zaman aşımı
+                Ok(Some(batch)) => seen.extend(batch),
+                Ok(None) | Err(_) => break, // sorgu bitti ya da zaman aşımı
             }
         }
-        peers
+        seen
+    }
+
+    /// DHT'den bu infohash için peer toplar (zaman/sayı sınırıyla).
+    async fn gather_peers(&self, infohash: InfoHash) -> Vec<SocketAddrV4> {
+        let deadline = Instant::now() + self.config.peer_gather_timeout;
+        self.drain_peers(infohash, deadline, self.config.max_peers)
+            .await
+            .into_iter()
+            .collect()
     }
 
     /// Canlılık scrape'i: bir infohash için DHT'de `get_peers` yapıp benzersiz
     /// peer sayısını döner (canlı seeder/leecher vekili). Metadata çekmez.
     pub async fn count_peers(&self, infohash: InfoHash, timeout: Duration) -> usize {
-        let id = Id::from_bytes(infohash.as_bytes()).expect("infohash 20 bayttır");
-        let mut stream = self.dht.get_peers(id);
-        let mut seen = HashSet::new();
         let deadline = Instant::now() + timeout;
-        loop {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            match tokio::time::timeout(deadline - now, stream.next()).await {
-                Ok(Some(batch)) => {
-                    for p in batch {
-                        seen.insert(p);
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-        seen.len()
+        self.drain_peers(infohash, deadline, usize::MAX).await.len()
     }
 
     /// Peer'leri sınırlı eşzamanlılıkla dener; ilk başarılı metadata kazanır.
@@ -142,18 +124,17 @@ impl MetadataFetcher {
         let mut tried = 0;
 
         for chunk in peers.chunks(self.config.concurrency.max(1)) {
-            let mut handles = Vec::with_capacity(chunk.len());
+            // JoinSet: en hızlı biten peer kazanır; başarıda kalan kardeş task'ler
+            // set drop olunca otomatik iptal edilir (sokak/task sızıntısı yok).
+            let mut set = tokio::task::JoinSet::new();
             for &addr in chunk {
-                handles.push(tokio::spawn(async move {
-                    wire::fetch_info_from_peer(addr, ih_bytes, per_peer).await
-                }));
+                set.spawn(async move { wire::fetch_info_from_peer(addr, ih_bytes, per_peer).await });
             }
-
-            for handle in handles {
+            while let Some(res) = set.join_next().await {
                 tried += 1;
-                match handle.await {
+                match res {
                     Ok(Ok(info_bytes)) => match parse_info_dict(&info_bytes, infohash) {
-                        Ok(record) => return Ok(record),
+                        Ok(record) => return Ok(record), // set drop → kalanlar iptal
                         Err(e) => debug!(error = %e, "info sözlüğü çözülemedi"),
                     },
                     Ok(Err(e)) => debug!(error = %e, "peer denemesi başarısız"),

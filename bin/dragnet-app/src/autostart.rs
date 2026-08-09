@@ -15,5 +15,6 @@ pub fn set(enabled: bool) -> std::io::Result<()> {
         return Ok(());
     }
     let exe = std::env::current_exe()?;
-    run.set_value(VALUE_NAME, &format!("\"{}\"", exe.display()))
+    // --silent: başlangıçta pencere açmadan tepside başlar (main.rs bu bayrağı okur).
+    run.set_value(VALUE_NAME, &format!("\"{}\" --silent", exe.display()))
 }

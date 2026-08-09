@@ -21,7 +21,7 @@ use dragnet_dht::{HarvesterConfig, StatsSnapshot};
 use dragnet_meta::{FetchConfig, MetadataFetcher};
 use dragnet_store::Store;
 
-pub use dragnet_store::{Store as IndexStore, TorrentSummary};
+pub use dragnet_store::TorrentSummary;
 
 /// Çekirdek yapılandırması (figment/dosya bağımlılığı yok; çağıran doldurur).
 #[derive(Debug, Clone)]
@@ -180,16 +180,17 @@ impl Engine {
             let sem = Arc::clone(&sem);
             tasks.push(tokio::spawn(async move {
                 while let Some(infohash) = harvester.infohashes.recv().await {
-                    if let Err(e) = store.record_sighting(infohash, now_unix()).await {
-                        debug!(error = %e, "record_sighting hatası");
-                    }
-                    match store.needs_metadata(infohash).await {
-                        Ok(true) => {}
-                        Ok(false) => continue,
+                    // Tek yazma: sighting kaydeder ve güncel durumu döner (ayrı SELECT yok).
+                    let status = match store.record_sighting(infohash, now_unix()).await {
+                        Ok(s) => s,
                         Err(e) => {
-                            debug!(error = %e, "needs_metadata hatası");
+                            debug!(error = %e, "record_sighting hatası");
                             continue;
                         }
+                    };
+                    // Yalnız 'pending' ise çek (fetched/unreachable atlanır).
+                    if status != "pending" {
+                        continue;
                     }
                     if let Ok(permit) = Arc::clone(&sem).try_acquire_owned() {
                         let store = store.clone();

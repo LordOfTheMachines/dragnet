@@ -223,6 +223,10 @@ async fn read_extended_handshake(stream: &mut TcpStream) -> Result<(u8, i64), Pe
         if id != MSG_EXTENDED || payload.is_empty() || payload[0] != EXT_HANDSHAKE_ID {
             continue; // bitfield/have vb. ya da diğer extended mesajlar.
         }
+        // serde_bencode'a vermeden önce derinlik/sınır doğrula (özyineleme DoS savunması).
+        if bencode_value_len(&payload[1..]).is_none() {
+            return Err(PeerError::Bencode);
+        }
         let dict: serde_bencode::value::Value =
             serde_bencode::from_bytes(&payload[1..]).map_err(|_| PeerError::Bencode)?;
         return parse_extended_handshake(&dict).ok_or(PeerError::NoUtMetadata);
@@ -264,11 +268,19 @@ fn push_int(out: &mut Vec<u8>, i: i64) {
     out.push(b'e');
 }
 
+/// İç içe bencode kaplarında azami özyineleme derinliği. Kötü niyetli bir peer'in
+/// derin iç içe `d`/`l` göndererek stack overflow (→ süreç abort) tetiklemesini önler.
+const MAX_BENCODE_DEPTH: usize = 100;
+
 /// `b[0..]` konumundaki ilk tam bencode değerinin bayt uzunluğunu döner.
 /// ut_metadata data mesajında sözlük ile ardından gelen ham parça baytlarını
-/// ayırmak için gerekir.
+/// ayırmak için gerekir. Derinlik sınırlı ve string uzunlukları sınır-kontrollüdür
+/// (güvenilmeyen peer verisi).
 fn bencode_value_len(b: &[u8]) -> Option<usize> {
-    fn scan(b: &[u8], i: usize) -> Option<usize> {
+    fn scan(b: &[u8], i: usize, depth: usize) -> Option<usize> {
+        if depth > MAX_BENCODE_DEPTH {
+            return None;
+        }
         match b.get(i)? {
             b'i' => {
                 let mut j = i + 1;
@@ -283,7 +295,7 @@ fn bencode_value_len(b: &[u8]) -> Option<usize> {
                     if *b.get(j)? == b'e' {
                         return Some(j + 1);
                     }
-                    j = scan(b, j)?;
+                    j = scan(b, j, depth + 1)?;
                 }
             }
             b'0'..=b'9' => {
@@ -297,12 +309,17 @@ fn bencode_value_len(b: &[u8]) -> Option<usize> {
                     return None;
                 }
                 j += 1;
-                Some(j + len)
+                // Bildirilen uzunluk tampon sınırını aşıyorsa reddet (slice paniği önlenir).
+                let end = j.checked_add(len)?;
+                if end > b.len() {
+                    return None;
+                }
+                Some(end)
             }
             _ => None,
         }
     }
-    scan(b, 0)
+    scan(b, 0, 0)
 }
 
 /// Extended handshake sözlüğünden `(m.ut_metadata, metadata_size)` çıkarır.
@@ -373,6 +390,19 @@ mod tests {
         let n = bencode_value_len(d).unwrap();
         assert_eq!(&d[..n], b"d8:msg_typei1e5:piecei0e10:total_sizei20ee");
         assert_eq!(&d[n..], b"RAWDATA");
+    }
+
+    #[test]
+    fn bencode_rejects_hostile_input() {
+        // Derin iç içe kaplar → None (stack overflow tetiklenmez).
+        let deep = vec![b'l'; 5000];
+        assert_eq!(bencode_value_len(&deep), None);
+        // Aşırı/uydurma string uzunluğu → None (slice paniği yok).
+        assert_eq!(bencode_value_len(b"999:ab"), None);
+        assert_eq!(bencode_value_len(b"18446744073709551616:x"), None); // usize taşması
+        // Geçerli girdi hâlâ çalışır.
+        assert_eq!(bencode_value_len(b"4:spam"), Some(6));
+        assert_eq!(bencode_value_len(b"ld1:ai1eee"), Some(10));
     }
 
     #[test]

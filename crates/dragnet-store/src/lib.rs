@@ -16,10 +16,6 @@ use tracing::debug;
 
 use dragnet_core::{InfoHash, TorrentFile, TorrentRecord};
 
-/// Metadata çekim durumu.
-pub const STATUS_PENDING: &str = "pending";
-pub const STATUS_FETCHED: &str = "fetched";
-
 /// Depolama hataları.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -120,6 +116,9 @@ impl Store {
     /// Şemayı oluşturur (idempotent — `IF NOT EXISTS`).
     async fn migrate(&self) -> Result<(), StoreError> {
         sqlx::query("PRAGMA journal_mode=WAL;").execute(&self.pool).await.ok();
+        // WAL + NORMAL: her commit'te fsync yok (yalnız son işlem güç kesintisinde
+        // kaybolabilir, bozulma olmaz). Sighting yazma yolu için büyük kazanç.
+        sqlx::query("PRAGMA synchronous=NORMAL;").execute(&self.pool).await.ok();
         sqlx::query("PRAGMA foreign_keys=ON;").execute(&self.pool).await?;
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS torrents (
@@ -151,6 +150,17 @@ impl Store {
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_category ON torrents(category);")
             .execute(&self.pool)
             .await;
+        // Sık kullanılan ORDER BY / WHERE / canlılık kolonları için (kısmi) indexler —
+        // aksi halde her dashboard/liveness sorgusu tam tablo taraması yapar.
+        for idx in [
+            "CREATE INDEX IF NOT EXISTS idx_status ON torrents(metadata_status);",
+            "CREATE INDEX IF NOT EXISTS idx_last_check ON torrents(last_check) WHERE metadata_status='fetched';",
+            "CREATE INDEX IF NOT EXISTS idx_seen ON torrents(seen_count DESC) WHERE metadata_status='fetched';",
+            "CREATE INDEX IF NOT EXISTS idx_size ON torrents(total_size DESC) WHERE metadata_status='fetched';",
+            "CREATE INDEX IF NOT EXISTS idx_first_seen ON torrents(first_seen) WHERE metadata_status='fetched';",
+        ] {
+            let _ = sqlx::query(idx).execute(&self.pool).await;
+        }
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS files (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,22 +184,25 @@ impl Store {
 
     /// Harvester yolu: bir infohash görüldüğünde çağrılır. Yeniyse `pending` bir
     /// iskelet satır açar; varsa `last_seen`/`seen_count` günceller. Metadata'ya
-    /// dokunmaz (FTS'e yazmaz).
-    pub async fn record_sighting(&self, infohash: InfoHash, ts: i64) -> Result<(), StoreError> {
+    /// dokunmaz (FTS'e yazmaz). Kaydın **güncel metadata_status**'ünü döner —
+    /// böylece çağıran ayrı bir SELECT yapmadan çekim gerekip gerekmediğini bilir
+    /// (`'pending'` = çekilmeli).
+    pub async fn record_sighting(&self, infohash: InfoHash, ts: i64) -> Result<String, StoreError> {
         let hex = infohash.to_hex();
-        sqlx::query(
+        let row = sqlx::query(
             r#"INSERT INTO torrents
                  (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status)
                VALUES (?1, '', 0, 0, ?2, ?2, 1, 'pending')
                ON CONFLICT(infohash) DO UPDATE SET
                  last_seen  = MAX(last_seen, excluded.last_seen),
-                 seen_count = seen_count + 1;"#,
+                 seen_count = seen_count + 1
+               RETURNING metadata_status;"#,
         )
         .bind(&hex)
         .bind(ts)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(())
+        Ok(row.get::<String, _>("metadata_status"))
     }
 
     /// Fetcher yolu: çekilmiş metadata'yı yazar. Idempotent — tekrar çağrılırsa
@@ -495,45 +508,6 @@ impl Store {
         rows.iter().map(row_to_summary).collect()
     }
 
-    /// Günlük keşif sayıları (grafik için): `(gün_başlangıcı_unix, sayı)`, en yeni önce.
-    pub async fn daily_discovery(&self, days: i64) -> Result<Vec<(i64, i64)>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT (first_seen / 86400) * 86400 AS day, COUNT(*) AS n
-               FROM torrents WHERE metadata_status = 'fetched'
-              GROUP BY day ORDER BY day DESC LIMIT ?1",
-        )
-        .bind(days.max(1))
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .iter()
-            .map(|r| (r.get::<i64, _>("day"), r.get::<i64, _>("n")))
-            .collect())
-    }
-
-    /// Bu infohash için metadata çekilmiş mi? (Dosyaları yüklemeden hızlı kontrol.)
-    pub async fn has_metadata(&self, infohash: InfoHash) -> Result<bool, StoreError> {
-        let hex = infohash.to_hex();
-        let row = sqlx::query(
-            "SELECT 1 AS x FROM torrents WHERE infohash = ?1 AND metadata_status = 'fetched'",
-        )
-        .bind(&hex)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.is_some())
-    }
-
-    /// Bu infohash metadata çekmeyi hak ediyor mu? Yalnız durumu `pending` ise `true`
-    /// (yani `fetched` ya da `unreachable` değilse). Ölü torrent'leri tekrar denememek için.
-    pub async fn needs_metadata(&self, infohash: InfoHash) -> Result<bool, StoreError> {
-        let hex = infohash.to_hex();
-        let row = sqlx::query("SELECT metadata_status FROM torrents WHERE infohash = ?1")
-            .bind(&hex)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(matches!(row, Some(r) if r.get::<String, _>("metadata_status") == STATUS_PENDING))
-    }
-
     /// Metadata çekilemeyen bir infohash'i `unreachable` işaretler (yalnız `pending` ise).
     /// Böylece gelecekte tekrar tekrar denenmez.
     pub async fn mark_unreachable(&self, infohash: InfoHash) -> Result<(), StoreError> {
@@ -684,20 +658,19 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let ih = InfoHash::from_hex("3333333333333333333333333333333333333333").unwrap();
 
-        // Önce harvester görür (pending, aranamaz).
-        store.record_sighting(ih, 500).await.unwrap();
-        store.record_sighting(ih, 600).await.unwrap();
+        // Önce harvester görür (pending, aranamaz). record_sighting durumu döner.
+        assert_eq!(store.record_sighting(ih, 500).await.unwrap(), "pending");
+        assert_eq!(store.record_sighting(ih, 600).await.unwrap(), "pending");
         assert_eq!(store.count_total().await.unwrap(), 1);
         assert_eq!(store.count_fetched().await.unwrap(), 0);
-        assert!(!store.has_metadata(ih).await.unwrap());
         assert!(store.search("slackware", 10, &Filter::default()).await.unwrap().is_empty());
 
-        // Sonra metadata gelir → aranabilir olur.
+        // Sonra metadata gelir → aranabilir olur, sighting artık 'fetched' döner.
         let mut rec = record("3333333333333333333333333333333333333333", "Slackware 15", 900);
         rec.first_seen = 500;
         store.upsert_torrent(&rec).await.unwrap();
         assert_eq!(store.count_fetched().await.unwrap(), 1);
-        assert!(store.has_metadata(ih).await.unwrap());
+        assert_eq!(store.record_sighting(ih, 950).await.unwrap(), "fetched");
         let hits = store.search("slackware", 10, &Filter::default()).await.unwrap();
         assert_eq!(hits.len(), 1);
         // first_seen, ilk görülme (500) korunmalı.
@@ -747,10 +720,9 @@ mod tests {
         assert_eq!(by_size[0].name, "Beta"); // en büyük önce
 
         assert_eq!(store.recent(10, &Filter::default()).await.unwrap().len(), 2);
-        // Günlük keşif: iki kayıt da aynı gün → tek kova, sayı 2 (upsert seen_count'u
-        // artırdığı için not: her ikisi de bir kez upsert edildi).
-        let daily = store.daily_discovery(30).await.unwrap();
-        assert_eq!(daily.iter().map(|(_, n)| n).sum::<i64>(), 2);
+        // Saatlik keşif: iki kayıt aynı saatte → toplam 2.
+        let hourly = store.hourly_discovery(48).await.unwrap();
+        assert_eq!(hourly.iter().map(|(_, n)| n).sum::<i64>(), 2);
     }
 
     #[test]
