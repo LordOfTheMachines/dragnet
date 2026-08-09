@@ -100,10 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let known = store.count_total().await.unwrap_or(0);
                 info!(
                     dht_gonderilen = s.queries_sent,
-                    dht_ogrenilen_dugum = s.nodes_learned,
                     dht_yanit = s.responses_seen,
-                    hasat_get_peers = s.get_peers_seen,
+                    bep51_ornek = s.samples_seen,
                     hasat_benzersiz = s.unique_infohashes,
+                    hasat_get_peers = s.get_peers_seen,
                     indekslenen = indexed,
                     bilinen = known,
                     "durum"

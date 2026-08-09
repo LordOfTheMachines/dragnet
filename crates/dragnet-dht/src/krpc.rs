@@ -44,6 +44,9 @@ pub struct Query {
 pub struct Response {
     /// `nodes` alanından çözülen compact IPv4 düğümleri (crawl'ı yaymak için).
     pub nodes: Vec<SocketAddrV4>,
+    /// BEP-51 `samples`: düğümün aktif olarak sunduğu infohash örnekleri.
+    /// Aktif (NAT-dostu) hasadın ana kaynağı.
+    pub samples: Vec<[u8; ID_LEN]>,
 }
 
 /// Çözülmüş bir KRPC mesajı.
@@ -81,12 +84,16 @@ pub fn parse(buf: &[u8]) -> Option<Message> {
             }))
         }
         Some(b"r") => {
-            let nodes = dict_get(dict, b"r")
-                .and_then(as_dict)
+            let r = dict_get(dict, b"r").and_then(as_dict);
+            let nodes = r
                 .and_then(|r| dict_bytes(r, b"nodes"))
                 .map(parse_compact_nodes)
                 .unwrap_or_default();
-            Some(Message::Response(Response { nodes }))
+            let samples = r
+                .and_then(|r| dict_bytes(r, b"samples"))
+                .map(parse_samples)
+                .unwrap_or_default();
+            Some(Message::Response(Response { nodes, samples }))
         }
         _ => Some(Message::Other),
     }
@@ -103,6 +110,14 @@ fn parse_compact_nodes(bytes: &[u8]) -> Vec<SocketAddrV4> {
         })
         // 0 portlu / 0.0.0.0 düğümleri ele.
         .filter(|a| a.port() != 0 && !a.ip().is_unspecified())
+        .collect()
+}
+
+/// BEP-51 `samples` (`20*N` bayt) → infohash listesi.
+fn parse_samples(bytes: &[u8]) -> Vec<[u8; ID_LEN]> {
+    bytes
+        .chunks_exact(ID_LEN)
+        .filter_map(|c| c.try_into().ok())
         .collect()
 }
 
@@ -145,12 +160,16 @@ fn push_str(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(s);
 }
 
-/// `find_node` sorgusu üretir. Aktif crawl'da düğümlere gönderilir; bizi
-/// yönlendirme tablolarına ekletir ve karşılığında yeni düğümler öğreniriz.
+/// `{id, target}` argümanlı bir sorgu üretir (`find_node` / `sample_infohashes`).
 ///
 /// Sözlük anahtar sırası: `a < q < t < y`; `a` içinde `id < target`.
-pub fn build_find_node(txid: &[u8], our_id: &[u8; ID_LEN], target: &[u8; ID_LEN]) -> Vec<u8> {
-    let mut o = Vec::with_capacity(80);
+fn build_target_query(
+    method: &[u8],
+    txid: &[u8],
+    our_id: &[u8; ID_LEN],
+    target: &[u8; ID_LEN],
+) -> Vec<u8> {
+    let mut o = Vec::with_capacity(96);
     o.push(b'd');
     push_str(&mut o, b"a");
     o.push(b'd');
@@ -160,13 +179,28 @@ pub fn build_find_node(txid: &[u8], our_id: &[u8; ID_LEN], target: &[u8; ID_LEN]
     push_str(&mut o, target);
     o.push(b'e');
     push_str(&mut o, b"q");
-    push_str(&mut o, b"find_node");
+    push_str(&mut o, method);
     push_str(&mut o, b"t");
     push_str(&mut o, txid);
     push_str(&mut o, b"y");
     push_str(&mut o, b"q");
     o.push(b'e');
     o
+}
+
+/// `find_node` sorgusu — bizi yönlendirme tablolarına ekletir, yeni düğüm öğrenir.
+pub fn build_find_node(txid: &[u8], our_id: &[u8; ID_LEN], target: &[u8; ID_LEN]) -> Vec<u8> {
+    build_target_query(b"find_node", txid, our_id, target)
+}
+
+/// BEP-51 `sample_infohashes` sorgusu — düğümün sunduğu infohash örneklerini ister.
+/// Aktif ve NAT-dostu hasadın temelidir (yanıt `samples` + `nodes` içerir).
+pub fn build_sample_infohashes(
+    txid: &[u8],
+    our_id: &[u8; ID_LEN],
+    target: &[u8; ID_LEN],
+) -> Vec<u8> {
+    build_target_query(b"sample_infohashes", txid, our_id, target)
 }
 
 /// Yalnızca `id` içeren yanıt (`ping`, `announce_peer` ve `find_node` için yeterli ack).
@@ -315,6 +349,54 @@ mod tests {
         ] {
             let _v: Value = serde_bencode::from_bytes(&pkt).expect("geçerli bencode");
             assert!(matches!(parse(&pkt), Some(Message::Response(_))));
+        }
+    }
+
+    #[test]
+    fn built_sample_infohashes_is_valid_query() {
+        let pkt = build_sample_infohashes(b"si", &[0x55u8; ID_LEN], &[0x66u8; ID_LEN]);
+        let _v: Value = serde_bencode::from_bytes(&pkt).expect("geçerli bencode");
+        // Kendi sorgumuz; metod bizim Method enum'umuzda olmadığından Other olarak çözülür.
+        assert!(matches!(parse(&pkt), Some(Message::Query(_))));
+    }
+
+    #[test]
+    fn parse_response_decodes_bep51_samples() {
+        // İki infohash örneği + bir compact düğüm içeren yanıt.
+        let mut samples = Vec::new();
+        samples.extend_from_slice(&[0xaau8; ID_LEN]);
+        samples.extend_from_slice(&[0xbbu8; ID_LEN]);
+        let mut nodes = Vec::new();
+        nodes.extend_from_slice(&[7u8; ID_LEN]);
+        nodes.extend_from_slice(&[9, 9, 9, 9]);
+        nodes.extend_from_slice(&6881u16.to_be_bytes());
+
+        let mut pkt = Vec::new();
+        pkt.push(b'd');
+        push_str(&mut pkt, b"r");
+        pkt.push(b'd');
+        push_str(&mut pkt, b"id");
+        push_str(&mut pkt, &[1u8; ID_LEN]);
+        push_str(&mut pkt, b"nodes");
+        push_str(&mut pkt, &nodes);
+        push_str(&mut pkt, b"samples");
+        push_str(&mut pkt, &samples);
+        pkt.push(b'e');
+        push_str(&mut pkt, b"t");
+        push_str(&mut pkt, b"si");
+        push_str(&mut pkt, b"y");
+        push_str(&mut pkt, b"r");
+        pkt.push(b'e');
+
+        match parse(&pkt).expect("parse") {
+            Message::Response(r) => {
+                assert_eq!(r.samples.len(), 2);
+                assert_eq!(r.samples[0], [0xaau8; ID_LEN]);
+                assert_eq!(r.samples[1], [0xbbu8; ID_LEN]);
+                assert_eq!(r.nodes.len(), 1);
+                assert_eq!(r.nodes[0], "9.9.9.9:6881".parse().unwrap());
+            }
+            other => panic!("beklenen Response, gelen {other:?}"),
         }
     }
 }

@@ -105,6 +105,8 @@ pub struct Stats {
     /// Kanal dolu olduğu için düşürülen benzersiz infohash sayısı (backpressure).
     pub dropped_channel_full: AtomicU64,
     pub queries_sent: AtomicU64,
+    /// BEP-51 `sample_infohashes` yanıtlarından gelen toplam infohash örneği sayısı.
+    pub samples_seen: AtomicU64,
     /// Rate-limit nedeniyle gönderilemeyen crawl sorgusu sayısı.
     pub rate_limited: AtomicU64,
 }
@@ -122,6 +124,7 @@ pub struct StatsSnapshot {
     pub duplicates: u64,
     pub dropped_channel_full: u64,
     pub queries_sent: u64,
+    pub samples_seen: u64,
     pub rate_limited: u64,
 }
 
@@ -138,6 +141,7 @@ impl Stats {
             duplicates: self.duplicates.load(Ordering::Relaxed),
             dropped_channel_full: self.dropped_channel_full.load(Ordering::Relaxed),
             queries_sent: self.queries_sent.load(Ordering::Relaxed),
+            samples_seen: self.samples_seen.load(Ordering::Relaxed),
             rate_limited: self.rate_limited.load(Ordering::Relaxed),
         }
     }
@@ -342,6 +346,16 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 let added = shared.push_nodes(&r.nodes);
                 shared.stats.nodes_learned.fetch_add(added, Ordering::Relaxed);
             }
+            // BEP-51: yanıttaki infohash örneklerini aktif olarak hasat et.
+            if !r.samples.is_empty() {
+                shared
+                    .stats
+                    .samples_seen
+                    .fetch_add(r.samples.len() as u64, Ordering::Relaxed);
+                for ih in r.samples {
+                    harvest(shared, ih);
+                }
+            }
         }
         Message::Other => {}
     }
@@ -371,9 +385,14 @@ fn harvest(shared: &Shared, ih: [u8; ID_LEN]) {
     }
 }
 
-/// Aktif crawl: rate-limit dahilinde kuyruktaki düğümlere `find_node` yollar.
+/// Aktif crawl: rate-limit dahilinde kuyruktaki düğümlere sorgu yollar.
+///
+/// Çoğunlukla BEP-51 `sample_infohashes` (aktif, NAT-dostu hasat; yanıt hem
+/// infohash örnekleri hem yeni düğümler verir), her 4 sorgudan biri `find_node`
+/// (BEP-51 desteklemeyen düğümlerden de düğüm keşfini garantilemek için).
 async fn crawl_loop(shared: Arc<Shared>, config: HarvesterConfig) {
     let mut ticker = tokio::time::interval(config.crawl_tick);
+    let mut counter: u32 = 0;
     loop {
         ticker.tick().await;
 
@@ -396,12 +415,17 @@ async fn crawl_loop(shared: Arc<Shared>, config: HarvesterConfig) {
             }
             let target = *Id::random().as_bytes();
             let txid = shared.next_txid();
-            let pkt = krpc::build_find_node(&txid, &our_id, &target);
+            counter = counter.wrapping_add(1);
+            let pkt = if counter.is_multiple_of(4) {
+                krpc::build_find_node(&txid, &our_id, &target)
+            } else {
+                krpc::build_sample_infohashes(&txid, &our_id, &target)
+            };
             match shared.socket.send_to(&pkt, node).await {
                 Ok(_) => {
                     shared.stats.queries_sent.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(e) => debug!(error = %e, "find_node gönderilemedi"),
+                Err(e) => debug!(error = %e, "crawl sorgusu gönderilemedi"),
             }
         }
     }
