@@ -11,7 +11,7 @@
 [![Ticari lisans](https://img.shields.io/badge/ticari%20lisans-mevcut-success.svg)](COMMERCIAL-LICENSE.md)
 [![Dil: Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Runtime: tokio](https://img.shields.io/badge/async-tokio-informational.svg)](https://tokio.rs)
-[![Durum](https://img.shields.io/badge/durum-Faz%201%20tamamland%C4%B1-brightgreen.svg)](docs/ROADMAP.md)
+[![Durum](https://img.shields.io/badge/durum-MVP%20çalışıyor%20·%20Faz%201–6-brightgreen.svg)](docs/ROADMAP.md)
 
 </div>
 
@@ -55,15 +55,15 @@ flowchart LR
     subgraph DRAGNET["Dragnet servisi · Rust / tokio"]
         direction LR
         DHT["<b>dragnet-dht</b><br/>DHT harvester<br/>Faz 1 ✅"]:::done
-        META["<b>dragnet-meta</b><br/>metadata fetcher<br/>BEP-9 · Faz 2"]:::todo
-        STORE["<b>dragnet-store</b><br/>SQLite + FTS5<br/>Faz 3"]:::todo
-        API["<b>dragnet-api</b><br/>HTTP arama API<br/>axum · Faz 4"]:::todo
+        META["<b>dragnet-meta</b><br/>metadata fetcher<br/>BEP-9 · Faz 2 ✅"]:::done
+        STORE["<b>dragnet-store</b><br/>SQLite + FTS5<br/>Faz 3 ✅"]:::done
+        API["<b>dragnet-api</b><br/>HTTP arama API<br/>axum · Faz 4 ✅"]:::done
         DHT -->|"benzersiz infohash<br/>(bounded channel)"| META
         META -->|"TorrentRecord"| STORE
         STORE --> API
     end
 
-    API -->|"GET /search → JSON"| PLUG["qBittorrent<br/>nova3 plugin<br/>Faz 6"]:::todo
+    API -->|"GET /search → JSON"| PLUG["qBittorrent<br/>nova3 plugin<br/>Faz 6 ✅"]:::done
     PLUG --> USER([Kullanıcı])
 
     classDef net fill:#1f6feb,stroke:#1f6feb,color:#fff;
@@ -121,12 +121,12 @@ sorgunun `info_hash`'ini dışa açmıyor (`RequestFilter` yalnız `bool` dönd�
 ```mermaid
 flowchart TD
     F0["Faz 0 · İskele ✅"]:::done --> F1["Faz 1 · DHT Harvester ✅"]:::done
-    F1 --> F2["Faz 2 · Metadata Fetcher (BEP-9)"]:::next
-    F2 --> F3["Faz 3 · Depolama + FTS5"]:::todo
-    F3 --> F4["Faz 4 · Arama API (axum)"]:::todo
-    F4 --> F5["Faz 5 · Daemon"]:::todo
-    F5 --> F6["Faz 6 · qBittorrent Entegrasyonu"]:::todo
-    F6 --> F7["Faz 7+ · Olgunlaştırma"]:::todo
+    F1 --> F2["Faz 2 · Metadata Fetcher (BEP-9) ✅"]:::done
+    F2 --> F3["Faz 3 · Depolama + FTS5 ✅"]:::done
+    F3 --> F4["Faz 4 · Arama API (axum) ✅"]:::done
+    F4 --> F5["Faz 5 · Daemon ✅"]:::done
+    F5 --> F6["Faz 6 · qBittorrent Entegrasyonu ✅"]:::done
+    F6 --> F7["Faz 7+ · Olgunlaştırma"]:::next
 
     classDef done fill:#238636,stroke:#2ea043,color:#fff;
     classDef next fill:#9e6a03,stroke:#d29922,color:#fff;
@@ -144,12 +144,28 @@ Gereksinim: Rust 1.85+ (`rustup`).
 cargo build
 cargo test
 
-# Faz 1 demosu: DHT'den canlı infohash hasat et (birkaç dakikada akmaya başlar)
-cargo run -p dragnet-dht --example harvest
+# Tüm servisi çalıştır: harvester + metadata fetcher + store + arama API tek süreçte
+cargo run -p dragnetd
 ```
 
-`harvest` örneği, hasat edilen infohash'leri ve magnet linklerini terminale basar;
-her 10 saniyede bir özet sayaç satırı yazar. `Ctrl+C` ile durur.
+`dragnetd` çalışırken arama API'si `http://127.0.0.1:8080` adresinde sunulur:
+
+```bash
+curl "http://127.0.0.1:8080/healthz"                 # → ok
+curl "http://127.0.0.1:8080/stats"                   # → {"fetched_torrents":N,"total_infohashes":M}
+curl "http://127.0.0.1:8080/search?q=ubuntu&limit=5" # → {"results":[…]}
+```
+
+Yapılandırma için `dragnetd.example.toml` dosyasına bakın (DB yolu, bind adresi, token,
+`seed_infohashes` ile indeks ısıtma). Ayrı bileşen demoları:
+
+```bash
+# Faz 1: DHT'den canlı infohash hasat et
+cargo run -p dragnet-dht --example harvest
+
+# Faz 2: bilinen bir infohash için metadata çek
+cargo run -p dragnet-meta --example fetch -- 08ada5a7a6183aae1e09d831df6748d566095a10
+```
 
 > **İpucu:** Pasif hasat verimi, sabit ve **yönlendirilmiş (port-forward)** bir UDP
 > portuyla belirgin artar (`HarvesterConfig.port`). NAT arkasında da çalışır ama
@@ -160,10 +176,15 @@ her 10 saniyede bir özet sayaç satırı yazar. `Ctrl+C` ile durur.
 ```
 dragnet/
 ├─ crates/
-│  ├─ dragnet-core/    # paylaşılan tipler (InfoHash, TorrentRecord) — ✅
-│  └─ dragnet-dht/     # DHT harvester (KRPC dinleyici + aktif crawl) — ✅ Faz 1
-├─ bin/                # dragnetd daemon (Faz 5)
-├─ plugins/qbittorrent/dragnet.py   # nova3 arama plugin'i (Faz 6)
+│  ├─ dragnet-core/    # paylaşılan tipler (InfoHash, TorrentRecord)         ✅
+│  ├─ dragnet-dht/     # DHT harvester (KRPC dinleyici + aktif crawl)        ✅ Faz 1
+│  ├─ dragnet-meta/    # metadata fetcher (BEP-3/10/9 peer-wire)             ✅ Faz 2
+│  ├─ dragnet-store/   # SQLite + FTS5 kalıcılık ve arama indeksi            ✅ Faz 3
+│  └─ dragnet-api/     # axum HTTP arama API                                 ✅ Faz 4
+├─ bin/dragnetd/       # her şeyi birleştiren daemon                         ✅ Faz 5
+├─ plugins/qbittorrent/
+│  ├─ dragnet.py       # nova3 arama plugin'i                                ✅ Faz 6
+│  └─ test_dragnet.py  # plugin için offline testler
 └─ docs/               # ARCHITECTURE · ROADMAP · INTEGRATION · LICENSING
 ```
 
