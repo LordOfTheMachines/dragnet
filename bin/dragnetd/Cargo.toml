@@ -10,11 +10,7 @@ name = "dragnetd"
 path = "src/main.rs"
 
 [dependencies]
-dragnet-core = { path = "../../crates/dragnet-core" }
-dragnet-dht = { path = "../../crates/dragnet-dht" }
-dragnet-meta = { path = "../../crates/dragnet-meta" }
-dragnet-store = { path = "../../crates/dragnet-store" }
-dragnet-api = { path = "../../crates/dragnet-api" }
+dragnet-engine = { path = "../../crates/dragnet-engine" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

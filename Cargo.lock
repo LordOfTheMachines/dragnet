@@ -553,6 +553,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dragnet-engine"
+version = "0.0.1"
+dependencies = [
+ "dragnet-api",
+ "dragnet-core",
+ "dragnet-dht",
+ "dragnet-meta",
+ "dragnet-store",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dragnet-meta"
 version = "0.0.1"
 dependencies = [
@@ -591,11 +605,7 @@ dependencies = [
 name = "dragnetd"
 version = "0.0.1"
 dependencies = [
- "dragnet-api",
- "dragnet-core",
- "dragnet-dht",
- "dragnet-meta",
- "dragnet-store",
+ "dragnet-engine",
  "figment",
  "serde",
  "tokio",

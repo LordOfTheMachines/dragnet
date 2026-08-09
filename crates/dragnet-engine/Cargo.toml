@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dragnet-core = { path = "../dragnet-core" }
+dragnet-dht = { path = "../dragnet-dht" }
+dragnet-meta = { path = "../dragnet-meta" }
+dragnet-store = { path = "../dragnet-store" }
+dragnet-api = { path = "../dragnet-api" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
