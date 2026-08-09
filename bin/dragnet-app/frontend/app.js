@@ -70,7 +70,9 @@ async function pollStats() {
     scanning = s.scanning;
     $("t-fetched").textContent = s.fetched.toLocaleString("tr");
     $("t-total").textContent = s.total.toLocaleString("tr");
-    $("t-rate").textContent = s.sample_rate.toLocaleString("tr");
+    // BEP-51 örnekleri patlamalı gelir; anlık ölçüm 0/tavan zıplar → EMA ile yumuşat.
+    pollStats._ema = pollStats._ema == null ? s.sample_rate : 0.7 * pollStats._ema + 0.3 * s.sample_rate;
+    $("t-rate").textContent = Math.round(pollStats._ema).toLocaleString("tr");
     $("t-unique").textContent = s.unique.toLocaleString("tr");
     const pill = $("status-pill");
     pill.textContent = scanning ? "Tarıyor" : "Durdu";
