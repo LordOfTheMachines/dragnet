@@ -84,6 +84,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // Periyodik durum logu (her 30 sn) — DHT'nin canlı olup olmadığını gösterir.
+    // `sent`/`nodes`/`responses` artıyorsa DHT çalışıyor; hepsi 0 ise dış UDP engelli.
+    {
+        let hstats = harvester.stats();
+        let store = store.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let s = hstats.snapshot();
+                let indexed = store.count_fetched().await.unwrap_or(0);
+                let known = store.count_total().await.unwrap_or(0);
+                info!(
+                    dht_gonderilen = s.queries_sent,
+                    dht_ogrenilen_dugum = s.nodes_learned,
+                    dht_yanit = s.responses_seen,
+                    hasat_get_peers = s.get_peers_seen,
+                    hasat_benzersiz = s.unique_infohashes,
+                    indekslenen = indexed,
+                    bilinen = known,
+                    "durum"
+                );
+                if s.queries_sent > 0 && s.responses_seen == 0 && s.nodes_learned == 0 {
+                    warn!(
+                        "DHT'den hiç yanıt yok — dış UDP trafiği engelleniyor olabilir \
+                         (Windows Güvenlik Duvarı'nda dragnetd.exe'ye izin verin)"
+                    );
+                }
+            }
+        });
+    }
+
     // Fetcher havuzu: aynı anda en fazla `fetch_workers` çekim.
     let sem = Arc::new(Semaphore::new(cfg.fetch_workers.max(1)));
 

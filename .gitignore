@@ -11,6 +11,7 @@ Cargo.lock.orig
 
 # Yapılandırma (yerel gizli)
 config.local.toml
+dragnetd.toml
 .env
 
 # Python (plugin geliştirme)
