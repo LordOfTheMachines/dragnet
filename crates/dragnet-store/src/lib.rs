@@ -44,6 +44,49 @@ pub struct TorrentSummary {
     pub peer_count: Option<i64>,
     /// Son canlılık kontrolü zamanı (unix ts, None = hiç).
     pub last_check: Option<i64>,
+    /// İçerik kategorisi (video/audio/software/game/book/adult/archive/other).
+    pub category: String,
+}
+
+/// Arama/liste sonuçlarını süzmek için ölçütler.
+#[derive(Debug, Clone, Default)]
+pub struct Filter {
+    /// Yalnız canlı (peer_count > 0) torrent'ler.
+    pub only_alive: bool,
+    /// Yetişkin içeriği gizle (category != 'adult').
+    pub hide_adult: bool,
+    /// Belirli bir kategoriye sınırla.
+    pub category: Option<String>,
+}
+
+impl Filter {
+    /// Kod-kontrollü boolean koşullarının SQL parçası (`t.` önekiyle).
+    fn bool_sql(&self, prefix: &str) -> String {
+        let mut s = String::new();
+        if self.only_alive {
+            s.push_str(&format!(" AND {prefix}peer_count > 0"));
+        }
+        if self.hide_adult {
+            s.push_str(&format!(" AND {prefix}category != 'adult'"));
+        }
+        s
+    }
+}
+
+/// Ağ/indeks genel görünümü (dashboard analiz paneli).
+#[derive(Debug, Clone)]
+pub struct Overview {
+    pub fetched: i64,
+    pub total_infohashes: i64,
+    pub total_size: i64,
+    pub total_files: i64,
+    /// İndeksteki canlı torrent'lerin toplam peer sayısı (anlık swarm büyüklüğü vekili).
+    pub total_peers: i64,
+    pub alive: i64,
+    pub dead: i64,
+    pub unchecked: i64,
+    /// Kategoriye göre: (kategori, adet, toplam_boyut).
+    pub categories: Vec<(String, i64, i64)>,
 }
 
 /// SQLite tabanlı indeks deposu.
@@ -89,7 +132,8 @@ impl Store {
                 seen_count      INTEGER NOT NULL,
                 metadata_status TEXT NOT NULL DEFAULT 'pending',
                 peer_count      INTEGER DEFAULT NULL,
-                last_check      INTEGER DEFAULT NULL
+                last_check      INTEGER DEFAULT NULL,
+                category        TEXT NOT NULL DEFAULT 'other'
             );"#,
         )
         .execute(&self.pool)
@@ -99,6 +143,12 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE torrents ADD COLUMN last_check INTEGER DEFAULT NULL")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE torrents ADD COLUMN category TEXT NOT NULL DEFAULT 'other'")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_category ON torrents(category);")
             .execute(&self.pool)
             .await;
         sqlx::query(
@@ -150,8 +200,8 @@ impl Store {
 
         sqlx::query(
             r#"INSERT INTO torrents
-                 (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'fetched')
+                 (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status, category)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'fetched', ?8)
                ON CONFLICT(infohash) DO UPDATE SET
                  name            = excluded.name,
                  total_size      = excluded.total_size,
@@ -159,7 +209,8 @@ impl Store {
                  first_seen      = MIN(first_seen, excluded.first_seen),
                  last_seen       = MAX(last_seen, excluded.last_seen),
                  seen_count      = seen_count + 1,
-                 metadata_status = 'fetched';"#,
+                 metadata_status = 'fetched',
+                 category        = excluded.category;"#,
         )
         .bind(&hex)
         .bind(&rec.name)
@@ -168,6 +219,7 @@ impl Store {
         .bind(rec.first_seen)
         .bind(rec.last_seen)
         .bind(rec.seen_count.max(1) as i64)
+        .bind(rec.category())
         .execute(&mut *tx)
         .await?;
 
@@ -235,27 +287,95 @@ impl Store {
         }))
     }
 
-    /// FTS5 üzerinde `name` araması. Popülerliğe (`seen_count`) göre sıralar.
-    pub async fn search(&self, query: &str, limit: i64) -> Result<Vec<TorrentSummary>, StoreError> {
+    /// FTS5 üzerinde `name` araması (filtreyle). Popülerliğe göre sıralar.
+    pub async fn search(
+        &self,
+        query: &str,
+        limit: i64,
+        filter: &Filter,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
         let match_query = to_fts_query(query);
         if match_query.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query(
-            r#"SELECT t.infohash, t.name, t.total_size, t.file_count,
-                      t.seen_count, t.first_seen, t.last_seen, t.peer_count, t.last_check
-                 FROM torrents_fts f
-                 JOIN torrents t ON t.infohash = f.infohash
-                WHERE f.name MATCH ?1 AND t.metadata_status = 'fetched'
-                ORDER BY t.seen_count DESC, t.last_seen DESC
-                LIMIT ?2"#,
+        let has_cat = filter.category.is_some();
+        let sql = format!(
+            "SELECT t.infohash, t.name, t.total_size, t.file_count, t.seen_count,
+                    t.first_seen, t.last_seen, t.peer_count, t.last_check, t.category
+               FROM torrents_fts f JOIN torrents t ON t.infohash = f.infohash
+              WHERE f.name MATCH ?1 AND t.metadata_status = 'fetched'{bools}{cat}
+              ORDER BY t.seen_count DESC, t.last_seen DESC
+              LIMIT ?{lim}",
+            bools = filter.bool_sql("t."),
+            cat = if has_cat { " AND t.category = ?2" } else { "" },
+            lim = if has_cat { "3" } else { "2" },
+        );
+        let mut q = sqlx::query(&sql).bind(&match_query);
+        if let Some(c) = &filter.category {
+            q = q.bind(c.clone());
+        }
+        let rows = q.bind(limit.max(0)).fetch_all(&self.pool).await?;
+        rows.iter().map(row_to_summary).collect()
+    }
+
+    /// İndeks/ağ genel görünümü (analiz paneli için toplu istatistikler).
+    pub async fn overview(&self) -> Result<Overview, StoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n,
+                    COALESCE(SUM(total_size),0) AS size,
+                    COALESCE(SUM(file_count),0) AS files,
+                    COALESCE(SUM(CASE WHEN peer_count>0 THEN peer_count ELSE 0 END),0) AS peers,
+                    COALESCE(SUM(CASE WHEN peer_count>0 THEN 1 ELSE 0 END),0) AS alive,
+                    COALESCE(SUM(CASE WHEN peer_count=0 THEN 1 ELSE 0 END),0) AS dead,
+                    COALESCE(SUM(CASE WHEN last_check IS NULL THEN 1 ELSE 0 END),0) AS unchecked
+               FROM torrents WHERE metadata_status = 'fetched'",
         )
-        .bind(&match_query)
-        .bind(limit.max(0))
+        .fetch_one(&self.pool)
+        .await?;
+        let total_infohashes = self.count_total().await?;
+        let cats = sqlx::query(
+            "SELECT category, COUNT(*) AS n, COALESCE(SUM(total_size),0) AS size
+               FROM torrents WHERE metadata_status = 'fetched'
+              GROUP BY category ORDER BY n DESC",
+        )
         .fetch_all(&self.pool)
         .await?;
+        Ok(Overview {
+            fetched: row.get("n"),
+            total_infohashes,
+            total_size: row.get("size"),
+            total_files: row.get("files"),
+            total_peers: row.get("peers"),
+            alive: row.get("alive"),
+            dead: row.get("dead"),
+            unchecked: row.get("unchecked"),
+            categories: cats
+                .iter()
+                .map(|r| {
+                    (
+                        r.get::<String, _>("category"),
+                        r.get::<i64, _>("n"),
+                        r.get::<i64, _>("size"),
+                    )
+                })
+                .collect(),
+        })
+    }
 
-        rows.iter().map(row_to_summary).collect()
+    /// Saatlik keşif sayıları (grafik için): `(saat_başı_unix, sayı)`, en yeni önce.
+    pub async fn hourly_discovery(&self, hours: i64) -> Result<Vec<(i64, i64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT (first_seen / 3600) * 3600 AS hour, COUNT(*) AS n
+               FROM torrents WHERE metadata_status = 'fetched'
+              GROUP BY hour ORDER BY hour DESC LIMIT ?1",
+        )
+        .bind(hours.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<i64, _>("hour"), r.get::<i64, _>("n")))
+            .collect())
     }
 
     /// Canlılık kontrolü için sıradaki torrent'ler: en eski kontrol edilenler
@@ -278,6 +398,46 @@ impl Store {
         Ok(out)
     }
 
+    /// 'other' kategorili mevcut kayıtları yeniden sınıflandırır (isim + dosyalar).
+    /// Şema eklenmeden önce indekslenmiş torrent'lerin kategorilerini düzeltir.
+    /// Döndürdüğü: güncellenen kayıt sayısı.
+    pub async fn recategorize(&self, limit: i64) -> Result<u64, StoreError> {
+        let rows = sqlx::query(
+            "SELECT infohash, name FROM torrents
+              WHERE metadata_status = 'fetched' AND category = 'other' LIMIT ?1",
+        )
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut updated = 0u64;
+        for r in rows {
+            let hex: String = r.get("infohash");
+            let name: String = r.get("name");
+            let files: Vec<TorrentFile> =
+                sqlx::query("SELECT path, size FROM files WHERE infohash = ?1")
+                    .bind(&hex)
+                    .fetch_all(&self.pool)
+                    .await?
+                    .into_iter()
+                    .map(|f| TorrentFile {
+                        path: f.get::<String, _>("path"),
+                        size: f.get::<i64, _>("size") as u64,
+                    })
+                    .collect();
+            let cat = dragnet_core::categorize(&name, &files);
+            if cat != "other" {
+                sqlx::query("UPDATE torrents SET category = ?2 WHERE infohash = ?1")
+                    .bind(&hex)
+                    .bind(cat)
+                    .execute(&self.pool)
+                    .await?;
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
     /// Bir torrent'in canlı peer sayısını ve kontrol zamanını günceller.
     pub async fn update_liveness(
         &self,
@@ -295,37 +455,43 @@ impl Store {
     }
 
     /// Popülerliğe (`seen_count`) göre en çok görülen torrent'ler (dashboard).
-    pub async fn top_by_seen(&self, limit: i64) -> Result<Vec<TorrentSummary>, StoreError> {
-        self.top_summaries("seen_count", limit).await
+    pub async fn top_by_seen(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.top_summaries("seen_count", limit, filter).await
     }
 
     /// Boyuta göre en büyük torrent'ler (dashboard).
-    pub async fn top_by_size(&self, limit: i64) -> Result<Vec<TorrentSummary>, StoreError> {
-        self.top_summaries("total_size", limit).await
+    pub async fn top_by_size(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.top_summaries("total_size", limit, filter).await
     }
 
     /// En son indekslenen torrent'ler (dashboard).
-    pub async fn recent(&self, limit: i64) -> Result<Vec<TorrentSummary>, StoreError> {
-        self.top_summaries("first_seen", limit).await
+    pub async fn recent(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.top_summaries("first_seen", limit, filter).await
     }
 
-    /// Verilen sütuna göre azalan sırada özet listesi. `order_col` yalnız kod içi
-    /// sabittir (kullanıcı girdisi değil) → SQL enjeksiyonu yok.
+    /// Verilen sütuna göre azalan sırada özet listesi (filtreyle). `order_col` yalnız
+    /// kod içi sabittir (kullanıcı girdisi değil) → SQL enjeksiyonu yok.
     async fn top_summaries(
         &self,
         order_col: &str,
         limit: i64,
+        filter: &Filter,
     ) -> Result<Vec<TorrentSummary>, StoreError> {
+        let has_cat = filter.category.is_some();
         let sql = format!(
             "SELECT infohash, name, total_size, file_count, seen_count, first_seen, last_seen,
-                    peer_count, last_check
-               FROM torrents WHERE metadata_status = 'fetched'
-              ORDER BY {order_col} DESC LIMIT ?1"
+                    peer_count, last_check, category
+               FROM torrents WHERE metadata_status = 'fetched'{bools}{cat}
+              ORDER BY {order_col} DESC LIMIT ?{lim}",
+            bools = filter.bool_sql(""),
+            cat = if has_cat { " AND category = ?1" } else { "" },
+            lim = if has_cat { "2" } else { "1" },
         );
-        let rows = sqlx::query(&sql)
-            .bind(limit.max(0))
-            .fetch_all(&self.pool)
-            .await?;
+        let mut q = sqlx::query(&sql);
+        if let Some(c) = &filter.category {
+            q = q.bind(c.clone());
+        }
+        let rows = q.bind(limit.max(0)).fetch_all(&self.pool).await?;
         rows.iter().map(row_to_summary).collect()
     }
 
@@ -413,6 +579,7 @@ fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<TorrentSummary, StoreEr
         last_seen: r.get::<i64, _>("last_seen"),
         peer_count: r.get::<Option<i64>, _>("peer_count"),
         last_check: r.get::<Option<i64>, _>("last_check"),
+        category: r.get::<String, _>("category"),
     })
 }
 
@@ -502,14 +669,14 @@ mod tests {
             .await
             .unwrap();
 
-        let results = store.search("ubuntu", 10).await.unwrap();
+        let results = store.search("ubuntu", 10, &Filter::default()).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Ubuntu 24.04 Desktop amd64");
 
         // Önek araması: "ubun" da eşleşmeli.
-        assert_eq!(store.search("ubun", 10).await.unwrap().len(), 1);
+        assert_eq!(store.search("ubun", 10, &Filter::default()).await.unwrap().len(), 1);
         // Alakasız sorgu boş dönmeli.
-        assert!(store.search("archlinux", 10).await.unwrap().is_empty());
+        assert!(store.search("archlinux", 10, &Filter::default()).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -523,7 +690,7 @@ mod tests {
         assert_eq!(store.count_total().await.unwrap(), 1);
         assert_eq!(store.count_fetched().await.unwrap(), 0);
         assert!(!store.has_metadata(ih).await.unwrap());
-        assert!(store.search("slackware", 10).await.unwrap().is_empty());
+        assert!(store.search("slackware", 10, &Filter::default()).await.unwrap().is_empty());
 
         // Sonra metadata gelir → aranabilir olur.
         let mut rec = record("3333333333333333333333333333333333333333", "Slackware 15", 900);
@@ -531,7 +698,7 @@ mod tests {
         store.upsert_torrent(&rec).await.unwrap();
         assert_eq!(store.count_fetched().await.unwrap(), 1);
         assert!(store.has_metadata(ih).await.unwrap());
-        let hits = store.search("slackware", 10).await.unwrap();
+        let hits = store.search("slackware", 10, &Filter::default()).await.unwrap();
         assert_eq!(hits.len(), 1);
         // first_seen, ilk görülme (500) korunmalı.
         let got = store.get(ih).await.unwrap().unwrap();
@@ -548,12 +715,12 @@ mod tests {
         let todo = store.torrents_to_check(10).await.unwrap();
         assert_eq!(todo.len(), 1);
         assert_eq!(todo[0], rec.infohash);
-        let before = store.search("live", 10).await.unwrap();
+        let before = store.search("live", 10, &Filter::default()).await.unwrap();
         assert_eq!(before[0].peer_count, None);
 
         // Canlılık güncelle → peer_count 7, last_check set.
         store.update_liveness(rec.infohash, 7, 1234).await.unwrap();
-        let after = store.search("live", 10).await.unwrap();
+        let after = store.search("live", 10, &Filter::default()).await.unwrap();
         assert_eq!(after[0].peer_count, Some(7));
         assert_eq!(after[0].last_check, Some(1234));
 
@@ -573,13 +740,13 @@ mod tests {
         store.upsert_torrent(&a).await.unwrap();
         store.upsert_torrent(&b).await.unwrap();
 
-        let by_seen = store.top_by_seen(10).await.unwrap();
+        let by_seen = store.top_by_seen(10, &Filter::default()).await.unwrap();
         assert_eq!(by_seen[0].name, "Alpha"); // en çok görülen önce
 
-        let by_size = store.top_by_size(10).await.unwrap();
+        let by_size = store.top_by_size(10, &Filter::default()).await.unwrap();
         assert_eq!(by_size[0].name, "Beta"); // en büyük önce
 
-        assert_eq!(store.recent(10).await.unwrap().len(), 2);
+        assert_eq!(store.recent(10, &Filter::default()).await.unwrap().len(), 2);
         // Günlük keşif: iki kayıt da aynı gün → tek kova, sayı 2 (upsert seen_count'u
         // artırdığı için not: her ikisi de bir kez upsert edildi).
         let daily = store.daily_discovery(30).await.unwrap();

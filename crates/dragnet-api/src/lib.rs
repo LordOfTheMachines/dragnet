@@ -21,7 +21,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use dragnet_store::Store;
+use dragnet_store::{Filter, Store};
 
 /// API yapılandırması.
 #[derive(Debug, Clone)]
@@ -76,6 +76,8 @@ struct SearchItem {
     leech: i64,
     /// Son görülme (unix ts) — yayın tarihi vekili.
     pub_date: i64,
+    /// İçerik kategorisi (video/audio/software/game/book/adult/archive/other).
+    category: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,7 +147,7 @@ async fn search(
         .min(state.max_limit)
         .max(1);
 
-    match state.store.search(&params.q, limit as i64).await {
+    match state.store.search(&params.q, limit as i64, &Filter::default()).await {
         Ok(rows) => {
             let results = rows
                 .into_iter()
@@ -157,6 +159,7 @@ async fn search(
                     size: r.total_size,
                     leech: -1,
                     pub_date: r.last_seen,
+                    category: r.category,
                 })
                 .collect();
             Json(SearchResponse { results }).into_response()

@@ -115,6 +115,17 @@ impl Engine {
             }));
         }
 
+        // Şema-öncesi indekslenmiş kayıtların kategorilerini bir kez düzelt (arka planda).
+        {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                match store.recategorize(50_000).await {
+                    Ok(n) if n > 0 => info!(updated = n, "mevcut kayıtlar yeniden kategorilendirildi"),
+                    _ => {}
+                }
+            }));
+        }
+
         let sem = Arc::new(Semaphore::new(config.fetch_workers.max(1)));
 
         // Başlangıç seed infohash'leri.

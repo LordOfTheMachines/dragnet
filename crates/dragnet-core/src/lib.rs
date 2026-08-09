@@ -103,6 +103,129 @@ impl TorrentRecord {
     pub fn magnet(&self) -> String {
         self.infohash.to_magnet(Some(&self.name))
     }
+
+    /// Bu kaydın içerik kategorisi (isim + dosya uzantılarından tahmin).
+    pub fn category(&self) -> &'static str {
+        categorize(&self.name, &self.files)
+    }
+}
+
+/// Bilinen kategori anahtarları (UI etiketleri/filtreleri bunlarla eşlenir).
+pub const CATEGORIES: &[&str] = &[
+    "video", "audio", "software", "game", "book", "adult", "archive", "other",
+];
+
+/// Bir torrent'i adı ve dosya uzantılarından kabaca sınıflandırır.
+///
+/// Sezgisel ve kusurludur; amaç filtreleme ve gruplamadır (özellikle yetişkin
+/// içeriği varsayılan olarak gizleyebilmek). Sıra önemlidir: önce yetişkin.
+pub fn categorize(name: &str, files: &[TorrentFile]) -> &'static str {
+    let hay = name.to_lowercase();
+    let mut exts = std::collections::HashSet::new();
+    for f in files {
+        let p = f.path.to_lowercase();
+        if let Some(dot) = p.rfind('.') {
+            let e = &p[dot + 1..];
+            if e.len() <= 5 {
+                exts.insert(e.to_string());
+            }
+        }
+    }
+    let has = |k: &str| hay.contains(k);
+    let ext = |e: &str| exts.contains(e);
+
+    // 1) Yetişkin (filtre önceliği).
+    const ADULT: &[&str] = &[
+        "xxx", "porn", "p0rn", "hentai", "futanari", "uncensored", "brazzers",
+        "onlyfans", "milf", "javhd", "1pondo", "caribbeancom", "nubiles", "eronite",
+        "erotic", "bdsm", "creampie", "gangbang", " sex ", "sex.", "sex-", "18+",
+    ];
+    const ADULT_CODES: &[&str] = &[
+        "miaa-", "miaa ", "ipz-", "sis001", "ssni", "abp-", "pred-", "mide-", "fsdss",
+        "stars-", "ofje", "fes-", "juq-", "cawd", "ipx-", "ssis-",
+    ];
+    if ADULT.iter().any(|k| has(k)) || ADULT_CODES.iter().any(|k| has(k)) {
+        return "adult";
+    }
+
+    // 2) Oyun.
+    const GAME: &[&str] = &[
+        "fitgirl", "codex", "skidrow", "reloaded", "-plaza", "empress", "razor1911",
+        "goldberg", "-tenoke", "dodi", "repack", "ps4", "ps3", "xbox360", "nsw", "-flt",
+    ];
+    if GAME.iter().any(|k| has(k)) {
+        return "game";
+    }
+
+    // 3) Yazılım.
+    const SOFT: &[&str] = &[
+        "crack", "keygen", "activator", "x64", "x86", "win64", "office", "adobe",
+        "autocad", "photoshop", "windows 1", "macos", "activated",
+    ];
+    if ext("exe") || ext("msi") || ext("dmg") || ext("apk") || SOFT.iter().any(|k| has(k)) {
+        return "software";
+    }
+
+    // 4) Kitap.
+    if ext("pdf") || ext("epub") || ext("mobi") || ext("azw3") || ext("cbz") || ext("cbr")
+        || ext("djvu") || has("ebook") || has("audiobook")
+    {
+        return "book";
+    }
+
+    // 5) Ses.
+    if ext("mp3") || ext("flac") || ext("wav") || ext("aac") || ext("m4a") || ext("ogg")
+        || ext("opus") || ext("wma") || ext("alac") || ext("ape")
+        || has("discography") || has("[flac]") || has("320kbps")
+    {
+        return "audio";
+    }
+
+    // 6) Video.
+    const VID: &[&str] = &[
+        "1080p", "720p", "2160p", "480p", "x264", "x265", "hevc", "bluray", "brrip",
+        "webrip", "web-dl", "web.dl", "hdtv", "dvdrip", "xvid", "bdrip", "4k", "hdrip",
+    ];
+    if ext("mkv") || ext("mp4") || ext("avi") || ext("mov") || ext("wmv") || ext("m4v")
+        || ext("webm") || ext("mpg") || ext("mpeg") || ext("m2ts") || ext("ts")
+        || ext("vob") || ext("flv") || ext("ogv") || ext("3gp") || ext("rmvb")
+        || VID.iter().any(|k| has(k)) || has_episode(&hay)
+    {
+        return "video";
+    }
+
+    // 7) ISO → çoğunlukla yazılım/OS.
+    if ext("iso") {
+        return "software";
+    }
+
+    // 8) Arşiv.
+    if ext("zip") || ext("rar") || ext("7z") || ext("tar") || ext("gz") {
+        return "archive";
+    }
+
+    "other"
+}
+
+/// `sNNeNN` (dizi bölüm) kalıbı içeriyor mu? (kaba tarama)
+fn has_episode(s: &str) -> bool {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if b[i] == b's' && b[i + 1].is_ascii_digit() {
+            // s<rakam(lar)>e<rakam>
+            let mut j = i + 2;
+            while j < n && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j + 1 < n && b[j] == b'e' && b[j + 1].is_ascii_digit() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 fn hex_val(c: u8) -> Option<u8> {
@@ -159,5 +282,29 @@ mod tests {
         let magnet = ih.to_magnet(Some("Ubuntu 24.04"));
         assert!(magnet.contains("urn:btih:0123456789abcdef0123456789abcdef01234567"));
         assert!(magnet.contains("dn=Ubuntu%2024.04"));
+    }
+
+    fn f(path: &str, size: u64) -> TorrentFile {
+        TorrentFile { path: path.into(), size }
+    }
+
+    #[test]
+    fn categorize_basics() {
+        assert_eq!(categorize("Ubuntu 24.04 desktop amd64", &[f("ubuntu.iso", 1)]), "software");
+        assert_eq!(categorize("The Flash S04E01 1080p WEB-DL", &[f("a.mkv", 1)]), "video");
+        assert_eq!(categorize("Some Movie", &[f("movie.mkv", 1)]), "video");
+        assert_eq!(categorize("Pink Floyd Discography FLAC", &[f("a.flac", 1)]), "audio");
+        assert_eq!(categorize("Rust Book", &[f("book.epub", 1)]), "book");
+        assert_eq!(categorize("Cyberpunk 2077 FitGirl Repack", &[f("setup.exe", 1)]), "game");
+        assert_eq!(categorize("MIAA-462 something", &[f("a.mp4", 1)]), "adult");
+        assert_eq!(categorize("random stuff", &[f("data.bin", 1)]), "other");
+        assert_eq!(categorize("archive pack", &[f("x.rar", 1)]), "archive");
+    }
+
+    #[test]
+    fn episode_detection() {
+        assert!(super::has_episode("show s04e01 1080p"));
+        assert!(super::has_episode("s1e2"));
+        assert!(!super::has_episode("season four"));
     }
 }

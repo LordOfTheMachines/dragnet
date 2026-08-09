@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
-use dragnet_engine::{Engine, TorrentSummary};
+use dragnet_engine::Engine;
+use dragnet_store::{Filter, Overview, TorrentSummary};
 
 use crate::settings::Settings;
 use crate::{autostart, updater, AppState};
@@ -20,8 +21,33 @@ fn summary_json(s: &TorrentSummary) -> Value {
         "files": s.file_count,
         "seen": s.seen_count,
         "peers": s.peer_count, // null = henüz kontrol edilmedi, 0 = ölü, N = canlı
+        "category": s.category,
         "magnet": s.infohash.to_magnet(Some(&s.name)),
     })
+}
+
+fn overview_json(o: &Overview) -> Value {
+    json!({
+        "fetched": o.fetched,
+        "total_infohashes": o.total_infohashes,
+        "total_size": o.total_size,
+        "total_files": o.total_files,
+        "total_peers": o.total_peers,
+        "alive": o.alive,
+        "dead": o.dead,
+        "unchecked": o.unchecked,
+        "categories": o.categories.iter()
+            .map(|(c, n, s)| json!({ "category": c, "count": n, "size": s }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn make_filter(hide_adult: bool, only_alive: bool, category: Option<String>) -> Filter {
+    Filter {
+        only_alive,
+        hide_adult,
+        category: category.filter(|c| !c.is_empty() && c != "all"),
+    }
 }
 
 fn summaries_json(v: &[TorrentSummary]) -> Vec<Value> {
@@ -78,29 +104,48 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
     }))
 }
 
-/// FTS araması.
+/// FTS araması (filtreyle).
 #[tauri::command]
-pub async fn search(state: State<'_, AppState>, query: String, limit: Option<i64>) -> Result<Value, String> {
+pub async fn search(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<i64>,
+    hide_adult: Option<bool>,
+    only_alive: Option<bool>,
+    category: Option<String>,
+) -> Result<Value, String> {
+    let filter = make_filter(
+        hide_adult.unwrap_or(false),
+        only_alive.unwrap_or(false),
+        category,
+    );
     let rows = state
         .store
-        .search(&query, limit.unwrap_or(50))
+        .search(&query, limit.unwrap_or(100), &filter)
         .await
         .map_err(|e| e.to_string())?;
     Ok(json!({ "results": summaries_json(&rows) }))
 }
 
-/// Dashboard verileri: en çok paylaşılan, en büyük, son eklenen, günlük keşif.
+/// Dashboard: en çok paylaşılan/en büyük/son eklenen (filtreyle), saatlik keşif, ağ analizi.
 #[tauri::command]
-pub async fn dashboard(state: State<'_, AppState>) -> Result<Value, String> {
-    let top_seen = state.store.top_by_seen(12).await.map_err(|e| e.to_string())?;
-    let top_size = state.store.top_by_size(12).await.map_err(|e| e.to_string())?;
-    let recent = state.store.recent(12).await.map_err(|e| e.to_string())?;
-    let daily = state.store.daily_discovery(30).await.map_err(|e| e.to_string())?;
+pub async fn dashboard(
+    state: State<'_, AppState>,
+    hide_adult: Option<bool>,
+    only_alive: Option<bool>,
+) -> Result<Value, String> {
+    let filter = make_filter(hide_adult.unwrap_or(true), only_alive.unwrap_or(false), None);
+    let top_seen = state.store.top_by_seen(20, &filter).await.map_err(|e| e.to_string())?;
+    let top_size = state.store.top_by_size(20, &filter).await.map_err(|e| e.to_string())?;
+    let recent = state.store.recent(20, &filter).await.map_err(|e| e.to_string())?;
+    let hourly = state.store.hourly_discovery(48).await.map_err(|e| e.to_string())?;
+    let overview = state.store.overview().await.map_err(|e| e.to_string())?;
     Ok(json!({
         "top_seen": summaries_json(&top_seen),
         "top_size": summaries_json(&top_size),
         "recent": summaries_json(&recent),
-        "daily": daily.iter().map(|(d, n)| json!({ "day": d, "count": n })).collect::<Vec<_>>(),
+        "hourly": hourly.iter().map(|(h, n)| json!({ "hour": h, "count": n })).collect::<Vec<_>>(),
+        "overview": overview_json(&overview),
     }))
 }
 
