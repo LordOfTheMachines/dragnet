@@ -167,16 +167,16 @@ cargo run -p dragnet-dht --example harvest
 cargo run -p dragnet-meta --example fetch -- 08ada5a7a6183aae1e09d831df6748d566095a10
 ```
 
-**Windows sistem tepsisi (tray):** `dragnetd`'yi arka planda yönetmek için:
+**Masaüstü uygulaması (tek exe, önerilen):** tray + dashboard + arama + ayarlar,
+çekirdeği süreç içinde çalıştırır (ayrı daemon gerekmez):
 
 ```bash
-cargo run -p dragnet-tray
+cargo run -p dragnet-app
 ```
 
-Tepsi simgesine tıkla → **Taramayı Başlat/Durdur**, canlı durum (indekslenen/bilinen),
-**Ayarları Düzenle**, **Windows'ta Başlangıçta Başlat**, **Durumu Tarayıcıda Aç**, **Çıkış**.
-Tray, `dragnetd.exe`'yi ve `dragnetd.toml`'u kendi bulunduğu dizinden yukarı doğru arar
-(dağıtımda üçünü aynı klasöre koyun).
+Dashboard: canlı istatistikler, günlük keşif grafiği, en çok paylaşılan/en büyük/son
+eklenen, ağ sağlığı, FTS arama (magnet kopyala), ayarlar (hız/işçi/port/başlangıçta
+başlat). GitHub Releases + ed25519 imzalı oto-güncelleme (bkz. [`docs/RELEASE.md`](docs/RELEASE.md)).
 
 > **İpucu:** Pasif hasat verimi, sabit ve **yönlendirilmiş (port-forward)** bir UDP
 > portuyla belirgin artar (`HarvesterConfig.port`). NAT arkasında da çalışır ama
@@ -192,8 +192,11 @@ dragnet/
 │  ├─ dragnet-meta/    # metadata fetcher (BEP-3/10/9 peer-wire)             ✅ Faz 2
 │  ├─ dragnet-store/   # SQLite + FTS5 kalıcılık ve arama indeksi            ✅ Faz 3
 │  └─ dragnet-api/     # axum HTTP arama API                                 ✅ Faz 4
-├─ bin/dragnetd/       # her şeyi birleştiren daemon                         ✅ Faz 5
-├─ bin/dragnet-tray/   # Windows sistem tepsisi kontrolcüsü (daemon yönetimi) ✅
+│  └─ dragnet-engine/  # boru hattı çekirdeği (Engine::start) — daemon+app ortak  ✅
+├─ bin/dragnetd/       # başsız daemon (çekirdeğin ince sarmalayıcısı)           ✅ Faz 5
+├─ bin/dragnet-app/    # Tauri masaüstü uygulaması: tray+dashboard+arama (tek exe) ✅ Faz B
+├─ bin/dragnet-sign/   # oto-güncelleme ed25519 imza aracı                        ✅
+├─ bin/dragnet-tray/   # hafif native tray (dragnet-app'e alternatif)             ✅
 ├─ plugins/qbittorrent/
 │  ├─ dragnet.py       # nova3 arama plugin'i                                ✅ Faz 6
 │  └─ test_dragnet.py  # plugin için offline testler

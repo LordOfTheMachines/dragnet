@@ -62,8 +62,15 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
   plugin'i kurmasıyla tamamlanır — otomasyonla test edilemez.
 
 ## Faz 7+ — Olgunlaştırma (opsiyonel)
-- [x] Windows sistem tepsisi (tray) kontrolcüsü — `bin/dragnet-tray` (Başlat/Durdur,
-      canlı durum, ayarlar, başlangıçta başlat)
+- [x] Windows sistem tepsisi (tray) kontrolcüsü — `bin/dragnet-tray`
+- [x] BEP-51 `sample_infohashes` — aktif, NAT-dostu hasat (~600× artış)
+- [x] `dragnet-engine` çekirdeği (daemon+app ortak) + `dragnetd` inceltildi
+- [x] **Tauri masaüstü uygulaması** `bin/dragnet-app` (tek exe): tray, dashboard
+      (grafik + tablolar + ağ sağlığı), arama, ayarlar, ed25519 oto-güncelleme
+- [x] Nazik varsayılanlar (router conntrack koruması) + port çakışma fallback'i
+- [x] `unreachable` işaretleme (ölü torrent'leri tekrar denememe)
+- [ ] Torrent canlılık kontrolü (DHT scrape ile seed/leech tahmini) — Faz C
+- [ ] Semantik arama (yerel embedding + doğal dil sorgu) — Faz D
 - [ ] Web arayüzü (magneticow benzeri gözat/ara)
 - [ ] İçerik filtreleme katmanı (engel listeleri)
 - [ ] BitTorrent v2 (SHA-256 infohash)
