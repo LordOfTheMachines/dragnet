@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-sign"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Oto-güncelleme imzalama aracı (Sello sign_release deseni).
+# tauri'ye bağımlı DEĞİL → hızlı derlenir; CI'da ve elle sürümde kullanılır.
+[[bin]]
+name = "dragnet-sign"
+path = "src/main.rs"
+
+[dependencies]
+ed25519-dalek = "2"
+base64 = "0.22"
+getrandom = "0.2"

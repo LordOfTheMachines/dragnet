@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dragnet</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🛰️ <b>Dragnet</b> <span id="version" class="muted"></span></div>
+    <div class="controls">
+      <span id="status-pill" class="pill off">Durdu</span>
+      <button id="btn-toggle" class="btn primary">Taramayı Başlat</button>
+      <button id="btn-update" class="btn">Güncelleme</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-view="dashboard">Pano</button>
+    <button class="tab" data-view="search">Arama</button>
+    <button class="tab" data-view="settings">Ayarlar</button>
+  </nav>
+
+  <main>
+    <!-- PANO -->
+    <section id="view-dashboard" class="view">
+      <div class="tiles">
+        <div class="tile"><div class="tval" id="t-fetched">0</div><div class="tlabel">İndekslenen (adlı)</div></div>
+        <div class="tile"><div class="tval" id="t-total">0</div><div class="tlabel">Bilinen infohash</div></div>
+        <div class="tile"><div class="tval" id="t-rate">0</div><div class="tlabel">BEP-51 örnek/sn</div></div>
+        <div class="tile"><div class="tval" id="t-unique">0</div><div class="tlabel">Hasat (bu oturum)</div></div>
+      </div>
+
+      <div class="card">
+        <h3>Günlük keşif</h3>
+        <div id="chart" class="chart"></div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <h3>En çok paylaşılan</h3>
+          <table class="tbl"><tbody id="tbl-seen"></tbody></table>
+        </div>
+        <div class="card">
+          <h3>En büyük</h3>
+          <table class="tbl"><tbody id="tbl-size"></tbody></table>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <h3>Son eklenen</h3>
+          <table class="tbl"><tbody id="tbl-recent"></tbody></table>
+        </div>
+        <div class="card">
+          <h3>Ağ sağlığı <button id="btn-net" class="btn small">Ölç</button></h3>
+          <table class="tbl"><tbody id="tbl-net"></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ARAMA -->
+    <section id="view-search" class="view hidden">
+      <div class="card">
+        <form id="search-form" class="searchbar">
+          <input id="q" type="text" placeholder="Ara… (örn. sintel, ubuntu)" autocomplete="off" />
+          <button class="btn primary" type="submit">Ara</button>
+        </form>
+        <table class="tbl results"><thead><tr><th>Ad</th><th>Boyut</th><th>Dosya</th><th>Görülme</th><th></th></tr></thead>
+          <tbody id="tbl-results"></tbody></table>
+        <div id="search-empty" class="muted hidden">Sonuç yok. (İndeks dolarken adlar zamanla artar.)</div>
+      </div>
+    </section>
+
+    <!-- AYARLAR -->
+    <section id="view-settings" class="view hidden">
+      <div class="card settings">
+        <h3>Ayarlar</h3>
+        <label>Harvester hız limiti (sorgu/sn)
+          <input id="s-rate" type="number" min="5" max="500" />
+          <small>İnternet yavaşlıyorsa düşür (20–40). Port-forward + iyi bağlantıda artır.</small>
+        </label>
+        <label>Fetch işçileri (aynı anda metadata)
+          <input id="s-workers" type="number" min="1" max="20" />
+          <small>İsimleri daha hızlı çekmek için artır; internet yavaşlarsa düşür.</small>
+        </label>
+        <label>Fetch başına eşzamanlı peer
+          <input id="s-peers" type="number" min="1" max="30" />
+        </label>
+        <label>Harvester UDP portu (0 = otomatik)
+          <input id="s-port" type="number" min="0" max="65535" />
+          <small>qBittorrent 6881'i kullanır; farklı bir port seç (ör. 6882) ve modemde onu yönlendir.</small>
+        </label>
+        <label class="chk"><input id="s-autostart" type="checkbox" /> Windows'ta başlangıçta başlat</label>
+        <label class="chk"><input id="s-autoscan" type="checkbox" /> Açılışta taramayı otomatik başlat</label>
+        <button id="btn-save" class="btn primary">Kaydet</button>
+        <span id="save-msg" class="muted"></span>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -10,6 +10,8 @@ members = [
     "crates/dragnet-engine",
     "bin/dragnetd",
     "bin/dragnet-tray",
+    "bin/dragnet-sign",
+    "bin/dragnet-app",
 ]
 
 [workspace.package]

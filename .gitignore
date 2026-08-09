@@ -24,3 +24,7 @@ __pycache__/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# dragnet-app yerel dosyaları
+dragnet-settings.json
+dragnet-app.log

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dragnet-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dragnet-core = { path = "../../crates/dragnet-core" }
+dragnet-store = { path = "../../crates/dragnet-store" }
+dragnet-engine = { path = "../../crates/dragnet-engine" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Oto-güncelleme (Sello deseni; custom GitHub Releases updater).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+ed25519-dalek = "2"
+base64 = "0.22"
+self-replace = "1"
+winreg = "0.56"
