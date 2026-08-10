@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
 use dragnet_engine::Engine;
-use dragnet_store::{Filter, Overview, TorrentSummary};
+use dragnet_store::{Filter, Overview, SortKey, TorrentSummary};
 
 use crate::settings::Settings;
 use crate::{autostart, updater, AppState};
@@ -22,6 +22,8 @@ fn summary_json(s: &TorrentSummary) -> Value {
         "seen": s.seen_count,
         "peers": s.peer_count, // null = henüz kontrol edilmedi, 0 = ölü, N = canlı
         "category": s.category,
+        "first_seen": s.first_seen,
+        "last_seen": s.last_seen,
         "magnet": s.infohash.to_magnet(Some(&s.name)),
     })
 }
@@ -42,12 +44,28 @@ fn overview_json(o: &Overview) -> Value {
     })
 }
 
-fn make_filter(hide_adult: bool, only_alive: bool, category: Option<String>) -> Filter {
+fn make_filter(
+    hide_adult: bool,
+    only_alive: bool,
+    category: Option<String>,
+    block_keywords: Vec<String>,
+) -> Filter {
     Filter {
         only_alive,
         hide_adult,
         category: category.filter(|c| !c.is_empty() && c != "all"),
+        block_keywords,
     }
+}
+
+/// Ayarlardaki engel kelimelerini (normalize edilmiş) döndürür.
+fn block_keywords(state: &AppState) -> Vec<String> {
+    let s = state.settings.lock().unwrap_or_else(|p| p.into_inner());
+    s.block_keywords
+        .iter()
+        .map(|k| k.trim().to_lowercase())
+        .filter(|k| !k.is_empty())
+        .collect()
 }
 
 fn summaries_json(v: &[TorrentSummary]) -> Vec<Value> {
@@ -104,47 +122,75 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
     }))
 }
 
-/// FTS araması (filtreyle).
+/// Birleşik arama/gözat (tek sıralanabilir tablo). Sorgu boşsa FTS yerine tüm
+/// indeksi listeler (gözat). `sort`/`desc`/`offset` ile sunucu-tarafı sıralama +
+/// sonsuz-scroll sayfalama; engel kelimeleri ayarlardan uygulanır.
+// Tauri komutu: parametreler frontend'den tek tek gelir (bir struct'a sarmak
+// invoke sözleşmesini gereksiz karmaşıklaştırır).
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn search(
     state: State<'_, AppState>,
     query: String,
     limit: Option<i64>,
+    offset: Option<i64>,
+    sort: Option<String>,
+    desc: Option<bool>,
     hide_adult: Option<bool>,
     only_alive: Option<bool>,
     category: Option<String>,
 ) -> Result<Value, String> {
+    let blocks = block_keywords(&state);
     let filter = make_filter(
         hide_adult.unwrap_or(false),
         only_alive.unwrap_or(false),
         category,
+        blocks,
     );
-    let rows = state
-        .store
-        .search(&query, limit.unwrap_or(100), &filter)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(json!({ "results": summaries_json(&rows) }))
+    let q = query.trim();
+    let limit = limit.unwrap_or(60);
+    let offset = offset.unwrap_or(0);
+    let sort_key = SortKey::parse(sort.as_deref().unwrap_or(""));
+    let desc = desc.unwrap_or(true);
+
+    let rows = if q.is_empty() {
+        // Gözat: sorgu yok → tüm indeksten sırala. Alaka sırasız olduğundan
+        // varsayılanı popülerliğe (seen) çevir.
+        let sk = if matches!(sort_key, SortKey::Relevance) { SortKey::Seen } else { sort_key };
+        state
+            .store
+            .list_paged(limit, offset, sk, desc, &filter)
+            .await
+    } else {
+        state
+            .store
+            .search_paged(q, limit, offset, sort_key, desc, &filter)
+            .await
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(json!({ "results": summaries_json(&rows), "count": rows.len() }))
 }
 
-/// Dashboard: en çok paylaşılan/en büyük/son eklenen (filtreyle), saatlik keşif, ağ analizi.
+/// Dashboard: genel görünüm + keşif zaman serisi. `bucket` "hour"|"day",
+/// `points` kova sayısı (grafik gün/saat seçimi).
 #[tauri::command]
 pub async fn dashboard(
     state: State<'_, AppState>,
-    hide_adult: Option<bool>,
-    only_alive: Option<bool>,
+    bucket: Option<String>,
+    points: Option<i64>,
 ) -> Result<Value, String> {
-    let filter = make_filter(hide_adult.unwrap_or(true), only_alive.unwrap_or(false), None);
-    let top_seen = state.store.top_by_seen(20, &filter).await.map_err(|e| e.to_string())?;
-    let top_size = state.store.top_by_size(20, &filter).await.map_err(|e| e.to_string())?;
-    let recent = state.store.recent(20, &filter).await.map_err(|e| e.to_string())?;
-    let hourly = state.store.hourly_discovery(48).await.map_err(|e| e.to_string())?;
+    let is_day = bucket.as_deref() == Some("day");
+    let bucket_secs = if is_day { 86_400 } else { 3_600 };
+    let pts = points.unwrap_or(if is_day { 30 } else { 48 }).clamp(1, 365);
+    let series = state
+        .store
+        .discovery(bucket_secs, pts)
+        .await
+        .map_err(|e| e.to_string())?;
     let overview = state.store.overview().await.map_err(|e| e.to_string())?;
     Ok(json!({
-        "top_seen": summaries_json(&top_seen),
-        "top_size": summaries_json(&top_size),
-        "recent": summaries_json(&recent),
-        "hourly": hourly.iter().map(|(h, n)| json!({ "hour": h, "count": n })).collect::<Vec<_>>(),
+        "series": series.iter().map(|(t, n)| json!({ "t": t, "count": n })).collect::<Vec<_>>(),
+        "bucket": if is_day { "day" } else { "hour" },
         "overview": overview_json(&overview),
     }))
 }

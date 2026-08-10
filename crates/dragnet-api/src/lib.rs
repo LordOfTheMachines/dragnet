@@ -21,7 +21,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use dragnet_store::{Filter, Store};
+use dragnet_store::{Filter, SortKey, Store};
 
 /// API yapılandırması.
 #[derive(Debug, Clone)]
@@ -62,6 +62,15 @@ struct SearchParams {
     cat: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Sayfalama ofseti (sonsuz-scroll).
+    #[serde(default)]
+    offset: Option<usize>,
+    /// Sıralama anahtarı (name/size/seed/files/date/added/seen; boş = alaka).
+    #[serde(default)]
+    sort: Option<String>,
+    /// Azalan sıra (varsayılan true).
+    #[serde(default)]
+    desc: Option<bool>,
     /// Yalnız canlı (peer > 0) sonuçlar.
     #[serde(default)]
     alive: Option<bool>,
@@ -169,13 +178,21 @@ async fn search(
         .unwrap_or(100)
         .min(state.max_limit)
         .max(1);
+    let offset = params.offset.unwrap_or(0);
+    let sort = SortKey::parse(params.sort.as_deref().unwrap_or(""));
+    let desc = params.desc.unwrap_or(true);
 
     let filter = Filter {
         only_alive: params.alive.unwrap_or(false),
         hide_adult: params.hide_adult.unwrap_or(false),
         category: map_category(params.cat),
+        block_keywords: Vec::new(),
     };
-    match state.store.search(&params.q, limit as i64, &filter).await {
+    match state
+        .store
+        .search_paged(&params.q, limit as i64, offset as i64, sort, desc, &filter)
+        .await
+    {
         Ok(rows) => {
             let results = rows
                 .into_iter()

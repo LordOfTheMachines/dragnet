@@ -71,9 +71,16 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
 - [x] **Faz C: Torrent canlılık kontrolü** — nazik DHT scrape ile canlı peer sayısı;
       store peer_count/last_check, API `seeds` alanı, app'te canlı/ölü göstergesi
       (Tears of Steel canlıda 16 peer doğrulandı)
-- [ ] Semantik arama (yerel embedding + doğal dil sorgu) — Faz D
+- [x] İçerik kategorileri (video/audio/software/game/book/adult/archive/other heuristiği)
+- [x] **İçerik filtreleme katmanı** — kullanıcı tanımlı engel kelimeleri (ayarlarda
+      düzenlenebilir chip listesi); sorgu-anı, yıkıcı-olmayan filtre (store `Filter.block_keywords`)
+- [x] **UI overhaul** — tam genişlik düzen; tek detaylı SIRALANABİLİR + sayfalı (sonsuz-scroll)
+      gözat/ara tablosu (satır no + tıkla-sırala başlıklar, sunucu-tarafı sıralama);
+      kategori hızlı sekmeleri; SVG çizgi grafik (saat/gün seçimli keşif serisi); palet cilası
+- [x] Kalite çevrimleri (2 tur): kritik bencode DoS guard'ları, XSS/CSP, atomik ayar yazımı,
+      mutex-poison kurtarma, API'nin çekirdekten ayrılması (tarama durunca arama kesilmez)
+- [ ] Semantik arama (yerel embedding + doğal dil sorgu) — **Faz D (SIRADAKİ, yeni oturum)**
 - [ ] Web arayüzü (magneticow benzeri gözat/ara)
-- [ ] İçerik filtreleme katmanı (engel listeleri)
 - [ ] BitTorrent v2 (SHA-256 infohash)
 - [ ] PostgreSQL'e ölçekleme, dağıtık crawler
 - [ ] Ticari sürüm paketleme (bkz. LICENSING.md)

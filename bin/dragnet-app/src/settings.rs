@@ -21,6 +21,10 @@ pub struct Settings {
     /// Uygulama açılınca taramayı otomatik başlat.
     pub auto_scan: bool,
     pub seed_infohashes: Vec<String>,
+    /// Gelişmiş içerik filtresi: adı bu kelimelerden birini (küçük harfe duyarsız,
+    /// alt-dize) içeren torrent'ler arama/gözat sonuçlarında gizlenir. Yıkıcı değil.
+    #[serde(default)]
+    pub block_keywords: Vec<String>,
 }
 
 impl Default for Settings {
@@ -35,6 +39,7 @@ impl Default for Settings {
             fetch_peer_concurrency: 6,
             autostart: false,
             auto_scan: true,
+            block_keywords: Vec::new(),
             seed_infohashes: vec![
                 "08ada5a7a6183aae1e09d831df6748d566095a10".to_string(), // Sintel
                 "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c".to_string(), // Big Buck Bunny

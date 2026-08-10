@@ -19,7 +19,7 @@
 
   <nav class="tabs">
     <button class="tab active" data-view="dashboard">Pano</button>
-    <button class="tab" data-view="search">Arama</button>
+    <button class="tab" data-view="browse">Gözat &amp; Ara</button>
     <button class="tab" data-view="analysis">Analiz</button>
     <button class="tab" data-view="settings">Ayarlar</button>
   </nav>
@@ -34,78 +34,81 @@
         <div class="tile"><div class="tval" id="t-unique">0</div><div class="tlabel">Hasat (bu oturum)</div></div>
       </div>
 
-      <div class="filters">
-        <label class="chk"><input id="f-adult" type="checkbox" checked /> Yetişkin içeriği gizle</label>
-        <label class="chk"><input id="f-alive" type="checkbox" /> Sadece canlı</label>
+      <div class="card">
+        <div class="card-head">
+          <h3>Keşif zaman serisi</h3>
+          <div class="seg" id="chart-seg">
+            <button class="seg-btn active" data-bucket="hour" data-points="48">Saatlik (48s)</button>
+            <button class="seg-btn" data-bucket="hour" data-points="168">Saatlik (7g)</button>
+            <button class="seg-btn" data-bucket="day" data-points="30">Günlük (30g)</button>
+            <button class="seg-btn" data-bucket="day" data-points="90">Günlük (90g)</button>
+          </div>
+        </div>
+        <div id="chart" class="chart"></div>
       </div>
 
       <div class="card">
-        <h3>Keşif (son 48 saat)</h3>
-        <div id="chart" class="chart"></div>
-        <div class="chart-axis"><span id="chart-start"></span><span id="chart-end">şimdi</span></div>
-      </div>
-
-      <div class="grid2">
-        <div class="card">
-          <h3>En çok paylaşılan</h3>
-          <div class="tblwrap">
-            <table class="tbl"><thead><tr><th>Ad</th><th>Kategori</th><th class="r">Boyut</th><th class="r">Seed</th><th></th></tr></thead>
-              <tbody id="tbl-seen"></tbody></table>
-          </div>
+        <div class="card-head">
+          <h3>Ağ sağlığı</h3>
+          <button id="btn-net" class="btn small ghost">Ölç</button>
         </div>
-        <div class="card">
-          <h3>En büyük</h3>
-          <div class="tblwrap">
-            <table class="tbl"><thead><tr><th>Ad</th><th>Kategori</th><th class="r">Boyut</th><th class="r">Seed</th><th></th></tr></thead>
-              <tbody id="tbl-size"></tbody></table>
-          </div>
-        </div>
-      </div>
-
-      <div class="grid2">
-        <div class="card">
-          <h3>Son eklenen</h3>
-          <div class="tblwrap sm">
-            <table class="tbl"><thead><tr><th>Ad</th><th>Kategori</th><th class="r">Boyut</th><th class="r">Seed</th><th></th></tr></thead>
-              <tbody id="tbl-recent"></tbody></table>
-          </div>
-        </div>
-        <div class="card">
-          <h3>Ağ sağlığı <button id="btn-net" class="btn small ghost">Ölç</button></h3>
-          <table class="tbl"><tbody id="tbl-net"><tr><td class="muted">"Ölç" ile gecikme testi</td></tr></tbody></table>
-        </div>
+        <table class="tbl"><tbody id="tbl-net"><tr><td class="muted">"Ölç" ile gecikme testi</td></tr></tbody></table>
       </div>
     </section>
 
-    <!-- ARAMA -->
-    <section id="view-search" class="view hidden">
+    <!-- GÖZAT & ARA -->
+    <section id="view-browse" class="view hidden">
       <div class="card">
         <form id="search-form" class="searchbar">
-          <input id="q" type="text" placeholder="Ara… (örn. sintel, ubuntu, the flash)" autocomplete="off" />
-          <select id="s-cat" class="sel">
-            <option value="all">Tüm kategoriler</option>
-            <option value="video">Film / Video</option>
-            <option value="audio">Müzik</option>
-            <option value="software">Yazılım</option>
-            <option value="game">Oyun</option>
-            <option value="book">Kitap</option>
-            <option value="archive">Arşiv</option>
-            <option value="adult">Yetişkin</option>
-            <option value="other">Diğer</option>
-          </select>
+          <input id="q" type="text" placeholder="Ara veya boş bırakıp tüm indekste gözat… (örn. sintel, ubuntu)" autocomplete="off" />
           <button class="btn primary" type="submit">Ara</button>
+          <button id="btn-clear" class="btn ghost" type="button">Temizle</button>
         </form>
-        <div class="filters">
-          <label class="chk"><input id="sf-adult" type="checkbox" checked /> Yetişkin gizle</label>
-          <label class="chk"><input id="sf-alive" type="checkbox" /> Sadece canlı</label>
+
+        <div class="cattabs" id="cattabs">
+          <button class="cattab active" data-cat="all">Tümü</button>
+          <button class="cattab" data-cat="video">Film/Video</button>
+          <button class="cattab" data-cat="audio">Müzik</button>
+          <button class="cattab" data-cat="software">Yazılım</button>
+          <button class="cattab" data-cat="game">Oyun</button>
+          <button class="cattab" data-cat="book">Kitap</button>
+          <button class="cattab" data-cat="archive">Arşiv</button>
+          <button class="cattab" data-cat="adult">Yetişkin</button>
+          <button class="cattab" data-cat="other">Diğer</button>
         </div>
-        <div class="tblwrap lg">
-          <table class="tbl results">
-            <thead><tr><th>Ad</th><th>Kategori</th><th class="r">Boyut</th><th class="r">Seed</th><th class="r">Dosya</th><th></th></tr></thead>
+
+        <div class="toolbar">
+          <div class="filters">
+            <label class="chk"><input id="sf-adult" type="checkbox" checked /> Yetişkin gizle</label>
+            <label class="chk"><input id="sf-alive" type="checkbox" /> Sadece canlı</label>
+          </div>
+          <div class="result-meta"><span id="result-count" class="muted"></span></div>
+        </div>
+
+        <div class="tblwrap results-wrap" id="results-wrap">
+          <table class="tbl results sortable">
+            <colgroup>
+              <col class="c-idx" /><col class="c-name" /><col class="c-cat" />
+              <col class="c-size" /><col class="c-seed" /><col class="c-files" />
+              <col class="c-date" /><col class="c-mag" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="r">#</th>
+                <th data-sort="name" class="sortable-th">Ad</th>
+                <th>Kategori</th>
+                <th data-sort="size" class="sortable-th r">Boyut</th>
+                <th data-sort="seed" class="sortable-th r">Seed</th>
+                <th data-sort="files" class="sortable-th r">Dosya</th>
+                <th data-sort="date" class="sortable-th r">Görülme</th>
+                <th class="r">Magnet</th>
+              </tr>
+            </thead>
             <tbody id="tbl-results"></tbody>
           </table>
+          <div id="results-empty" class="muted center hidden" style="padding:24px">Sonuç yok. (İndeks dolarken adlar zamanla artar.)</div>
+          <div id="results-loading" class="muted center hidden" style="padding:14px">Yükleniyor…</div>
         </div>
-        <div id="search-empty" class="muted hidden" style="margin-top:10px">Sonuç yok. (İndeks dolarken adlar zamanla artar.)</div>
       </div>
     </section>
 
@@ -117,41 +120,65 @@
         <div class="tile"><div class="tval" id="a-peers">–</div><div class="tlabel">Toplam canlı peer</div></div>
         <div class="tile"><div class="tval" id="a-dead">–</div><div class="tlabel">Ölü torrent</div></div>
       </div>
-      <div class="card">
-        <h3>Kategori dağılımı</h3>
-        <div id="cat-bars" class="catbars"></div>
-      </div>
-      <div class="card">
-        <h3>Kategori detayı</h3>
-        <table class="tbl"><thead><tr><th>Kategori</th><th class="r">Adet</th><th class="r">Toplam boyut</th><th class="r">Pay</th></tr></thead>
-          <tbody id="tbl-cats"></tbody></table>
+      <div class="grid2">
+        <div class="card">
+          <h3>Kategori dağılımı</h3>
+          <div id="cat-bars" class="catbars"></div>
+        </div>
+        <div class="card">
+          <h3>Kategori detayı</h3>
+          <table class="tbl"><thead><tr><th>Kategori</th><th class="r">Adet</th><th class="r">Toplam boyut</th><th class="r">Pay</th></tr></thead>
+            <tbody id="tbl-cats"></tbody></table>
+        </div>
       </div>
       <p class="muted small">Not: Bu sayılar Dragnet'in şimdiye dek indekslediği örneklemdendir — tüm DHT ağının tamamı değildir. Tarama sürdükçe büyür.</p>
     </section>
 
     <!-- AYARLAR -->
     <section id="view-settings" class="view hidden">
-      <div class="card settings">
-        <h3>Ayarlar</h3>
-        <label>Harvester hız limiti (sorgu/sn)
-          <input id="set-rate" type="number" min="5" max="500" />
-          <small>İnternet yavaşlıyorsa düşür (20–40). Port-forward + iyi bağlantıda artır.</small>
-        </label>
-        <label>Fetch işçileri (aynı anda metadata)
-          <input id="set-workers" type="number" min="1" max="20" />
-          <small>İsimleri daha hızlı çekmek için artır (ör. 8-10); internet yavaşlarsa düşür.</small>
-        </label>
-        <label>Fetch başına eşzamanlı peer
-          <input id="set-peers" type="number" min="1" max="30" />
-        </label>
-        <label>Harvester UDP portu (0 = otomatik)
-          <input id="set-port" type="number" min="0" max="65535" />
-          <small>qBittorrent 6881'i kullanır; farklı bir port seç (ör. 6882) ve modemde onu yönlendir.</small>
-        </label>
-        <label class="chk"><input id="set-autostart" type="checkbox" /> Windows'ta başlangıçta başlat</label>
-        <label class="chk"><input id="set-autoscan" type="checkbox" /> Açılışta taramayı otomatik başlat</label>
-        <div><button id="btn-save" class="btn primary">Kaydet</button> <span id="save-msg" class="muted"></span></div>
+      <div class="grid2">
+        <div class="card settings">
+          <h3>Tarama</h3>
+          <label>Harvester hız limiti (sorgu/sn)
+            <input id="set-rate" type="number" min="5" max="500" />
+            <small>İnternet yavaşlıyorsa düşür (20–40). Port-forward + iyi bağlantıda artır.</small>
+          </label>
+          <label>Fetch işçileri (aynı anda metadata)
+            <input id="set-workers" type="number" min="1" max="20" />
+            <small>İsimleri daha hızlı çekmek için artır (ör. 8-10); internet yavaşlarsa düşür.</small>
+          </label>
+          <label>Fetch başına eşzamanlı peer
+            <input id="set-peers" type="number" min="1" max="30" />
+          </label>
+          <label>Harvester UDP portu (0 = otomatik)
+            <input id="set-port" type="number" min="0" max="65535" />
+            <small>qBittorrent 6881'i kullanır; farklı bir port seç (ör. 6882) ve modemde onu yönlendir.</small>
+          </label>
+          <label class="chk"><input id="set-autostart" type="checkbox" /> Windows'ta başlangıçta başlat</label>
+          <label class="chk"><input id="set-autoscan" type="checkbox" /> Açılışta taramayı otomatik başlat</label>
+        </div>
+
+        <div class="card settings">
+          <h3>Gelişmiş içerik filtresi</h3>
+          <p class="muted small" style="margin-top:0">
+            Adı bu kelimelerden birini içeren torrent'ler arama ve gözat sonuçlarında <b>gizlenir</b>
+            (küçük/büyük harfe duyarsız, alt-dize eşleşme). Yıkıcı değildir — kelimeyi silince kayıtlar geri gelir.
+          </p>
+          <form id="block-form" class="block-add">
+            <input id="block-input" type="text" placeholder="Engellenecek kelime ekle (Enter)" autocomplete="off" />
+            <button class="btn" type="submit">Ekle</button>
+          </form>
+          <div id="block-chips" class="block-chips"></div>
+          <div class="preset">
+            <span class="muted small">Hızlı ekle:</span>
+            <span class="preset-chip" data-kw="cam">cam</span>
+            <span class="preset-chip" data-kw="hdcam">hdcam</span>
+            <span class="preset-chip" data-kw="ts">ts</span>
+            <span class="preset-chip" data-kw="xxx">xxx</span>
+          </div>
+        </div>
       </div>
+      <div style="margin-top:4px"><button id="btn-save" class="btn primary">Kaydet</button> <span id="save-msg" class="muted"></span></div>
     </section>
   </main>
 

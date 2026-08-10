@@ -24,6 +24,8 @@ function humanSize(bytes) {
 function nf(n) { return (Number(n) || 0).toLocaleString("tr"); }
 function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 function escAttr(s) { return esc(s).replace(/"/g, "&quot;"); }
+function dateShort(ts) { if (!ts) return "–"; return new Date(ts * 1000).toLocaleDateString("tr", { day: "2-digit", month: "2-digit", year: "2-digit" }); }
+function dateFull(ts) { return ts ? new Date(ts * 1000).toLocaleString("tr") : ""; }
 
 function toast(msg) {
   const el = $("toast"); el.textContent = msg; el.classList.remove("hidden");
@@ -32,21 +34,9 @@ function toast(msg) {
 function copyMagnet(m) { navigator.clipboard.writeText(m).then(() => toast("Magnet kopyalandı"), () => toast("Kopyalanamadı")); }
 
 function peerCell(p) {
-  if (p == null) return `<span class="muted" title="Henüz kontrol edilmedi">–</span>`;
-  if (p <= 0) return `<span class="dead" title="Canlı peer yok">ölü</span>`;
+  if (p == null || p < 0) return `<span class="muted" title="Henüz kontrol edilmedi">–</span>`;
+  if (p === 0) return `<span class="dead" title="Canlı peer yok">ölü</span>`;
   return `<span class="alive"><span class="dot ok"></span>${p}</span>`;
-}
-
-function rowsHtml(items) {
-  if (!items.length) return `<tr><td colspan="5" class="muted">Henüz veri yok — tarama sürdükçe dolar</td></tr>`;
-  return items.map((r) => `
-    <tr>
-      <td class="name" title="${escAttr(r.name)}">${esc(r.name)}</td>
-      <td>${catChip(r.category)}</td>
-      <td class="r num">${humanSize(r.size)}</td>
-      <td class="r num">${peerCell(r.peers)}</td>
-      <td class="r num"><span class="copy" data-magnet="${escAttr(r.magnet)}">magnet</span></td>
-    </tr>`).join("");
 }
 
 // magnet kopyalama (delegasyon)
@@ -62,7 +52,8 @@ document.querySelectorAll(".tab").forEach((t) => {
     document.querySelectorAll(".view").forEach((x) => x.classList.add("hidden"));
     t.classList.add("active");
     $("view-" + t.dataset.view).classList.remove("hidden");
-    if (t.dataset.view === "dashboard") loadDashboard();
+    if (t.dataset.view === "dashboard") { loadDashboard(); }
+    if (t.dataset.view === "browse") { if (!browse.loaded) resetAndLoad(); }
     if (t.dataset.view === "analysis") loadAnalysis();
     if (t.dataset.view === "settings") loadSettings();
   });
@@ -85,39 +76,78 @@ async function pollStats() {
   } catch (e) {}
 }
 
-// --- Dashboard ---
-let lastOverview = null;
+// --- Dashboard (chart + network) ---
+const chart = { bucket: "hour", points: 48, series: [] };
 async function loadDashboard() {
   try {
-    const d = await invoke("dashboard", { hideAdult: $("f-adult").checked, onlyAlive: $("f-alive").checked });
-    $("tbl-seen").innerHTML = rowsHtml(d.top_seen);
-    $("tbl-size").innerHTML = rowsHtml(d.top_size);
-    $("tbl-recent").innerHTML = rowsHtml(d.recent);
-    lastOverview = d.overview;
-    drawChart(d.hourly);
+    const d = await invoke("dashboard", { bucket: chart.bucket, points: chart.points });
+    chart.series = d.series || [];
+    drawChart();
   } catch (e) {}
 }
-$("f-adult").addEventListener("change", loadDashboard);
-$("f-alive").addEventListener("change", loadDashboard);
+$("chart-seg").addEventListener("click", (e) => {
+  const b = e.target.closest(".seg-btn"); if (!b) return;
+  document.querySelectorAll("#chart-seg .seg-btn").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  chart.bucket = b.dataset.bucket; chart.points = Number(b.dataset.points);
+  loadDashboard();
+});
 
-function drawChart(hourly) {
+function drawChart() {
   const el = $("chart");
-  const data = (hourly || []).slice().reverse(); // eski → yeni
-  if (!data.length) { el.innerHTML = `<span class="muted">Veri yok</span>`; $("chart-start").textContent = ""; return; }
+  const W = el.clientWidth || 900, H = 190;
+  const data = chart.series.slice().reverse(); // eski → yeni
+  if (!data.length) {
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}"><text class="empty" x="${W / 2}" y="${H / 2}" text-anchor="middle">Henüz veri yok — tarama sürdükçe dolar</text></svg>`;
+    return;
+  }
+  const padL = 10, padR = 10, padT = 14, padB = 24;
   const max = Math.max(...data.map((x) => x.count), 1);
-  el.innerHTML = data.map((x) => {
-    const h = Math.max(2, Math.round((x.count / max) * 100));
-    const d = new Date(x.hour * 1000);
-    const t = d.toLocaleString("tr", { day: "2-digit", month: "2-digit", hour: "2-digit" });
-    return `<div class="bar" style="height:${h}%" title="${t} — ${x.count} keşif"></div>`;
+  const n = data.length;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const xAt = (i) => padL + (n === 1 ? iw / 2 : (i * iw) / (n - 1));
+  const yAt = (v) => padT + ih - (v / max) * ih;
+
+  const pts = data.map((x, i) => [xAt(i), yAt(x.count)]);
+  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  const area = `M${pts[0][0].toFixed(1)} ${(padT + ih).toFixed(1)} ` +
+    pts.map((p) => "L" + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ") +
+    ` L${pts[n - 1][0].toFixed(1)} ${(padT + ih).toFixed(1)} Z`;
+
+  // yatay ızgara + y etiketleri (0, max/2, max)
+  const grid = [0, 0.5, 1].map((f) => {
+    const y = padT + ih - f * ih;
+    return `<line class="grid-line" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" />
+            <text class="axlabel" x="${padL}" y="${(y - 3).toFixed(1)}">${Math.round(f * max)}</text>`;
   }).join("");
-  $("chart-start").textContent = new Date(data[0].hour * 1000).toLocaleString("tr", { day: "2-digit", month: "2-digit", hour: "2-digit" });
+
+  const fmt = (t) => chart.bucket === "day"
+    ? new Date(t * 1000).toLocaleDateString("tr", { day: "2-digit", month: "2-digit" })
+    : new Date(t * 1000).toLocaleString("tr", { day: "2-digit", month: "2-digit", hour: "2-digit" });
+  const dots = pts.map((p, i) =>
+    `<circle class="pt" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6"><title>${fmt(data[i].t)} — ${nf(data[i].count)} keşif</title></circle>`
+  ).join("");
+  const xLabels =
+    `<text class="axlabel" x="${padL}" y="${H - 6}" text-anchor="start">${fmt(data[0].t)}</text>` +
+    `<text class="axlabel" x="${W - padR}" y="${H - 6}" text-anchor="end">${fmt(data[n - 1].t)}</text>`;
+
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}">
+    <defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4f8cf7" stop-opacity="0.45" />
+      <stop offset="100%" stop-color="#4f8cf7" stop-opacity="0" />
+    </linearGradient></defs>
+    ${grid}
+    <path class="area" d="${area}" />
+    <path class="line" d="${line}" />
+    ${dots}${xLabels}
+  </svg>`;
 }
+window.addEventListener("resize", () => { if (!$("view-dashboard").classList.contains("hidden")) drawChart(); });
 
 // --- Analiz ---
 async function loadAnalysis() {
   try {
-    const d = await invoke("dashboard", { hideAdult: false, onlyAlive: false });
+    const d = await invoke("dashboard", { bucket: "hour", points: 1 });
     renderCats(d.overview);
   } catch (e) {}
 }
@@ -155,34 +185,99 @@ async function loadNetwork() {
 }
 $("btn-net").addEventListener("click", loadNetwork);
 
-// --- Search ---
-$("search-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const q = $("q").value.trim();
-  if (!q) return;
+// --- Gözat & Ara (tek sıralanabilir, sayfalı tablo) ---
+const browse = { q: "", cat: "all", sort: "", desc: true, offset: 0, PAGE: 60, hasMore: true, loading: false, loaded: false };
+
+function rowHtml(r, n) {
+  return `<tr>
+    <td class="r idx">${n}</td>
+    <td class="name" title="${escAttr(r.name)}">${esc(r.name)}</td>
+    <td>${catChip(r.category)}</td>
+    <td class="r num">${humanSize(r.size)}</td>
+    <td class="r num">${peerCell(r.peers)}</td>
+    <td class="r num">${nf(r.files)}</td>
+    <td class="r num" title="${escAttr(dateFull(r.last_seen))}">${dateShort(r.last_seen)}</td>
+    <td class="r num"><span class="copy" data-magnet="${escAttr(r.magnet)}">magnet</span></td>
+  </tr>`;
+}
+
+function resetAndLoad() {
+  browse.offset = 0; browse.hasMore = true; browse.loaded = true;
+  $("tbl-results").innerHTML = "";
+  $("results-empty").classList.add("hidden");
+  loadMore();
+}
+
+async function loadMore() {
+  if (browse.loading || !browse.hasMore) return;
+  browse.loading = true;
+  $("results-loading").classList.remove("hidden");
   try {
     const r = await invoke("search", {
-      query: q, limit: 200,
-      hideAdult: $("sf-adult").checked, onlyAlive: $("sf-alive").checked,
-      category: $("s-cat").value,
+      query: browse.q, limit: browse.PAGE, offset: browse.offset,
+      sort: browse.sort, desc: browse.desc,
+      category: browse.cat, hideAdult: $("sf-adult").checked, onlyAlive: $("sf-alive").checked,
     });
-    const rows = r.results;
-    $("search-empty").classList.toggle("hidden", rows.length > 0);
-    $("tbl-results").innerHTML = rows.map((x) => `
-      <tr>
-        <td class="name" title="${escAttr(x.name)}">${esc(x.name)}</td>
-        <td>${catChip(x.category)}</td>
-        <td class="r num">${humanSize(x.size)}</td>
-        <td class="r num">${peerCell(x.peers)}</td>
-        <td class="r num">${x.files}</td>
-        <td class="r num"><span class="copy" data-magnet="${escAttr(x.magnet)}">magnet</span></td>
-      </tr>`).join("");
-  } catch (e) { toast("Arama hatası"); }
+    const rows = r.results || [];
+    const start = browse.offset;
+    if (rows.length) {
+      $("tbl-results").insertAdjacentHTML("beforeend", rows.map((x, i) => rowHtml(x, start + i + 1)).join(""));
+    }
+    browse.offset += rows.length;
+    browse.hasMore = rows.length === browse.PAGE;
+    $("results-empty").classList.toggle("hidden", browse.offset > 0);
+    $("result-count").textContent = browse.offset > 0
+      ? `${nf(browse.offset)} sonuç${browse.hasMore ? "+" : ""}${browse.q ? "" : " (gözat)"}`
+      : "";
+  } catch (e) { toast("Yükleme hatası"); }
+  finally { browse.loading = false; $("results-loading").classList.add("hidden"); }
+  // İlk sayfa görünümü doldurmadıysa (scroll oluşmadıysa) bir sonrakini çek.
+  const el = $("results-wrap");
+  if (browse.hasMore && !browse.loading && el.scrollHeight <= el.clientHeight + 4) loadMore();
+}
+
+// sonsuz scroll
+$("results-wrap").addEventListener("scroll", (e) => {
+  const el = e.target;
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 140) loadMore();
+});
+
+// arama / temizle
+$("search-form").addEventListener("submit", (e) => { e.preventDefault(); browse.q = $("q").value.trim(); resetAndLoad(); });
+$("btn-clear").addEventListener("click", () => { $("q").value = ""; browse.q = ""; resetAndLoad(); });
+$("sf-adult").addEventListener("change", resetAndLoad);
+$("sf-alive").addEventListener("change", resetAndLoad);
+
+// kategori sekmeleri
+$("cattabs").addEventListener("click", (e) => {
+  const b = e.target.closest(".cattab"); if (!b) return;
+  document.querySelectorAll("#cattabs .cattab").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  browse.cat = b.dataset.cat; resetAndLoad();
+});
+
+// sıralanabilir başlıklar
+function updateSortUI() {
+  document.querySelectorAll(".sortable-th").forEach((th) => {
+    th.classList.remove("asc", "desc");
+    let a = th.querySelector(".arrow"); if (!a) { a = document.createElement("span"); a.className = "arrow"; th.appendChild(a); }
+    if (th.dataset.sort === browse.sort) { th.classList.add(browse.desc ? "desc" : "asc"); a.textContent = browse.desc ? "▼" : "▲"; }
+    else a.textContent = "";
+  });
+}
+document.querySelectorAll(".sortable-th").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (browse.sort === key) browse.desc = !browse.desc;
+    else { browse.sort = key; browse.desc = key !== "name"; } // ad varsayılan A→Z, diğerleri büyük→küçük
+    updateSortUI(); resetAndLoad();
+  });
 });
 
 // --- Start/Stop ---
 $("btn-toggle").addEventListener("click", async () => {
-  try { await invoke(scanning ? "stop_scan" : "start_scan"); await pollStats(); toast(scanning ? "Tarama başladı" : "Tarama durdu"); }
+  const wasScanning = scanning;
+  try { await invoke(wasScanning ? "stop_scan" : "start_scan"); await pollStats(); toast(wasScanning ? "Tarama durdu" : "Tarama başladı"); }
   catch (e) { toast("İşlem başarısız: " + e); }
 });
 
@@ -199,7 +294,26 @@ $("btn-update").addEventListener("click", async () => {
   } catch (e) { toast("Güncelleme hatası: " + e); }
 });
 
-// --- Settings ---
+// --- Settings + engel kelimeleri ---
+let blockKw = [];
+function renderBlockChips() {
+  const el = $("block-chips");
+  if (!blockKw.length) { el.innerHTML = `<span class="block-empty">Henüz engel kelimesi yok.</span>`; return; }
+  el.innerHTML = blockKw.map((k, i) =>
+    `<span class="block-chip">${esc(k)}<span class="x" data-i="${i}">✕</span></span>`).join("");
+}
+function addBlockKw(raw) {
+  const k = String(raw || "").trim().toLowerCase();
+  if (!k) return;
+  if (!blockKw.includes(k)) { blockKw.push(k); renderBlockChips(); }
+}
+$("block-form").addEventListener("submit", (e) => { e.preventDefault(); addBlockKw($("block-input").value); $("block-input").value = ""; });
+$("block-chips").addEventListener("click", (e) => {
+  const x = e.target.closest(".x"); if (!x) return;
+  blockKw.splice(Number(x.dataset.i), 1); renderBlockChips();
+});
+document.querySelectorAll(".preset-chip").forEach((p) => p.addEventListener("click", () => addBlockKw(p.dataset.kw)));
+
 async function loadSettings() {
   try {
     const s = await invoke("get_settings");
@@ -209,6 +323,8 @@ async function loadSettings() {
     $("set-port").value = s.harvester_port;
     $("set-autostart").checked = s.autostart;
     $("set-autoscan").checked = s.auto_scan;
+    blockKw = Array.isArray(s.block_keywords) ? s.block_keywords.slice() : [];
+    renderBlockChips();
     loadSettings._cur = s;
   } catch (e) {}
 }
@@ -220,9 +336,11 @@ $("btn-save").addEventListener("click", async () => {
   s.harvester_port = Number($("set-port").value) || 0;
   s.autostart = $("set-autostart").checked;
   s.auto_scan = $("set-autoscan").checked;
+  s.block_keywords = blockKw.slice();
   try {
     await invoke("set_settings", { settings: s });
     $("save-msg").textContent = "Kaydedildi ✓"; setTimeout(() => ($("save-msg").textContent = ""), 2000);
+    browse.loaded = false; // filtre değişmiş olabilir → gözat yeniden yüklensin
     await pollStats();
   } catch (e) { $("save-msg").textContent = "Hata: " + e; }
 });
@@ -230,8 +348,9 @@ $("btn-save").addEventListener("click", async () => {
 // --- Init ---
 (async function init() {
   try { const a = await invoke("app_info"); $("version").textContent = "v" + a.version; } catch (e) {}
+  updateSortUI();
   await pollStats();
   await loadDashboard();
   setInterval(pollStats, 2500);
-  setInterval(() => { if (!$("view-dashboard").classList.contains("hidden")) loadDashboard(); }, 15000);
+  setInterval(() => { if (!$("view-dashboard").classList.contains("hidden")) loadDashboard(); }, 20000);
 })();

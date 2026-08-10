@@ -55,19 +55,88 @@ pub struct Filter {
     pub hide_adult: bool,
     /// Belirli bir kategoriye sınırla.
     pub category: Option<String>,
+    /// Kullanıcı tanımlı engel kelimeleri: adı bunlardan birini (küçük harfe
+    /// duyarsız, alt-dize) içeren torrent'ler sonuçlardan gizlenir. Sorgu-anı
+    /// (yıkıcı olmayan) filtre — liste değişince eski sonuçlar geri gelir.
+    pub block_keywords: Vec<String>,
 }
 
 impl Filter {
-    /// Kod-kontrollü boolean koşullarının SQL parçası (`t.` önekiyle).
-    fn bool_sql(&self, prefix: &str) -> String {
-        let mut s = String::new();
+    /// Koşulların SQL parçası + sırayla bağlanacak parametreler. `prefix` sütun
+    /// önekidir (`t.` FTS join'inde, `""` düz listede). Kategori/engel kelimeleri
+    /// parametre olarak bağlanır → SQL enjeksiyonu yok.
+    fn where_and_binds(&self, prefix: &str) -> (String, Vec<String>) {
+        let mut sql = String::new();
+        let mut binds = Vec::new();
         if self.only_alive {
-            s.push_str(&format!(" AND {prefix}peer_count > 0"));
+            sql.push_str(&format!(" AND {prefix}peer_count > 0"));
         }
         if self.hide_adult {
-            s.push_str(&format!(" AND {prefix}category != 'adult'"));
+            sql.push_str(&format!(" AND {prefix}category != 'adult'"));
         }
-        s
+        if let Some(c) = &self.category {
+            sql.push_str(&format!(" AND {prefix}category = ?"));
+            binds.push(c.clone());
+        }
+        for kw in &self.block_keywords {
+            let k = kw.trim().to_lowercase();
+            if !k.is_empty() {
+                sql.push_str(&format!(" AND instr(lower({prefix}name), ?) = 0"));
+                binds.push(k);
+            }
+        }
+        (sql, binds)
+    }
+}
+
+/// Liste/arama sonuçlarının sıralama ölçütü (kod-kontrollü → SQL enjeksiyonu yok).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortKey {
+    /// Popülerlik (seen_count) + tazelik — arama için varsayılan.
+    #[default]
+    Relevance,
+    Name,
+    Size,
+    Seed,
+    Files,
+    /// Son görülme (last_seen).
+    Date,
+    /// İlk keşif (first_seen).
+    Added,
+    Seen,
+}
+
+impl SortKey {
+    /// Frontend'in gönderdiği anahtarı çözer (bilinmeyen → Relevance).
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "name" => Self::Name,
+            "size" => Self::Size,
+            "seed" => Self::Seed,
+            "files" => Self::Files,
+            "date" => Self::Date,
+            "added" => Self::Added,
+            "seen" => Self::Seen,
+            _ => Self::Relevance,
+        }
+    }
+
+    /// `ORDER BY` gövdesi (önek + yön ile). Relevance yönü yok sayar.
+    fn order_sql(self, prefix: &str, desc: bool) -> String {
+        let dir = if desc { "DESC" } else { "ASC" };
+        // Kararlı sıralama için ikincil anahtar olarak infohash.
+        match self {
+            Self::Relevance => {
+                format!("{prefix}seen_count DESC, {prefix}last_seen DESC, {prefix}infohash")
+            }
+            Self::Name => format!("{prefix}name COLLATE NOCASE {dir}, {prefix}infohash"),
+            Self::Size => format!("{prefix}total_size {dir}, {prefix}infohash"),
+            Self::Seed => format!("{prefix}peer_count {dir}, {prefix}infohash"),
+            Self::Files => format!("{prefix}file_count {dir}, {prefix}infohash"),
+            Self::Date => format!("{prefix}last_seen {dir}, {prefix}infohash"),
+            Self::Added => format!("{prefix}first_seen {dir}, {prefix}infohash"),
+            Self::Seen => format!("{prefix}seen_count {dir}, {prefix}infohash"),
+        }
     }
 }
 
@@ -304,33 +373,81 @@ impl Store {
     }
 
     /// FTS5 üzerinde `name` araması (filtreyle). Popülerliğe göre sıralar.
+    /// Geriye dönük sarmalayıcı: [`Store::search_paged`]'i varsayılan sıra/offset ile çağırır.
     pub async fn search(
         &self,
         query: &str,
         limit: i64,
         filter: &Filter,
     ) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.search_paged(query, limit, 0, SortKey::Relevance, true, filter)
+            .await
+    }
+
+    /// FTS5 araması — sıralama + sayfalama (`offset`) ile. Sonsuz-scroll/sayfalı UI için.
+    pub async fn search_paged(
+        &self,
+        query: &str,
+        limit: i64,
+        offset: i64,
+        sort: SortKey,
+        desc: bool,
+        filter: &Filter,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
         let match_query = to_fts_query(query);
         if match_query.is_empty() {
             return Ok(Vec::new());
         }
-        let has_cat = filter.category.is_some();
+        let (fsql, fbinds) = filter.where_and_binds("t.");
         let sql = format!(
             "SELECT t.infohash, t.name, t.total_size, t.file_count, t.seen_count,
                     t.first_seen, t.last_seen, t.peer_count, t.last_check, t.category
                FROM torrents_fts f JOIN torrents t ON t.infohash = f.infohash
-              WHERE f.name MATCH ?1 AND t.metadata_status = 'fetched'{bools}{cat}
-              ORDER BY t.seen_count DESC, t.last_seen DESC
-              LIMIT ?{lim}",
-            bools = filter.bool_sql("t."),
-            cat = if has_cat { " AND t.category = ?2" } else { "" },
-            lim = if has_cat { "3" } else { "2" },
+              WHERE f.name MATCH ? AND t.metadata_status = 'fetched'{fsql}
+              ORDER BY {order}
+              LIMIT ? OFFSET ?",
+            order = sort.order_sql("t.", desc),
         );
         let mut q = sqlx::query(&sql).bind(&match_query);
-        if let Some(c) = &filter.category {
-            q = q.bind(c.clone());
+        for b in fbinds {
+            q = q.bind(b);
         }
-        let rows = q.bind(limit.max(0)).fetch_all(&self.pool).await?;
+        let rows = q
+            .bind(limit.max(0))
+            .bind(offset.max(0))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(row_to_summary).collect()
+    }
+
+    /// Sorgusuz gözatma: FTS olmadan tüm (çekilmiş) torrent'leri sıralama +
+    /// sayfalama + filtreyle listeler. Boş sorguda "gözat" tablosunu besler.
+    pub async fn list_paged(
+        &self,
+        limit: i64,
+        offset: i64,
+        sort: SortKey,
+        desc: bool,
+        filter: &Filter,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
+        let (fsql, fbinds) = filter.where_and_binds("");
+        let sql = format!(
+            "SELECT infohash, name, total_size, file_count, seen_count, first_seen, last_seen,
+                    peer_count, last_check, category
+               FROM torrents WHERE metadata_status = 'fetched'{fsql}
+              ORDER BY {order}
+              LIMIT ? OFFSET ?",
+            order = sort.order_sql("", desc),
+        );
+        let mut q = sqlx::query(&sql);
+        for b in fbinds {
+            q = q.bind(b);
+        }
+        let rows = q
+            .bind(limit.max(0))
+            .bind(offset.max(0))
+            .fetch_all(&self.pool)
+            .await?;
         rows.iter().map(row_to_summary).collect()
     }
 
@@ -379,18 +496,27 @@ impl Store {
     }
 
     /// Saatlik keşif sayıları (grafik için): `(saat_başı_unix, sayı)`, en yeni önce.
+    /// Geriye dönük sarmalayıcı — [`Store::discovery`]'yi saatlik kovayla çağırır.
     pub async fn hourly_discovery(&self, hours: i64) -> Result<Vec<(i64, i64)>, StoreError> {
+        self.discovery(3600, hours).await
+    }
+
+    /// Zaman serisi keşif sayıları (grafik): `bucket_secs` kova genişliği (saat=3600,
+    /// gün=86400), en fazla `points` kova, en yeni önce. `(kova_başı_unix, sayı)`.
+    pub async fn discovery(&self, bucket_secs: i64, points: i64) -> Result<Vec<(i64, i64)>, StoreError> {
+        let bucket = bucket_secs.max(1);
         let rows = sqlx::query(
-            "SELECT (first_seen / 3600) * 3600 AS hour, COUNT(*) AS n
+            "SELECT (first_seen / ?1) * ?1 AS bkt, COUNT(*) AS n
                FROM torrents WHERE metadata_status = 'fetched'
-              GROUP BY hour ORDER BY hour DESC LIMIT ?1",
+              GROUP BY bkt ORDER BY bkt DESC LIMIT ?2",
         )
-        .bind(hours.max(1))
+        .bind(bucket)
+        .bind(points.max(1))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .iter()
-            .map(|r| (r.get::<i64, _>("hour"), r.get::<i64, _>("n")))
+            .map(|r| (r.get::<i64, _>("bkt"), r.get::<i64, _>("n")))
             .collect())
     }
 
@@ -472,43 +598,17 @@ impl Store {
 
     /// Popülerliğe (`seen_count`) göre en çok görülen torrent'ler (dashboard).
     pub async fn top_by_seen(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
-        self.top_summaries("seen_count", limit, filter).await
+        self.list_paged(limit, 0, SortKey::Seen, true, filter).await
     }
 
     /// Boyuta göre en büyük torrent'ler (dashboard).
     pub async fn top_by_size(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
-        self.top_summaries("total_size", limit, filter).await
+        self.list_paged(limit, 0, SortKey::Size, true, filter).await
     }
 
     /// En son indekslenen torrent'ler (dashboard).
     pub async fn recent(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
-        self.top_summaries("first_seen", limit, filter).await
-    }
-
-    /// Verilen sütuna göre azalan sırada özet listesi (filtreyle). `order_col` yalnız
-    /// kod içi sabittir (kullanıcı girdisi değil) → SQL enjeksiyonu yok.
-    async fn top_summaries(
-        &self,
-        order_col: &str,
-        limit: i64,
-        filter: &Filter,
-    ) -> Result<Vec<TorrentSummary>, StoreError> {
-        let has_cat = filter.category.is_some();
-        let sql = format!(
-            "SELECT infohash, name, total_size, file_count, seen_count, first_seen, last_seen,
-                    peer_count, last_check, category
-               FROM torrents WHERE metadata_status = 'fetched'{bools}{cat}
-              ORDER BY {order_col} DESC LIMIT ?{lim}",
-            bools = filter.bool_sql(""),
-            cat = if has_cat { " AND category = ?1" } else { "" },
-            lim = if has_cat { "2" } else { "1" },
-        );
-        let mut q = sqlx::query(&sql);
-        if let Some(c) = &filter.category {
-            q = q.bind(c.clone());
-        }
-        let rows = q.bind(limit.max(0)).fetch_all(&self.pool).await?;
-        rows.iter().map(row_to_summary).collect()
+        self.list_paged(limit, 0, SortKey::Added, true, filter).await
     }
 
     /// Metadata çekilemeyen bir infohash'i `unreachable` işaretler (yalnız `pending` ise).
@@ -726,6 +826,59 @@ mod tests {
         // Saatlik keşif: iki kayıt aynı saatte → toplam 2.
         let hourly = store.hourly_discovery(48).await.unwrap();
         assert_eq!(hourly.iter().map(|(_, n)| n).sum::<i64>(), 2);
+    }
+
+    #[tokio::test]
+    async fn block_keywords_hide_matching_names() {
+        let store = Store::in_memory().await.unwrap();
+        store.upsert_torrent(&record("1111111111111111111111111111111111111111", "Clean Movie 1080p", 1)).await.unwrap();
+        store.upsert_torrent(&record("2222222222222222222222222222222222222222", "Some CAM rip", 1)).await.unwrap();
+
+        // Filtresiz: ikisi de gözat listesinde.
+        let all = store.list_paged(10, 0, SortKey::Name, false, &Filter::default()).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        // "cam" engellenince yalnız temiz kayıt kalır (küçük harfe duyarsız).
+        let f = Filter { block_keywords: vec!["cam".into()], ..Default::default() };
+        let filtered = store.list_paged(10, 0, SortKey::Name, false, &f).await.unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "Clean Movie 1080p");
+
+        // Aramada da uygulanır.
+        let s = store.search_paged("rip", 10, 0, SortKey::Relevance, true, &f).await.unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_paged_offset_and_sort() {
+        let store = Store::in_memory().await.unwrap();
+        for (i, (hex, name, size)) in [
+            ("1111111111111111111111111111111111111111", "Alpha", 300u64),
+            ("2222222222222222222222222222222222222222", "Bravo", 100),
+            ("3333333333333333333333333333333333333333", "Charlie", 200),
+        ].into_iter().enumerate() {
+            let mut r = record(hex, name, size);
+            r.first_seen = 1000 + i as i64;
+            store.upsert_torrent(&r).await.unwrap();
+        }
+        // Ada göre artan sırala + sayfalama.
+        let p1 = store.list_paged(2, 0, SortKey::Name, false, &Filter::default()).await.unwrap();
+        assert_eq!(p1.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Alpha", "Bravo"]);
+        let p2 = store.list_paged(2, 2, SortKey::Name, false, &Filter::default()).await.unwrap();
+        assert_eq!(p2.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Charlie"]);
+        // Boyuta göre azalan.
+        let by_size = store.list_paged(10, 0, SortKey::Size, true, &Filter::default()).await.unwrap();
+        assert_eq!(by_size[0].name, "Alpha"); // 300 en büyük
+        // Gün kovası: hepsi aynı gün → tek kova, toplam 3.
+        let daily = store.discovery(86_400, 30).await.unwrap();
+        assert_eq!(daily.iter().map(|(_, n)| n).sum::<i64>(), 3);
+    }
+
+    #[test]
+    fn sort_key_parse_defaults_to_relevance() {
+        assert_eq!(SortKey::parse("size"), SortKey::Size);
+        assert_eq!(SortKey::parse("added"), SortKey::Added);
+        assert_eq!(SortKey::parse("bogus"), SortKey::Relevance);
     }
 
     #[test]

@@ -12,10 +12,10 @@
       {
         "label": "main",
         "title": "Dragnet",
-        "width": 1040,
-        "height": 720,
-        "minWidth": 900,
-        "minHeight": 600,
+        "width": 1320,
+        "height": 820,
+        "minWidth": 940,
+        "minHeight": 620,
         "center": true,
         "visible": false
       }
