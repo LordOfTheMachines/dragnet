@@ -96,6 +96,8 @@ pub enum SortKey {
     #[default]
     Relevance,
     Name,
+    /// Kategori (alfabetik) — aynı kategoriyi alt alta gruplar.
+    Category,
     Size,
     Seed,
     Files,
@@ -111,6 +113,7 @@ impl SortKey {
     pub fn parse(s: &str) -> Self {
         match s {
             "name" => Self::Name,
+            "cat" => Self::Category,
             "size" => Self::Size,
             "seed" => Self::Seed,
             "files" => Self::Files,
@@ -130,6 +133,10 @@ impl SortKey {
                 format!("{prefix}seen_count DESC, {prefix}last_seen DESC, {prefix}infohash")
             }
             Self::Name => format!("{prefix}name COLLATE NOCASE {dir}, {prefix}infohash"),
+            // Kategoriye göre gruplarken ikincil anahtar ad → grup içinde de düzenli.
+            Self::Category => {
+                format!("{prefix}category COLLATE NOCASE {dir}, {prefix}name COLLATE NOCASE, {prefix}infohash")
+            }
             Self::Size => format!("{prefix}total_size {dir}, {prefix}infohash"),
             Self::Seed => format!("{prefix}peer_count {dir}, {prefix}infohash"),
             Self::Files => format!("{prefix}file_count {dir}, {prefix}infohash"),
@@ -878,7 +885,24 @@ mod tests {
     fn sort_key_parse_defaults_to_relevance() {
         assert_eq!(SortKey::parse("size"), SortKey::Size);
         assert_eq!(SortKey::parse("added"), SortKey::Added);
+        assert_eq!(SortKey::parse("cat"), SortKey::Category);
         assert_eq!(SortKey::parse("bogus"), SortKey::Relevance);
+    }
+
+    #[tokio::test]
+    async fn sort_by_category_groups_alphabetically() {
+        let store = Store::in_memory().await.unwrap();
+        // Kategorileri belli olan kayıtlar (categorize heuristiği ada bakar).
+        store.upsert_torrent(&record("1111111111111111111111111111111111111111", "Ubuntu 24.04 amd64.iso", 1)).await.unwrap();
+        store.upsert_torrent(&record("2222222222222222222222222222222222222222", "Song - Album FLAC", 1)).await.unwrap();
+        store.upsert_torrent(&record("3333333333333333333333333333333333333333", "Movie 1080p x264.mkv", 1)).await.unwrap();
+
+        let rows = store.list_paged(10, 0, SortKey::Category, false, &Filter::default()).await.unwrap();
+        let cats: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
+        // Alfabetik artan → aynı kategoriler bitişik ve sıralı.
+        let mut sorted = cats.clone();
+        sorted.sort();
+        assert_eq!(cats, sorted, "kategoriler alfabetik gruplanmalı");
     }
 
     #[test]

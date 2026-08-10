@@ -269,7 +269,8 @@ document.querySelectorAll(".sortable-th").forEach((th) => {
   th.addEventListener("click", () => {
     const key = th.dataset.sort;
     if (browse.sort === key) browse.desc = !browse.desc;
-    else { browse.sort = key; browse.desc = key !== "name"; } // ad varsayılan A→Z, diğerleri büyük→küçük
+    // ad/kategori varsayılan A→Z (artan); diğerleri büyük→küçük.
+    else { browse.sort = key; browse.desc = key !== "name" && key !== "cat"; }
     updateSortUI(); resetAndLoad();
   });
 });
