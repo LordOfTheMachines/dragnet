@@ -808,6 +808,8 @@ impl Store {
     /// indeksten, en yakından uzağa) RRF ile harmanlanır; filtre uygulanır; sayfalanır.
     /// `sort == Relevance` → harman sırası; diğer anahtarlarda birleşik aday kümesi
     /// istenen anahtarla sıralanır. Semantik liste boşsa saf FTS'e denk düşer.
+    // Arama parametreleri `search_paged` ile simetrik (mevcut çağıran sözleşmesi).
+    #[allow(clippy::too_many_arguments)]
     pub async fn search_hybrid_paged(
         &self,
         query: &str,
