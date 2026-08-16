@@ -7,6 +7,8 @@
 //! (sello-core/sello-app deseni) — böylece "tek exe" mümkün olur, ayrı bir
 //! daemon süreci gerekmez.
 
+pub mod semantic_indexer;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -106,7 +108,9 @@ impl Engine {
             let store = store.clone();
             tasks.push(tokio::spawn(async move {
                 match store.recategorize(50_000).await {
-                    Ok(n) if n > 0 => info!(updated = n, "mevcut kayıtlar yeniden kategorilendirildi"),
+                    Ok(n) if n > 0 => {
+                        info!(updated = n, "mevcut kayıtlar yeniden kategorilendirildi")
+                    }
                     _ => {}
                 }
             }));

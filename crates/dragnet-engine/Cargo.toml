@@ -13,3 +13,4 @@ dragnet-store = { path = "../dragnet-store" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+dragnet-semantic = { path = "../dragnet-semantic" }
