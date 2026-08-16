@@ -73,7 +73,34 @@ async function pollStats() {
     $("status-text").textContent = scanning ? "Tarıyor" : "Durdu";
     $("status-pill").className = "pill " + (scanning ? "on" : "off");
     $("btn-toggle").textContent = scanning ? "Taramayı Durdur" : "Taramayı Başlat";
+    renderSemantic(s.semantic);
   } catch (e) {}
+}
+
+// --- Semantik arama durumu (ayarlar kartı + arama rozeti) ---
+let semReady = false;
+function renderSemantic(st) {
+  if (!st) return;
+  const el = $("sem-status"), prog = $("sem-progress"), bar = $("sem-bar");
+  semReady = st.phase === "ready";
+  let txt = "Kapalı"; let pct = 0; let showBar = false;
+  if (st.phase === "downloading") {
+    showBar = true;
+    pct = st.total > 0 ? Math.round(100 * st.done / st.total) : 0;
+    txt = `Model indiriliyor… ${st.file || ""} ${st.total > 0 ? pct + "%" : humanSize(st.done)}`;
+  } else if (st.phase === "loading") { txt = "Model yükleniyor…"; }
+  else if (st.phase === "ready") {
+    txt = `Hazır — ${st.model} · ${st.device === "directml" ? "GPU (DirectML)" : "CPU"} · ${nf(st.indexed)} kayıt indekslendi (${st.index_mb} MB RAM)`;
+  } else if (st.phase === "error") { txt = "Hata: " + (st.error || ""); }
+  el.textContent = txt;
+  el.className = "muted small" + (st.phase === "error" ? " err" : "");
+  prog.classList.toggle("hidden", !showBar);
+  bar.style.width = pct + "%";
+  // Arama rozeti: semantik hazırsa göster (son aramanın modu ile).
+  const badge = $("sem-badge");
+  badge.classList.toggle("hidden", !semReady && st.phase !== "downloading" && st.phase !== "loading");
+  if (st.phase !== "ready") { badge.className = "pill off"; $("sem-badge-text").textContent = st.phase === "downloading" ? "Semantik: indiriliyor" : st.phase === "loading" ? "Semantik: yükleniyor" : "Semantik"; }
+  else if (!browse.lastMode) { badge.className = "pill on"; $("sem-badge-text").textContent = "Semantik hazır"; }
 }
 
 // --- Dashboard (chart + network) ---
@@ -186,7 +213,7 @@ async function loadNetwork() {
 $("btn-net").addEventListener("click", loadNetwork);
 
 // --- Gözat & Ara (tek sıralanabilir, sayfalı tablo) ---
-const browse = { q: "", cat: "all", sort: "", desc: true, offset: 0, PAGE: 60, hasMore: true, loading: false, loaded: false };
+const browse = { q: "", cat: "all", sort: "", desc: true, offset: 0, PAGE: 60, hasMore: true, loading: false, loaded: false, mode: "auto", lastMode: "" };
 
 function rowHtml(r, n) {
   return `<tr>
@@ -217,8 +244,16 @@ async function loadMore() {
       query: browse.q, limit: browse.PAGE, offset: browse.offset,
       sort: browse.sort, desc: browse.desc,
       category: browse.cat, hideAdult: $("sf-adult").checked, onlyAlive: $("sf-alive").checked,
+      mode: browse.mode,
     });
     const rows = r.results || [];
+    if (browse.q && r.mode) {
+      browse.lastMode = r.mode;
+      const badge = $("sem-badge");
+      badge.classList.toggle("hidden", !semReady);
+      badge.className = "pill " + (r.mode === "fts" ? "off" : "on") + (semReady ? "" : " hidden");
+      $("sem-badge-text").textContent = r.mode === "hybrid" ? "Hibrit (FTS + semantik)" : r.mode === "semantic" ? "Semantik" : "Yalnız FTS";
+    } else if (!browse.q) { browse.lastMode = ""; }
     const start = browse.offset;
     if (rows.length) {
       $("tbl-results").insertAdjacentHTML("beforeend", rows.map((x, i) => rowHtml(x, start + i + 1)).join(""));
@@ -324,6 +359,9 @@ async function loadSettings() {
     $("set-port").value = s.harvester_port;
     $("set-autostart").checked = s.autostart;
     $("set-autoscan").checked = s.auto_scan;
+    $("set-sem").checked = !!s.semantic_enabled;
+    $("set-sem-tier").value = s.semantic_tier || "quality";
+    $("set-sem-device").value = s.semantic_device || "auto";
     blockKw = Array.isArray(s.block_keywords) ? s.block_keywords.slice() : [];
     renderBlockChips();
     loadSettings._cur = s;
@@ -338,6 +376,9 @@ $("btn-save").addEventListener("click", async () => {
   s.autostart = $("set-autostart").checked;
   s.auto_scan = $("set-autoscan").checked;
   s.block_keywords = blockKw.slice();
+  s.semantic_enabled = $("set-sem").checked;
+  s.semantic_tier = $("set-sem-tier").value;
+  s.semantic_device = $("set-sem-device").value;
   try {
     await invoke("set_settings", { settings: s });
     $("save-msg").textContent = "Kaydedildi ✓"; setTimeout(() => ($("save-msg").textContent = ""), 2000);

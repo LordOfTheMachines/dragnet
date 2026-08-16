@@ -9,6 +9,7 @@
 
 mod autostart;
 mod commands;
+mod semantic;
 mod settings;
 mod updater;
 
@@ -37,6 +38,8 @@ pub struct AppState {
     pub settings: StdMutex<Settings>,
     /// BEP-51 örnek/sn hesabı için önceki örnek sayacı + zamanı.
     pub rate_prev: StdMutex<(u64, Instant)>,
+    /// Semantik arama yöneticisi (yuva + indeksleyici + UI durumu).
+    pub semantic: std::sync::Arc<semantic::SemanticManager>,
 }
 
 fn main() {
@@ -60,6 +63,16 @@ fn main() {
                 }
             };
 
+            // Semantik yönetici: yuva API ve arama komutuyla paylaşılır; ayar açıksa
+            // arka planda kurulur (indirme/yükleme UI'yı bloklamaz).
+            let semantic = std::sync::Arc::new(semantic::SemanticManager::new());
+            {
+                let sm = std::sync::Arc::clone(&semantic);
+                let st = store.clone();
+                let s = settings.clone();
+                tauri::async_runtime::spawn(async move { sm.apply(st, &s).await });
+            }
+
             // Arama API'si çekirdekten AYRI, uzun ömürlü: tarama durdurulsa bile
             // (qBittorrent eklentisi dahil) arama erişimi kesilmez. Depoya karşı sunar.
             match settings.api_addr() {
@@ -70,8 +83,11 @@ fn main() {
                         ..Default::default()
                     };
                     let api_store = store.clone();
+                    let api_slot = semantic.slot.clone();
                     tauri::async_runtime::spawn(async move {
-                        if let Err(e) = dragnet_api::serve(api_cfg, api_store).await {
+                        if let Err(e) =
+                            dragnet_api::serve_with_semantic(api_cfg, api_store, api_slot).await
+                        {
                             tracing::error!(error = %e, "API sunucusu durdu");
                         }
                     });
@@ -99,6 +115,7 @@ fn main() {
                 engine: TokioMutex::new(engine),
                 settings: StdMutex::new(settings),
                 rate_prev: StdMutex::new((0, Instant::now())),
+                semantic,
             });
 
             build_tray(app.handle())?;
@@ -129,6 +146,7 @@ fn main() {
             commands::get_settings,
             commands::set_settings,
             commands::set_autostart,
+            commands::semantic_status,
             commands::check_update,
             commands::install_update,
         ])
@@ -184,8 +202,9 @@ fn init_logging() -> Option<()> {
         .ok()?;
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,dragnet_engine=info,dragnet_dht=info,mainline=error".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "info,dragnet_engine=info,dragnet_dht=info,mainline=error".into()
+            }),
         )
         .with_writer(move || file.try_clone().expect("log dosyası klonlanamadı"))
         .with_ansi(false)

@@ -25,6 +25,26 @@ pub struct Settings {
     /// alt-dize) içeren torrent'ler arama/gözat sonuçlarında gizlenir. Yıkıcı değil.
     #[serde(default)]
     pub block_keywords: Vec<String>,
+    /// Semantik (anlamsal) arama — opt-in. Açılınca model indirilir (bir kez), indeks
+    /// arka planda kurulur; kapalıyken davranış birebir eski FTS.
+    #[serde(default)]
+    pub semantic_enabled: bool,
+    /// Kademe: `light` | `balanced` | `quality` (bkz. ARCHITECTURE §7.3).
+    #[serde(default = "default_tier")]
+    pub semantic_tier: String,
+    /// Cihaz: `auto` | `gpu` | `cpu`.
+    #[serde(default = "default_device")]
+    pub semantic_device: String,
+    /// Model dizini (boş = exe yanında `models`). Kısa/düz bir yol olmalı.
+    #[serde(default)]
+    pub semantic_models_dir: String,
+}
+
+fn default_tier() -> String {
+    "quality".to_string()
+}
+fn default_device() -> String {
+    "auto".to_string()
 }
 
 impl Default for Settings {
@@ -40,6 +60,10 @@ impl Default for Settings {
             autostart: false,
             auto_scan: true,
             block_keywords: Vec::new(),
+            semantic_enabled: false,
+            semantic_tier: default_tier(),
+            semantic_device: default_device(),
+            semantic_models_dir: String::new(),
             seed_infohashes: vec![
                 "08ada5a7a6183aae1e09d831df6748d566095a10".to_string(), // Sintel
                 "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c".to_string(), // Big Buck Bunny
@@ -115,5 +139,26 @@ impl Settings {
     /// Sorgu deposu için mutlak db yolu.
     pub fn db_path_abs(&self) -> String {
         self.resolved_db_path()
+    }
+
+    /// Model dizini (mutlak). Boşsa exe yanında `models`.
+    pub fn models_dir_abs(&self) -> PathBuf {
+        let p = PathBuf::from(self.semantic_models_dir.trim());
+        if self.semantic_models_dir.trim().is_empty() {
+            exe_dir().join("models")
+        } else if p.is_absolute() {
+            p
+        } else {
+            exe_dir().join(p)
+        }
+    }
+
+    /// Semantik katman yapılandırması.
+    pub fn semantic_config(&self) -> dragnet_semantic::SemanticConfig {
+        dragnet_semantic::SemanticConfig {
+            tier: dragnet_semantic::Tier::parse(&self.semantic_tier),
+            device: dragnet_semantic::Device::parse(&self.semantic_device),
+            models_dir: self.models_dir_abs(),
+        }
     }
 }

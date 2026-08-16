@@ -157,3 +157,10 @@ input[type=text]:focus, input[type=number]:focus { outline: none; border-color: 
 .preset-chip:hover { color: var(--text); border-color: var(--accent); }
 
 .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--border2); padding: 11px 20px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.5); z-index: 40; }
+
+/* Semantik arama (Faz D) */
+.settings select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line, #2a3242); background: var(--panel-2, #151b26); color: inherit; font: inherit; }
+.progress { height: 6px; border-radius: 999px; background: rgba(147,160,179,.15); overflow: hidden; margin-top: 8px; }
+.progress .bar { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+#sem-badge { margin-right: 10px; vertical-align: middle; }
+.err { color: #ff7b7b; }

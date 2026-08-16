@@ -82,7 +82,7 @@
             <label class="chk"><input id="sf-adult" type="checkbox" checked /> Yetişkin gizle</label>
             <label class="chk"><input id="sf-alive" type="checkbox" /> Sadece canlı</label>
           </div>
-          <div class="result-meta"><span id="result-count" class="muted"></span></div>
+          <div class="result-meta"><span id="sem-badge" class="pill off hidden" title="Semantik arama"><span class="dot"></span><span id="sem-badge-text">Semantik</span></span> <span id="result-count" class="muted"></span></div>
         </div>
 
         <div class="tblwrap results-wrap" id="results-wrap">
@@ -156,6 +156,32 @@
           </label>
           <label class="chk"><input id="set-autostart" type="checkbox" /> Windows'ta başlangıçta başlat</label>
           <label class="chk"><input id="set-autoscan" type="checkbox" /> Açılışta taramayı otomatik başlat</label>
+        </div>
+
+        <div class="card settings">
+          <h3>Semantik (anlamsal) arama</h3>
+          <p class="muted small" style="margin-top:0">
+            Doğal dil ve eşanlamlı sorgular ("2000'lerin bilim kurgu filmleri", "matriks filmi") için yerel
+            embedding modeli. Tamamen <b>çevrimdışı</b> çalışır; model bir kez indirilir. Açılınca indeks arka planda kurulur.
+          </p>
+          <label class="chk"><input id="set-sem" type="checkbox" /> Semantik aramayı etkinleştir (FTS ile hibrit)</label>
+          <label>Kademe (hız ↔ kalite)
+            <select id="set-sem-tier">
+              <option value="light">Hafif — potion-multilingual (statik; anında indeksleme, ~500 MB)</option>
+              <option value="balanced">Dengeli — MiniLM-L12 multilingual (int8; ~250 MB)</option>
+              <option value="quality">Yüksek kalite — EmbeddingGemma-300m Q4 (~230 MB; GPU önerilir)</option>
+            </select>
+            <small>Kademe değişince indeks yeniden kurulur.</small>
+          </label>
+          <label>Cihaz
+            <select id="set-sem-device">
+              <option value="auto">Otomatik (GPU varsa DirectML, yoksa CPU)</option>
+              <option value="gpu">GPU (DirectML)</option>
+              <option value="cpu">CPU</option>
+            </select>
+          </label>
+          <div id="sem-status" class="muted small">Kapalı</div>
+          <div class="progress hidden" id="sem-progress"><div class="bar" id="sem-bar"></div></div>
         </div>
 
         <div class="card settings">
