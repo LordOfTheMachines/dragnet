@@ -133,10 +133,7 @@ fn as_dict(v: &Value) -> Option<&std::collections::HashMap<Vec<u8>, Value>> {
     }
 }
 
-fn dict_get<'a>(
-    d: &'a std::collections::HashMap<Vec<u8>, Value>,
-    key: &[u8],
-) -> Option<&'a Value> {
+fn dict_get<'a>(d: &'a std::collections::HashMap<Vec<u8>, Value>, key: &[u8]) -> Option<&'a Value> {
     d.get(key)
 }
 

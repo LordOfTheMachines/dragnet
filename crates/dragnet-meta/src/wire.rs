@@ -68,9 +68,7 @@ async fn fetch_inner(addr: SocketAddrV4, infohash: [u8; 20]) -> Result<Vec<u8>, 
     }
 
     // --- BEP-10 extended handshake ---
-    stream
-        .write_all(&build_extended_handshake())
-        .await?;
+    stream.write_all(&build_extended_handshake()).await?;
 
     let (peer_ut_metadata_id, metadata_size) = read_extended_handshake(&mut stream).await?;
     if peer_ut_metadata_id == 0 {
@@ -350,7 +348,7 @@ mod tests {
         // Aşırı/uydurma string uzunluğu → None (slice paniği yok).
         assert_eq!(bencode_value_len(b"999:ab"), None);
         assert_eq!(bencode_value_len(b"18446744073709551616:x"), None); // usize taşması
-        // Geçerli girdi hâlâ çalışır.
+                                                                        // Geçerli girdi hâlâ çalışır.
         assert_eq!(bencode_value_len(b"4:spam"), Some(6));
         assert_eq!(bencode_value_len(b"ld1:ai1eee"), Some(10));
     }

@@ -72,9 +72,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     stats_task.abort();
     let s = stats.snapshot();
-    info!(
-        toplam_benzersiz = s.unique_infohashes,
-        "bitti"
-    );
+    info!(toplam_benzersiz = s.unique_infohashes, "bitti");
     Ok(())
 }
