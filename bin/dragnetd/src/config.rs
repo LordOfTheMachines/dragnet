@@ -29,6 +29,15 @@ pub struct Config {
     /// Başlangıçta çekilip indekslenecek infohash'ler (40-hex). İndeksi ısıtmak
     /// veya bilinen torrent'leri sabitlemek için. Varsayılan: boş.
     pub seed_infohashes: Vec<String>,
+    /// Semantik (anlamsal) arama — opt-in (Faz D). Açıksa model bir kez indirilir,
+    /// indeks arka planda kurulur, `/search` varsayılan olarak hibrit çalışır.
+    pub semantic_enabled: bool,
+    /// Kademe: `light` | `balanced` | `quality`.
+    pub semantic_tier: String,
+    /// Cihaz: `auto` | `gpu` | `cpu`.
+    pub semantic_device: String,
+    /// Model dizini (kısa/düz bir yol; varsayılan `models`).
+    pub semantic_models_dir: String,
 }
 
 impl Default for Config {
@@ -42,6 +51,10 @@ impl Default for Config {
             fetch_workers: 2,
             fetch_peer_concurrency: 6,
             seed_infohashes: Vec::new(),
+            semantic_enabled: false,
+            semantic_tier: "quality".to_string(),
+            semantic_device: "auto".to_string(),
+            semantic_models_dir: "models".to_string(),
         }
     }
 }

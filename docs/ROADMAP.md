@@ -79,7 +79,17 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       kategori hızlı sekmeleri; SVG çizgi grafik (saat/gün seçimli keşif serisi); palet cilası
 - [x] Kalite çevrimleri (2 tur): kritik bencode DoS guard'ları, XSS/CSP, atomik ayar yazımı,
       mutex-poison kurtarma, API'nin çekirdekten ayrılması (tarama durunca arama kesilmez)
-- [ ] Semantik arama (yerel embedding + doğal dil sorgu) — **Faz D (SIRADAKİ, yeni oturum)**
+- [x] **Faz D: Semantik arama** — `dragnet-semantic` crate (Embedder trait; 3 kademe:
+      potion-multilingual / MiniLM-L12 int8 / EmbeddingGemma-300m Q4; ort + DirectML GPU;
+      int8 bellek-içi brute-force indeks; `torrent_embeddings` kalıcılığı; RRF hibrit
+      arama; API `mode=fts|semantic|hybrid`; app ayarları (kademe/cihaz, anında aç/kapa,
+      indirme ilerlemesi); dragnetd `semantic_*` config). Bake-off + kararlar ARCHITECTURE
+      §7.3. **DoD:** ✅ 30+ offline test (mock embedder); 3 kademe gerçek modelle duman
+      testi; canlı e2e: "tavşan animasyonu"→Big Buck Bunny, "çelik gözyaşları bilim
+      kurgu"→Tears of Steel, "buck buny"→Big Buck Bunny (FTS boş dönerken); `mode=fts`
+      eski davranış; DirectML aktif.
+- [ ] Semantik: özel damıtılmış model (Model2Vec ile Gemma'dan torrent-adı korpusuna
+      damıtma) + kendi GitHub release'inden dağıtım; CUDA EP opsiyonu; >2M kayıtta ANN (HNSW)
 - [ ] Web arayüzü (magneticow benzeri gözat/ara)
 - [ ] BitTorrent v2 (SHA-256 infohash)
 - [ ] PostgreSQL'e ölçekleme, dağıtık crawler

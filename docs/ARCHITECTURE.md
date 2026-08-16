@@ -57,13 +57,27 @@
   gelen JSON'u `novaprinter.prettyPrinter` sözleşmesine (`link|name|size|seeds|leech|...`) çevirir.
 - qBittorrent kaynağına dokunmaz; kullanıcı bu dosyayı kendi arama-plugin dizinine kopyalar.
 
+### 2.7 `dragnet-semantic` — Semantik arama (Faz D)
+- Yerel (çevrimdışı) embedding + hibrit arama. `Embedder` trait'i altında 3 kademe:
+  **hafif** (potion-multilingual, model2vec, saf Rust), **dengeli** (MiniLM-L12 int8, ONNX),
+  **yüksek kalite** (EmbeddingGemma-300m Q4, ONNX; Windows'ta DirectML GPU). Karar: §7.3.
+- Vektörler `torrent_embeddings` (int8 BLOB) tablosunda kalıcı; açılışta bellek-içi
+  `VecIndex`'e yüklenir, brute-force kosinüs (500k×768 ≈ 150 ms). ANN yok (açık karar §7.4).
+- Hibrit: `dragnet-api::search` FTS adaylarını ve semantik top-k'yı RRF ile harmanlar;
+  `mode=fts|semantic|hybrid`. Katman **opt-in** ve çalışma anında takılıp çıkarılabilir
+  (`SemanticSlot`) — kapalıyken davranış birebir eski FTS.
+- İndeksleme `dragnet-engine::semantic_indexer` ile Engine'den bağımsız (tarama kapalıyken
+  de çalışır): backlog → partili embed (`spawn_blocking`) → SQLite + RAM. Model dosyaları
+  kısa/düz `models/<id>/` dizinine bir kez indirilir (HF; kendi release açık karar).
+
 ## 3. Veri akışı (uçtan uca)
 
 1. `dragnet-dht` ağı tarar, ham infohash üretir.
 2. Sınırlı kanal + dedup (yakın zamanda görülenler için bloom/LRU) → gürültüyü keser.
 3. `dragnet-meta` havuzu her yeni infohash için metadata çeker (paralel, zaman aşımlı).
 4. Başarılı kayıtlar `dragnet-store`'a yazılır; FTS indeksine girer.
-5. `dragnet-api` sorguları FTS üzerinden yanıtlar.
+5. `dragnet-api` sorguları FTS üzerinden yanıtlar; semantik açıksa FTS + vektör adaylarını
+   RRF ile harmanlar (hibrit).
 6. qBittorrent plugin'i API'yi sorgular, kullanıcıya sonuç gösterir.
 
 ## 4. Veri modeli (ilk taslak)
@@ -83,6 +97,8 @@
 
 `files` tablosu (1-N): `infohash`, `path`, `size`.
 `torrents_fts` (FTS5): `name` üzerinde tam metin arama; `infohash` ile eşlenir.
+`torrent_embeddings` (Faz D): `infohash` (PK, CASCADE), `model_id`, `dim`, `scale`, `q` (int8 BLOB) —
+nicemlenmiş ad embedding'i; model değişince yeniden üretilir (ağdan yeniden-inşa edilebilir).
 
 > Not: "seeds/leech" değerleri DHT crawl'ından doğrudan gelmez; `seen_count` bir vekildir.
 > Gerçek seed sayısı istenirse sorgu anında DHT `get_peers` scrape'i ile tahmin edilebilir (Faz 4+).
@@ -157,7 +173,69 @@ için elle yapılıyor.
 **Doğrulama:** Canlı ağda Sintel ve Big Buck Bunny infohash'lerinden isim + dosya
 listesi + boyut başarıyla çekildi; indirilen metadata'nın SHA-1'i infohash ile doğrulandı.
 
-### 7.3 Hâlâ açık kararlar
+### 7.3 Semantik arama: embedding motoru + vektör deposu (Faz D spike — KARAR VERİLDİ)
+
+**Karar:** Yeni crate `dragnet-semantic`; `Embedder` trait'i altında **3 kademeli model
+yelpazesi** (hız ↔ kalite), vektörler **SQLite'ta BLOB olarak kalıcı + bellek-içi saf-Rust
+int8 brute-force tarama** (sqlite-vec / harici ANN yok). Arama **hibrit**: FTS5 ve semantik
+aday listeleri RRF ile harmanlanır. Opt-in; kapalıyken davranış birebir eski FTS.
+
+**Bake-off (2026-08-16, Windows 11, RTX 4070 Laptop 8GB, CUDA toolkit yok → DirectML).**
+Korpus: 60 gerçekçi scene-adı (film/dizi/müzik/oyun/yazılım/kitap; TR dahil), 24 sorgu
+(EN/TR, eşanlamlı, yazım hatalı, soyut tür, dönem). Ölçüt: hits@5 / MRR; hız: ad/sn.
+
+| Model | Motor | hits@5 | MRR | CPU ad/sn | DirectML ad/sn | Disk |
+|---|---|---|---|---|---|---|
+| **EmbeddingGemma-300m Q4** (768d) | ort | **0.928** | 0.869 | 45 | 92 (batch 512) | 197 MB |
+| EmbeddingGemma-300m f32 | ort | 0.919 | **0.894** | 55–67 | 162 (batch 512, sabit pad) | 1.2 GB |
+| Qwen3-Embedding-0.6B q4f16 (1024d) | ort | 0.820 | 0.824 | 8 | DML hata (Concat) | 541 MB |
+| Qwen3-Embedding-0.6B int8 | ort | 0.777 | 0.803 | 36 | DML hata | 585 MB |
+| BGE-M3 (1024d) | ort | 0.759 | 0.805 | 52 | 246 | 2.2 GB |
+| multilingual-e5-base (768d) | ort | 0.728 | 0.760 | 149 | 460 | 1.1 GB |
+| **paraphrase-multilingual-MiniLM-L12-Q** (384d) | ort | 0.704 | 0.756 | 384 | 456 | 118 MB |
+| multilingual-e5-small (384d) | ort | 0.657 | 0.681 | 305 | 765 | 465 MB |
+| **potion-multilingual-128M** (256d, statik) | model2vec | 0.636 | 0.720 | **58 000** | — | 490 MB |
+| potion-base-8M (EN) | model2vec | 0.555 | 0.535 | 48 000 | — | 30 MB |
+
+Notlar: Gemma dinamik-quant (`model_quantized`) batch ile çalışmıyor; Gemma fp16 DirectML'de
+NaN üretiyor (bilinen fp16 taşması). MRL-256 kısaltma Gemma'da 0.928→0.862 (kabul edilebilir
+ama gerekmedi). DirectML'de değişken şekil her batch'te yeniden derleme yapıyor (sorgu gecikmesi
+0.5 s) → **sabit uzunluğa pad** (32–48 token) ile 46 ms; büyük batch (512) ile 3× hız.
+
+**Kademeler (bake-off verisiyle):**
+
+| Kademe | Model | Motor | Ne için |
+|---|---|---|---|
+| Hafif | potion-multilingual-128M | model2vec-rs (saf Rust) | zayıf makineler; 500k kaydı ~10 sn'de indeksler, anında model değişimi |
+| Dengeli | paraphrase-multilingual-MiniLM-L12-v2 (int8 ONNX) | ort (CPU) | orta CPU maliyeti, küçük indirme |
+| **Yüksek (varsayılan)** | EmbeddingGemma-300m Q4 | ort (CPU / **DirectML**) | en iyi kalite; GPU'lu makinede 2–3× hızlı indeksleme |
+
+Cihaz `auto`: DirectML dene → başarısızsa CPU. GPU yalnız **indeksleme** batch'lerinde
+kullanılır (sabit pad + büyük batch); tek sorgu embed'i CPU'da (küçük ve tutarlı gecikme).
+
+**Elenenler / neden:** `fastembed` (Apache-2.0) doğrulama için kullanıldı ama üründe **doğrudan
+`ort` + `tokenizers`** tercih edildi: sabit-pad/batch kontrolü, `sentence_embedding` çıkışı,
+gereksiz image bağımlılıkları yok ve `tokenizers` sürümü model2vec ile tekilleştirilebiliyor
+(fastembed+model2vec birlikte MSVC'de CRT `LNK2038` çakışması: model2vec'in `esaxx_fast`
+C++ özelliği; çözüm `model2vec-rs` default-features kapalı + `tokenizers` yalnız `onig`).
+Qwen3-0.6B/BGE-M3/e5-large "büyük" adaylar torrent adlarında Gemma'yı geçemedi; GPU'nun
+faydası kalite değil hız oldu.
+
+**Vektör deposu:** `sqlite-vec 0.1.6` çalıştı (0.1.10-alpha MSVC'de derlenmiyor) ama
+200k×768'de KNN 0.56 s (int8) / 1.1 s (f32) — interaktif için yavaş; ayrıca repo'ya ilk
+`unsafe` + C derlemesi getirirdi. Bellek-içi saf-Rust int8 tarama: 500k×768 → **148 ms**
+tek çekirdek (native CPU'da 65 ms), 366 MB RAM; 256d → 65 ms / 122 MB. Karar: vektörler
+`torrent_embeddings(infohash, model_id, dim, scale, q INT8 BLOB)` tablosunda kalıcı; açılışta
+RAM'e yüklenir; yeni kayıtlar artımlı eklenir. Model/kademe değişince tablo düşürülüp
+yeniden kurulur (ağdan yeniden-inşa ilkesi korunur — vektörler adlardan türetilir).
+
+**ORT tuzağı (Windows):** ~230 karakterlik derin HF-cache yolundaki model dosyasını ORT
+"File doesn't exist" diye reddetti; kısa yol çalıştı → modeller **kısa/düz** bir dizine
+indirilir (`<data>/models/<id>/model.onnx`), HF snapshot iç içe düzeni kullanılmaz.
+
+### 7.4 Hâlâ açık kararlar
 
 - BitTorrent v2 (SHA-256 infohash) desteği ne zaman? → v1 çalıştıktan sonra.
 - Daemon'da (Faz 5) harvester ile fetcher aynı DHT düğümünü mü paylaşmalı? → Faz 5'te ölçülecek.
+- Semantik: özel damıtılmış model (Model2Vec ile Gemma'dan torrent-adı korpusuna damıtma,
+  kendi GitHub release'inden dağıtım); CUDA EP opsiyonu; >2M kayıtta ANN (HNSW) geçişi.

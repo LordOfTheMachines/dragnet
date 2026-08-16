@@ -4,6 +4,8 @@
 //! Bu crate yalnızca veri tiplerini ve temel doğrulamayı içerir; ağ, disk veya
 //! async mantık barındırmaz. Böylece dht/meta/store/api crate'lerinin ortak dili olur.
 
+pub mod rank;
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -136,13 +138,32 @@ pub fn categorize(name: &str, files: &[TorrentFile]) -> &'static str {
 
     // 1) Yetişkin (filtre önceliği).
     const ADULT: &[&str] = &[
-        "xxx", "porn", "p0rn", "hentai", "futanari", "uncensored", "brazzers",
-        "onlyfans", "milf", "javhd", "1pondo", "caribbeancom", "nubiles", "eronite",
-        "erotic", "bdsm", "creampie", "gangbang", " sex ", "sex.", "sex-", "18+",
+        "xxx",
+        "porn",
+        "p0rn",
+        "hentai",
+        "futanari",
+        "uncensored",
+        "brazzers",
+        "onlyfans",
+        "milf",
+        "javhd",
+        "1pondo",
+        "caribbeancom",
+        "nubiles",
+        "eronite",
+        "erotic",
+        "bdsm",
+        "creampie",
+        "gangbang",
+        " sex ",
+        "sex.",
+        "sex-",
+        "18+",
     ];
     const ADULT_CODES: &[&str] = &[
-        "miaa-", "miaa ", "ipz-", "sis001", "ssni", "abp-", "pred-", "mide-", "fsdss",
-        "stars-", "ofje", "fes-", "juq-", "cawd", "ipx-", "ssis-",
+        "miaa-", "miaa ", "ipz-", "sis001", "ssni", "abp-", "pred-", "mide-", "fsdss", "stars-",
+        "ofje", "fes-", "juq-", "cawd", "ipx-", "ssis-",
     ];
     if ADULT.iter().any(|k| has(k)) || ADULT_CODES.iter().any(|k| has(k)) {
         return "adult";
@@ -150,8 +171,22 @@ pub fn categorize(name: &str, files: &[TorrentFile]) -> &'static str {
 
     // 2) Oyun.
     const GAME: &[&str] = &[
-        "fitgirl", "codex", "skidrow", "reloaded", "-plaza", "empress", "razor1911",
-        "goldberg", "-tenoke", "dodi", "repack", "ps4", "ps3", "xbox360", "nsw", "-flt",
+        "fitgirl",
+        "codex",
+        "skidrow",
+        "reloaded",
+        "-plaza",
+        "empress",
+        "razor1911",
+        "goldberg",
+        "-tenoke",
+        "dodi",
+        "repack",
+        "ps4",
+        "ps3",
+        "xbox360",
+        "nsw",
+        "-flt",
     ];
     if GAME.iter().any(|k| has(k)) {
         return "game";
@@ -159,37 +194,79 @@ pub fn categorize(name: &str, files: &[TorrentFile]) -> &'static str {
 
     // 3) Yazılım.
     const SOFT: &[&str] = &[
-        "crack", "keygen", "activator", "x64", "x86", "win64", "office", "adobe",
-        "autocad", "photoshop", "windows 1", "macos", "activated",
+        "crack",
+        "keygen",
+        "activator",
+        "x64",
+        "x86",
+        "win64",
+        "office",
+        "adobe",
+        "autocad",
+        "photoshop",
+        "windows 1",
+        "macos",
+        "activated",
     ];
     if ext("exe") || ext("msi") || ext("dmg") || ext("apk") || SOFT.iter().any(|k| has(k)) {
         return "software";
     }
 
     // 4) Kitap.
-    if ext("pdf") || ext("epub") || ext("mobi") || ext("azw3") || ext("cbz") || ext("cbr")
-        || ext("djvu") || has("ebook") || has("audiobook")
+    if ext("pdf")
+        || ext("epub")
+        || ext("mobi")
+        || ext("azw3")
+        || ext("cbz")
+        || ext("cbr")
+        || ext("djvu")
+        || has("ebook")
+        || has("audiobook")
     {
         return "book";
     }
 
     // 5) Ses.
-    if ext("mp3") || ext("flac") || ext("wav") || ext("aac") || ext("m4a") || ext("ogg")
-        || ext("opus") || ext("wma") || ext("alac") || ext("ape")
-        || has("discography") || has("[flac]") || has("320kbps")
+    if ext("mp3")
+        || ext("flac")
+        || ext("wav")
+        || ext("aac")
+        || ext("m4a")
+        || ext("ogg")
+        || ext("opus")
+        || ext("wma")
+        || ext("alac")
+        || ext("ape")
+        || has("discography")
+        || has("[flac]")
+        || has("320kbps")
     {
         return "audio";
     }
 
     // 6) Video.
     const VID: &[&str] = &[
-        "1080p", "720p", "2160p", "480p", "x264", "x265", "hevc", "bluray", "brrip",
-        "webrip", "web-dl", "web.dl", "hdtv", "dvdrip", "xvid", "bdrip", "4k", "hdrip",
+        "1080p", "720p", "2160p", "480p", "x264", "x265", "hevc", "bluray", "brrip", "webrip",
+        "web-dl", "web.dl", "hdtv", "dvdrip", "xvid", "bdrip", "4k", "hdrip",
     ];
-    if ext("mkv") || ext("mp4") || ext("avi") || ext("mov") || ext("wmv") || ext("m4v")
-        || ext("webm") || ext("mpg") || ext("mpeg") || ext("m2ts") || ext("ts")
-        || ext("vob") || ext("flv") || ext("ogv") || ext("3gp") || ext("rmvb")
-        || VID.iter().any(|k| has(k)) || has_episode(&hay)
+    if ext("mkv")
+        || ext("mp4")
+        || ext("avi")
+        || ext("mov")
+        || ext("wmv")
+        || ext("m4v")
+        || ext("webm")
+        || ext("mpg")
+        || ext("mpeg")
+        || ext("m2ts")
+        || ext("ts")
+        || ext("vob")
+        || ext("flv")
+        || ext("ogv")
+        || ext("3gp")
+        || ext("rmvb")
+        || VID.iter().any(|k| has(k))
+        || has_episode(&hay)
     {
         return "video";
     }
@@ -346,17 +423,32 @@ mod tests {
     }
 
     fn f(path: &str, size: u64) -> TorrentFile {
-        TorrentFile { path: path.into(), size }
+        TorrentFile {
+            path: path.into(),
+            size,
+        }
     }
 
     #[test]
     fn categorize_basics() {
-        assert_eq!(categorize("Ubuntu 24.04 desktop amd64", &[f("ubuntu.iso", 1)]), "software");
-        assert_eq!(categorize("The Flash S04E01 1080p WEB-DL", &[f("a.mkv", 1)]), "video");
+        assert_eq!(
+            categorize("Ubuntu 24.04 desktop amd64", &[f("ubuntu.iso", 1)]),
+            "software"
+        );
+        assert_eq!(
+            categorize("The Flash S04E01 1080p WEB-DL", &[f("a.mkv", 1)]),
+            "video"
+        );
         assert_eq!(categorize("Some Movie", &[f("movie.mkv", 1)]), "video");
-        assert_eq!(categorize("Pink Floyd Discography FLAC", &[f("a.flac", 1)]), "audio");
+        assert_eq!(
+            categorize("Pink Floyd Discography FLAC", &[f("a.flac", 1)]),
+            "audio"
+        );
         assert_eq!(categorize("Rust Book", &[f("book.epub", 1)]), "book");
-        assert_eq!(categorize("Cyberpunk 2077 FitGirl Repack", &[f("setup.exe", 1)]), "game");
+        assert_eq!(
+            categorize("Cyberpunk 2077 FitGirl Repack", &[f("setup.exe", 1)]),
+            "game"
+        );
         assert_eq!(categorize("MIAA-462 something", &[f("a.mp4", 1)]), "adult");
         assert_eq!(categorize("random stuff", &[f("data.bin", 1)]), "other");
         assert_eq!(categorize("archive pack", &[f("x.rar", 1)]), "archive");

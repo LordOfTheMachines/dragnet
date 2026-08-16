@@ -34,3 +34,6 @@ dragnet-app.log
 
 # AI çalışma dosyası — GitHuba girmez
 CLAUDE.md
+
+# Faz D: indirilen embedding modelleri (exe yanı)
+models/

@@ -17,6 +17,7 @@ dragnet-core = { path = "../../crates/dragnet-core" }
 dragnet-store = { path = "../../crates/dragnet-store" }
 dragnet-engine = { path = "../../crates/dragnet-engine" }
 dragnet-api = { path = "../../crates/dragnet-api" }
+dragnet-semantic = { path = "../../crates/dragnet-semantic" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"

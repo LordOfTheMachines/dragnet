@@ -128,7 +128,9 @@ impl MetadataFetcher {
             // set drop olunca otomatik iptal edilir (sokak/task sızıntısı yok).
             let mut set = tokio::task::JoinSet::new();
             for &addr in chunk {
-                set.spawn(async move { wire::fetch_info_from_peer(addr, ih_bytes, per_peer).await });
+                set.spawn(
+                    async move { wire::fetch_info_from_peer(addr, ih_bytes, per_peer).await },
+                );
             }
             while let Some(res) = set.join_next().await {
                 tried += 1;
@@ -150,10 +152,7 @@ impl MetadataFetcher {
 /// Doğrulanmış ham info sözlüğü baytlarını `TorrentRecord`'a çözer.
 ///
 /// BEP-3 info sözlüğü: `name`, ve ya `length` (tek dosya) ya da `files` (çok dosya).
-pub fn parse_info_dict(
-    info_bytes: &[u8],
-    infohash: InfoHash,
-) -> Result<TorrentRecord, PeerError> {
+pub fn parse_info_dict(info_bytes: &[u8], infohash: InfoHash) -> Result<TorrentRecord, PeerError> {
     use serde_bencode::value::Value;
 
     // Güvenilmeyen: saldırgan infohash=SHA1(M) seçip derin iç içe M sunabilir; SHA-1

@@ -13,8 +13,8 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 
 fn seed_dir() -> PathBuf {
@@ -32,11 +32,15 @@ fn load_seed() -> Result<[u8; 32], String> {
     // Öncelik: env DRAGNET_SEED_B64, yoksa dosya.
     if let Ok(b64) = std::env::var("DRAGNET_SEED_B64") {
         let bytes = B64.decode(b64.trim()).map_err(|e| e.to_string())?;
-        return bytes.try_into().map_err(|_| "tohum 32 bayt olmalı".to_string());
+        return bytes
+            .try_into()
+            .map_err(|_| "tohum 32 bayt olmalı".to_string());
     }
     let bytes = std::fs::read(seed_path())
         .map_err(|e| format!("tohum okunamadı ({}): {e}", seed_path().display()))?;
-    bytes.try_into().map_err(|_| "tohum 32 bayt olmalı".to_string())
+    bytes
+        .try_into()
+        .map_err(|_| "tohum 32 bayt olmalı".to_string())
 }
 
 fn signing_key() -> Result<SigningKey, String> {
@@ -59,7 +63,8 @@ fn cmd_generate() -> Result<(), String> {
     let mut seed = [0u8; 32];
     getrandom::getrandom(&mut seed).map_err(|e| e.to_string())?;
     std::fs::write(seed_path(), seed).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("ed25519_seed.b64.txt"), B64.encode(seed)).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("ed25519_seed.b64.txt"), B64.encode(seed))
+        .map_err(|e| e.to_string())?;
     let sk = SigningKey::from_bytes(&seed);
     println!("Anahtar üretildi. Özel tohum: {}", seed_path().display());
     println!("PUBKEY_B64 (updater.rs'e göm): {}", pubkey_b64(&sk));
@@ -92,9 +97,7 @@ fn main() {
             Some(path) => cmd_sign(path),
             None => Err("kullanım: dragnet-sign sign <dosya>".to_string()),
         },
-        _ => Err(
-            "kullanım: dragnet-sign <generate|pubkey|sign <dosya>>".to_string(),
-        ),
+        _ => Err("kullanım: dragnet-sign <generate|pubkey|sign <dosya>>".to_string()),
     };
     if let Err(e) = result {
         eprintln!("hata: {e}");

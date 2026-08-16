@@ -319,7 +319,10 @@ async fn recv_loop(shared: Arc<Shared>) {
             SocketAddr::V4(v4) => v4,
             SocketAddr::V6(_) => continue,
         };
-        shared.stats.received_packets.fetch_add(1, Ordering::Relaxed);
+        shared
+            .stats
+            .received_packets
+            .fetch_add(1, Ordering::Relaxed);
         handle_incoming(&shared, &buf[..len], from_v4).await;
     }
 }
@@ -349,7 +352,11 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                     if let Some(ih) = q.info_hash {
                         harvest(shared, ih);
                     }
-                    Some(krpc::build_get_peers_response(&q.txid, &id, &token_for(from)))
+                    Some(krpc::build_get_peers_response(
+                        &q.txid,
+                        &id,
+                        &token_for(from),
+                    ))
                 }
                 Method::AnnouncePeer => {
                     shared.stats.announce_seen.fetch_add(1, Ordering::Relaxed);
@@ -373,7 +380,10 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
             shared.stats.responses_seen.fetch_add(1, Ordering::Relaxed);
             if !r.nodes.is_empty() {
                 let added = shared.push_nodes(&r.nodes);
-                shared.stats.nodes_learned.fetch_add(added, Ordering::Relaxed);
+                shared
+                    .stats
+                    .nodes_learned
+                    .fetch_add(added, Ordering::Relaxed);
             }
             // BEP-51: yanıttaki infohash örneklerini aktif olarak hasat et.
             if !r.samples.is_empty() {
@@ -399,7 +409,10 @@ fn harvest(shared: &Shared, ih: [u8; ID_LEN]) {
     }
     match shared.sink.try_send(InfoHash::from_bytes(ih)) {
         Ok(()) => {
-            shared.stats.unique_infohashes.fetch_add(1, Ordering::Relaxed);
+            shared
+                .stats
+                .unique_infohashes
+                .fetch_add(1, Ordering::Relaxed);
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
             // Backpressure: tüketici yetişemiyor, zarifçe düşür (çökme yok).

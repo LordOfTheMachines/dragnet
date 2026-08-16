@@ -10,9 +10,7 @@
 
 use std::str::FromStr;
 
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 use tracing::debug;
 
@@ -180,7 +178,10 @@ impl Store {
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new().max_connections(5).connect_with(opts).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(opts)
+            .await?;
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
@@ -190,7 +191,10 @@ impl Store {
     pub async fn in_memory() -> Result<Self, StoreError> {
         // max_connections(1): bellek-içi DB tek bağlantıya bağlıdır.
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
-        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await?;
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
@@ -223,9 +227,10 @@ impl Store {
         let _ = sqlx::query("ALTER TABLE torrents ADD COLUMN last_check INTEGER DEFAULT NULL")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE torrents ADD COLUMN category TEXT NOT NULL DEFAULT 'other'")
-            .execute(&self.pool)
-            .await;
+        let _ =
+            sqlx::query("ALTER TABLE torrents ADD COLUMN category TEXT NOT NULL DEFAULT 'other'")
+                .execute(&self.pool)
+                .await;
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_category ON torrents(category);")
             .execute(&self.pool)
             .await;
@@ -258,6 +263,24 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
+        // Faz D: nicemlenmiş embedding vektörleri (int8 + ölçek). model_id ile izlenir;
+        // model/kademe değişince başka model_id'li satırlar silinir. Açılışta RAM'e yüklenir.
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS torrent_embeddings (
+                infohash TEXT PRIMARY KEY REFERENCES torrents(infohash) ON DELETE CASCADE,
+                model_id TEXT NOT NULL,
+                dim      INTEGER NOT NULL,
+                scale    REAL NOT NULL,
+                q        BLOB NOT NULL
+            );"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        let _ = sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_emb_model ON torrent_embeddings(model_id);",
+        )
+        .execute(&self.pool)
+        .await;
         Ok(())
     }
 
@@ -510,7 +533,11 @@ impl Store {
 
     /// Zaman serisi keşif sayıları (grafik): `bucket_secs` kova genişliği (saat=3600,
     /// gün=86400), en fazla `points` kova, en yeni önce. `(kova_başı_unix, sayı)`.
-    pub async fn discovery(&self, bucket_secs: i64, points: i64) -> Result<Vec<(i64, i64)>, StoreError> {
+    pub async fn discovery(
+        &self,
+        bucket_secs: i64,
+        points: i64,
+    ) -> Result<Vec<(i64, i64)>, StoreError> {
         let bucket = bucket_secs.max(1);
         let rows = sqlx::query(
             "SELECT (first_seen / ?1) * ?1 AS bkt, COUNT(*) AS n
@@ -604,18 +631,31 @@ impl Store {
     }
 
     /// Popülerliğe (`seen_count`) göre en çok görülen torrent'ler (dashboard).
-    pub async fn top_by_seen(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
+    pub async fn top_by_seen(
+        &self,
+        limit: i64,
+        filter: &Filter,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
         self.list_paged(limit, 0, SortKey::Seen, true, filter).await
     }
 
     /// Boyuta göre en büyük torrent'ler (dashboard).
-    pub async fn top_by_size(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
+    pub async fn top_by_size(
+        &self,
+        limit: i64,
+        filter: &Filter,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
         self.list_paged(limit, 0, SortKey::Size, true, filter).await
     }
 
     /// En son indekslenen torrent'ler (dashboard).
-    pub async fn recent(&self, limit: i64, filter: &Filter) -> Result<Vec<TorrentSummary>, StoreError> {
-        self.list_paged(limit, 0, SortKey::Added, true, filter).await
+    pub async fn recent(
+        &self,
+        limit: i64,
+        filter: &Filter,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.list_paged(limit, 0, SortKey::Added, true, filter)
+            .await
     }
 
     /// Metadata çekilemeyen bir infohash'i `unreachable` işaretler (yalnız `pending` ise).
@@ -634,9 +674,10 @@ impl Store {
 
     /// Metadata'sı çekilmiş (aranabilir) torrent sayısı.
     pub async fn count_fetched(&self) -> Result<i64, StoreError> {
-        let row = sqlx::query("SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'fetched'")
-            .fetch_one(&self.pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'fetched'")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(row.get::<i64, _>("n"))
     }
 
@@ -647,6 +688,236 @@ impl Store {
             .await?;
         Ok(row.get::<i64, _>("n"))
     }
+
+    // ------------------------------------------------------------------
+    // Faz D — semantik indeks kalıcılığı + hibrit arama
+    // ------------------------------------------------------------------
+
+    /// Bu model için henüz embed edilmemiş (metadata'sı çekilmiş) torrent'ler:
+    /// `(infohash, name)`. En yeni keşfedilenler önce (kullanıcı taze içeriği hemen bulsun).
+    pub async fn embed_backlog(
+        &self,
+        model_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(InfoHash, String)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT t.infohash, t.name FROM torrents t
+               LEFT JOIN torrent_embeddings e ON e.infohash = t.infohash AND e.model_id = ?1
+              WHERE t.metadata_status = 'fetched' AND e.infohash IS NULL
+              ORDER BY t.first_seen DESC LIMIT ?2",
+        )
+        .bind(model_id)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let hex: String = r.get("infohash");
+            if let Some(ih) = InfoHash::from_hex(&hex) {
+                out.push((ih, r.get::<String, _>("name")));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Nicemlenmiş vektörleri yazar (tek işlem; var olanın üzerine yazar).
+    pub async fn insert_embeddings(
+        &self,
+        model_id: &str,
+        rows: &[(InfoHash, Vec<i8>, f32)],
+    ) -> Result<(), StoreError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for (ih, q, scale) in rows {
+            // i8 → u8 bayt görünümü (bire bir bit kopyası).
+            let blob: Vec<u8> = q.iter().map(|&x| x as u8).collect();
+            sqlx::query(
+                "INSERT INTO torrent_embeddings (infohash, model_id, dim, scale, q) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(infohash) DO UPDATE SET model_id = excluded.model_id, dim = excluded.dim,
+                                                     scale = excluded.scale, q = excluded.q",
+            )
+            .bind(ih.to_hex())
+            .bind(model_id)
+            .bind(q.len() as i64)
+            .bind(*scale as f64)
+            .bind(blob)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Embedding satırlarını sayfa sayfa okur (açılışta RAM'e yükleme): `rowid > after`
+    /// olan ilk `limit` satır, `(rowid, infohash, q_int8, scale)`. Boş dönerse bitmiştir.
+    pub async fn load_embeddings_page(
+        &self,
+        model_id: &str,
+        after_rowid: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, InfoHash, Vec<i8>, f32)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT rowid, infohash, scale, q FROM torrent_embeddings
+              WHERE model_id = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+        )
+        .bind(model_id)
+        .bind(after_rowid)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let hex: String = r.get("infohash");
+            let Some(ih) = InfoHash::from_hex(&hex) else {
+                continue;
+            };
+            let blob: Vec<u8> = r.get("q");
+            let q: Vec<i8> = blob.into_iter().map(|b| b as i8).collect();
+            out.push((
+                r.get::<i64, _>("rowid"),
+                ih,
+                q,
+                r.get::<f64, _>("scale") as f32,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Bu modele ait embedding sayısı.
+    pub async fn count_embeddings(&self, model_id: &str) -> Result<i64, StoreError> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM torrent_embeddings WHERE model_id = ?1")
+            .bind(model_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Verilen model dışındaki tüm embedding'leri siler (kademe/model değişimi).
+    /// Silinen satır sayısını döner.
+    pub async fn reset_embeddings_except(&self, keep_model_id: &str) -> Result<u64, StoreError> {
+        let r = sqlx::query("DELETE FROM torrent_embeddings WHERE model_id != ?1")
+            .bind(keep_model_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// Hibrit arama: FTS adayları + çağıranın verdiği semantik aday sırası (bellek-içi
+    /// indeksten, en yakından uzağa) RRF ile harmanlanır; filtre uygulanır; sayfalanır.
+    /// `sort == Relevance` → harman sırası; diğer anahtarlarda birleşik aday kümesi
+    /// istenen anahtarla sıralanır. Semantik liste boşsa saf FTS'e denk düşer.
+    // Arama parametreleri `search_paged` ile simetrik (mevcut çağıran sözleşmesi).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_hybrid_paged(
+        &self,
+        query: &str,
+        semantic: &[InfoHash],
+        limit: i64,
+        offset: i64,
+        sort: SortKey,
+        desc: bool,
+        filter: &Filter,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
+        // 1) FTS adayları (filtreli, popülerlik sırasıyla) — en fazla HYBRID_CANDIDATES.
+        let match_query = to_fts_query(query);
+        let fts_ids: Vec<InfoHash> = if match_query.is_empty() {
+            Vec::new()
+        } else {
+            let (fsql, fbinds) = filter.where_and_binds("t.");
+            let sql = format!(
+                "SELECT t.infohash FROM torrents_fts f JOIN torrents t ON t.infohash = f.infohash
+                  WHERE f.name MATCH ? AND t.metadata_status = 'fetched'{fsql}
+                  ORDER BY {order} LIMIT ?",
+                order = SortKey::Relevance.order_sql("t.", true),
+            );
+            let mut q = sqlx::query(&sql).bind(&match_query);
+            for b in fbinds {
+                q = q.bind(b);
+            }
+            q.bind(HYBRID_CANDIDATES)
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .filter_map(|r| InfoHash::from_hex(&r.get::<String, _>("infohash")))
+                .collect()
+        };
+        if fts_ids.is_empty() && semantic.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 2) RRF harmanı.
+        let fused = dragnet_core::rank::rrf(
+            &[fts_ids, semantic.to_vec()],
+            &[],
+            dragnet_core::rank::RRF_K,
+        );
+        let ordered: Vec<InfoHash> = fused.into_iter().map(|(ih, _)| ih).collect();
+
+        // 3) Aday satırlarını çek (filtre burada semantik-yalnız adaylara da uygulanır).
+        let (fsql, fbinds) = filter.where_and_binds("");
+        let placeholders = std::iter::repeat_n("?", ordered.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT infohash, name, total_size, file_count, seen_count, first_seen, last_seen,
+                    peer_count, last_check, category
+               FROM torrents WHERE metadata_status = 'fetched' AND infohash IN ({placeholders}){fsql}"
+        );
+        let mut q = sqlx::query(&sql);
+        for ih in &ordered {
+            q = q.bind(ih.to_hex());
+        }
+        for b in fbinds {
+            q = q.bind(b);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut by_id: std::collections::HashMap<InfoHash, TorrentSummary> =
+            std::collections::HashMap::with_capacity(rows.len());
+        for r in &rows {
+            let s = row_to_summary(r)?;
+            by_id.insert(s.infohash, s);
+        }
+        // 4) Sırala + sayfala.
+        let mut items: Vec<TorrentSummary> =
+            ordered.iter().filter_map(|ih| by_id.remove(ih)).collect();
+        if !matches!(sort, SortKey::Relevance) {
+            sort_summaries(&mut items, sort, desc);
+        }
+        let start = (offset.max(0) as usize).min(items.len());
+        let end = (start + limit.max(0) as usize).min(items.len());
+        Ok(items[start..end].to_vec())
+    }
+}
+
+/// Hibrit aramada FTS tarafından alınacak en fazla aday sayısı (semantik taraf da
+/// çağıran tarafından benzer sayıda verilir; RRF sonrası sayfalama bunun içinde gezer).
+pub const HYBRID_CANDIDATES: i64 = 400;
+
+/// Bellek-içi özet listesini `SortKey`'e göre sıralar (hibrit aday kümesi için —
+/// SQL `order_sql` ile aynı anlambilim; Relevance burada dokunulmaz).
+fn sort_summaries(items: &mut [TorrentSummary], sort: SortKey, desc: bool) {
+    use std::cmp::Ordering;
+    let cmp = |a: &TorrentSummary, b: &TorrentSummary| -> Ordering {
+        let o = match sort {
+            SortKey::Relevance => Ordering::Equal,
+            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortKey::Category => a
+                .category
+                .to_lowercase()
+                .cmp(&b.category.to_lowercase())
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            SortKey::Size => a.total_size.cmp(&b.total_size),
+            SortKey::Seed => a.peer_count.cmp(&b.peer_count),
+            SortKey::Files => a.file_count.cmp(&b.file_count),
+            SortKey::Date => a.last_seen.cmp(&b.last_seen),
+            SortKey::Added => a.first_seen.cmp(&b.first_seen),
+            SortKey::Seen => a.seen_count.cmp(&b.seen_count),
+        };
+        let o = if desc { o.reverse() } else { o };
+        o.then_with(|| a.infohash.to_hex().cmp(&b.infohash.to_hex()))
+    };
+    items.sort_by(cmp);
 }
 
 /// Bir SQLite satırını [`TorrentSummary`]'ye çevirir (özet sorguları için ortak).
@@ -708,10 +979,18 @@ mod tests {
     #[tokio::test]
     async fn upsert_and_get_roundtrip() {
         let store = Store::in_memory().await.unwrap();
-        let rec = record("0123456789abcdef0123456789abcdef01234567", "Ubuntu 24.04", 4096);
+        let rec = record(
+            "0123456789abcdef0123456789abcdef01234567",
+            "Ubuntu 24.04",
+            4096,
+        );
         store.upsert_torrent(&rec).await.unwrap();
 
-        let got = store.get(rec.infohash).await.unwrap().expect("kayıt olmalı");
+        let got = store
+            .get(rec.infohash)
+            .await
+            .unwrap()
+            .expect("kayıt olmalı");
         assert_eq!(got.name, "Ubuntu 24.04");
         assert_eq!(got.total_size, 4096);
         assert_eq!(got.files.len(), 1);
@@ -753,14 +1032,28 @@ mod tests {
             .await
             .unwrap();
 
-        let results = store.search("ubuntu", 10, &Filter::default()).await.unwrap();
+        let results = store
+            .search("ubuntu", 10, &Filter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Ubuntu 24.04 Desktop amd64");
 
         // Önek araması: "ubun" da eşleşmeli.
-        assert_eq!(store.search("ubun", 10, &Filter::default()).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .search("ubun", 10, &Filter::default())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         // Alakasız sorgu boş dönmeli.
-        assert!(store.search("archlinux", 10, &Filter::default()).await.unwrap().is_empty());
+        assert!(store
+            .search("archlinux", 10, &Filter::default())
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -773,15 +1066,26 @@ mod tests {
         assert_eq!(store.record_sighting(ih, 600).await.unwrap(), "pending");
         assert_eq!(store.count_total().await.unwrap(), 1);
         assert_eq!(store.count_fetched().await.unwrap(), 0);
-        assert!(store.search("slackware", 10, &Filter::default()).await.unwrap().is_empty());
+        assert!(store
+            .search("slackware", 10, &Filter::default())
+            .await
+            .unwrap()
+            .is_empty());
 
         // Sonra metadata gelir → aranabilir olur, sighting artık 'fetched' döner.
-        let mut rec = record("3333333333333333333333333333333333333333", "Slackware 15", 900);
+        let mut rec = record(
+            "3333333333333333333333333333333333333333",
+            "Slackware 15",
+            900,
+        );
         rec.first_seen = 500;
         store.upsert_torrent(&rec).await.unwrap();
         assert_eq!(store.count_fetched().await.unwrap(), 1);
         assert_eq!(store.record_sighting(ih, 950).await.unwrap(), "fetched");
-        let hits = store.search("slackware", 10, &Filter::default()).await.unwrap();
+        let hits = store
+            .search("slackware", 10, &Filter::default())
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         // first_seen, ilk görülme (500) korunmalı.
         let got = store.get(ih).await.unwrap().unwrap();
@@ -818,7 +1122,11 @@ mod tests {
         // A: küçük ama çok görülen; B: büyük ama az görülen.
         let mut a = record("1111111111111111111111111111111111111111", "Alpha", 100);
         a.seen_count = 50;
-        let mut b = record("2222222222222222222222222222222222222222", "Beta", 9_000_000);
+        let mut b = record(
+            "2222222222222222222222222222222222222222",
+            "Beta",
+            9_000_000,
+        );
         b.seen_count = 2;
         store.upsert_torrent(&a).await.unwrap();
         store.upsert_torrent(&b).await.unwrap();
@@ -838,21 +1146,47 @@ mod tests {
     #[tokio::test]
     async fn block_keywords_hide_matching_names() {
         let store = Store::in_memory().await.unwrap();
-        store.upsert_torrent(&record("1111111111111111111111111111111111111111", "Clean Movie 1080p", 1)).await.unwrap();
-        store.upsert_torrent(&record("2222222222222222222222222222222222222222", "Some CAM rip", 1)).await.unwrap();
+        store
+            .upsert_torrent(&record(
+                "1111111111111111111111111111111111111111",
+                "Clean Movie 1080p",
+                1,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_torrent(&record(
+                "2222222222222222222222222222222222222222",
+                "Some CAM rip",
+                1,
+            ))
+            .await
+            .unwrap();
 
         // Filtresiz: ikisi de gözat listesinde.
-        let all = store.list_paged(10, 0, SortKey::Name, false, &Filter::default()).await.unwrap();
+        let all = store
+            .list_paged(10, 0, SortKey::Name, false, &Filter::default())
+            .await
+            .unwrap();
         assert_eq!(all.len(), 2);
 
         // "cam" engellenince yalnız temiz kayıt kalır (küçük harfe duyarsız).
-        let f = Filter { block_keywords: vec!["cam".into()], ..Default::default() };
-        let filtered = store.list_paged(10, 0, SortKey::Name, false, &f).await.unwrap();
+        let f = Filter {
+            block_keywords: vec!["cam".into()],
+            ..Default::default()
+        };
+        let filtered = store
+            .list_paged(10, 0, SortKey::Name, false, &f)
+            .await
+            .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "Clean Movie 1080p");
 
         // Aramada da uygulanır.
-        let s = store.search_paged("rip", 10, 0, SortKey::Relevance, true, &f).await.unwrap();
+        let s = store
+            .search_paged("rip", 10, 0, SortKey::Relevance, true, &f)
+            .await
+            .unwrap();
         assert!(s.is_empty());
     }
 
@@ -863,20 +1197,38 @@ mod tests {
             ("1111111111111111111111111111111111111111", "Alpha", 300u64),
             ("2222222222222222222222222222222222222222", "Bravo", 100),
             ("3333333333333333333333333333333333333333", "Charlie", 200),
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut r = record(hex, name, size);
             r.first_seen = 1000 + i as i64;
             store.upsert_torrent(&r).await.unwrap();
         }
         // Ada göre artan sırala + sayfalama.
-        let p1 = store.list_paged(2, 0, SortKey::Name, false, &Filter::default()).await.unwrap();
-        assert_eq!(p1.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Alpha", "Bravo"]);
-        let p2 = store.list_paged(2, 2, SortKey::Name, false, &Filter::default()).await.unwrap();
-        assert_eq!(p2.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Charlie"]);
+        let p1 = store
+            .list_paged(2, 0, SortKey::Name, false, &Filter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            p1.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["Alpha", "Bravo"]
+        );
+        let p2 = store
+            .list_paged(2, 2, SortKey::Name, false, &Filter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            p2.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["Charlie"]
+        );
         // Boyuta göre azalan.
-        let by_size = store.list_paged(10, 0, SortKey::Size, true, &Filter::default()).await.unwrap();
+        let by_size = store
+            .list_paged(10, 0, SortKey::Size, true, &Filter::default())
+            .await
+            .unwrap();
         assert_eq!(by_size[0].name, "Alpha"); // 300 en büyük
-        // Gün kovası: hepsi aynı gün → tek kova, toplam 3.
+                                              // Gün kovası: hepsi aynı gün → tek kova, toplam 3.
         let daily = store.discovery(86_400, 30).await.unwrap();
         assert_eq!(daily.iter().map(|(_, n)| n).sum::<i64>(), 3);
     }
@@ -893,16 +1245,266 @@ mod tests {
     async fn sort_by_category_groups_alphabetically() {
         let store = Store::in_memory().await.unwrap();
         // Kategorileri belli olan kayıtlar (categorize heuristiği ada bakar).
-        store.upsert_torrent(&record("1111111111111111111111111111111111111111", "Ubuntu 24.04 amd64.iso", 1)).await.unwrap();
-        store.upsert_torrent(&record("2222222222222222222222222222222222222222", "Song - Album FLAC", 1)).await.unwrap();
-        store.upsert_torrent(&record("3333333333333333333333333333333333333333", "Movie 1080p x264.mkv", 1)).await.unwrap();
+        store
+            .upsert_torrent(&record(
+                "1111111111111111111111111111111111111111",
+                "Ubuntu 24.04 amd64.iso",
+                1,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_torrent(&record(
+                "2222222222222222222222222222222222222222",
+                "Song - Album FLAC",
+                1,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_torrent(&record(
+                "3333333333333333333333333333333333333333",
+                "Movie 1080p x264.mkv",
+                1,
+            ))
+            .await
+            .unwrap();
 
-        let rows = store.list_paged(10, 0, SortKey::Category, false, &Filter::default()).await.unwrap();
+        let rows = store
+            .list_paged(10, 0, SortKey::Category, false, &Filter::default())
+            .await
+            .unwrap();
         let cats: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
         // Alfabetik artan → aynı kategoriler bitişik ve sıralı.
         let mut sorted = cats.clone();
         sorted.sort();
         assert_eq!(cats, sorted, "kategoriler alfabetik gruplanmalı");
+    }
+
+    #[tokio::test]
+    async fn embeddings_persist_page_and_reset() {
+        let store = Store::in_memory().await.unwrap();
+        for (hex, name) in [
+            ("1111111111111111111111111111111111111111", "Alpha"),
+            ("2222222222222222222222222222222222222222", "Bravo"),
+            ("3333333333333333333333333333333333333333", "Charlie"),
+        ] {
+            store.upsert_torrent(&record(hex, name, 1)).await.unwrap();
+        }
+        let backlog = store.embed_backlog("m1", 10).await.unwrap();
+        assert_eq!(backlog.len(), 3);
+        assert!(backlog.iter().any(|(_, n)| n == "Bravo"));
+
+        let a = InfoHash::from_hex("1111111111111111111111111111111111111111").unwrap();
+        let b = InfoHash::from_hex("2222222222222222222222222222222222222222").unwrap();
+        store
+            .insert_embeddings(
+                "m1",
+                &[
+                    (a, vec![1i8, -2, 3, 127], 0.5),
+                    (b, vec![-128i8, 0, 0, 1], 0.25),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.count_embeddings("m1").await.unwrap(), 2);
+        assert_eq!(store.embed_backlog("m1", 10).await.unwrap().len(), 1);
+        assert_eq!(store.embed_backlog("m2", 10).await.unwrap().len(), 3);
+
+        // Sayfalı yükleme: 1'erli; int8 bit-kopyası kayıpsız (−128/127 dahil).
+        let p1 = store.load_embeddings_page("m1", 0, 1).await.unwrap();
+        assert_eq!(p1.len(), 1);
+        let p2 = store.load_embeddings_page("m1", p1[0].0, 1).await.unwrap();
+        assert_eq!(p2.len(), 1);
+        assert!(store
+            .load_embeddings_page("m1", p2[0].0, 1)
+            .await
+            .unwrap()
+            .is_empty());
+        let mut all: Vec<_> = p1
+            .into_iter()
+            .chain(p2)
+            .map(|(_, ih, q, s)| (ih, q, s))
+            .collect();
+        all.sort_by_key(|x| x.0.to_hex());
+        assert_eq!(all[0], (a, vec![1i8, -2, 3, 127], 0.5));
+        assert_eq!(all[1], (b, vec![-128i8, 0, 0, 1], 0.25));
+
+        // Üzerine yazma + model değişimi.
+        store
+            .insert_embeddings("m2", &[(a, vec![9i8, 9, 9, 9], 1.0)])
+            .await
+            .unwrap();
+        assert_eq!(store.count_embeddings("m1").await.unwrap(), 1);
+        assert_eq!(store.reset_embeddings_except("m2").await.unwrap(), 1);
+        assert_eq!(store.count_embeddings("m1").await.unwrap(), 0);
+        assert_eq!(store.count_embeddings("m2").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_fuses_filters_and_pages() {
+        let store = Store::in_memory().await.unwrap();
+        let mut r1 = record(
+            "1111111111111111111111111111111111111111",
+            "The Matrix Reloaded 2003 1080p",
+            100,
+        );
+        r1.seen_count = 5;
+        let mut r2 = record(
+            "2222222222222222222222222222222222222222",
+            "Matrix Revolutions 2003 720p",
+            200,
+        );
+        r2.seen_count = 50;
+        let r3 = record(
+            "3333333333333333333333333333333333333333",
+            "Matriks Filmi TR Dublaj",
+            300,
+        );
+        let r4 = record(
+            "4444444444444444444444444444444444444444",
+            "Some CAM rip",
+            400,
+        );
+        for r in [&r1, &r2, &r3, &r4] {
+            store.upsert_torrent(r).await.unwrap();
+        }
+        let ih = |h: &str| InfoHash::from_hex(h).unwrap();
+        // Sahte semantik sıra: 3 (FTS'in "matrix" ile bulamadığı), sonra 1.
+        let sem = vec![
+            ih("3333333333333333333333333333333333333333"),
+            ih("1111111111111111111111111111111111111111"),
+        ];
+
+        let fts = store
+            .search_paged(
+                "matrix",
+                10,
+                0,
+                SortKey::Relevance,
+                true,
+                &Filter::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            [
+                "Matrix Revolutions 2003 720p",
+                "The Matrix Reloaded 2003 1080p"
+            ]
+        );
+
+        // Hibrit: 1 iki listede de → ilk; 3 semantikten gelir; 4 gelmez.
+        let hy = store
+            .search_hybrid_paged(
+                "matrix",
+                &sem,
+                10,
+                0,
+                SortKey::Relevance,
+                true,
+                &Filter::default(),
+            )
+            .await
+            .unwrap();
+        let names: Vec<&str> = hy.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names[0], "The Matrix Reloaded 2003 1080p", "{names:?}");
+        assert!(names.contains(&"Matriks Filmi TR Dublaj"));
+        assert_eq!(names.len(), 3);
+
+        // Semantik boş → FTS kümesi.
+        assert_eq!(
+            store
+                .search_hybrid_paged(
+                    "matrix",
+                    &[],
+                    10,
+                    0,
+                    SortKey::Relevance,
+                    true,
+                    &Filter::default()
+                )
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        // FTS'in hiç eşleşmediği sorgu → yalnız semantik adaylar.
+        let only_sem = store
+            .search_hybrid_paged(
+                "zzqq",
+                &sem,
+                10,
+                0,
+                SortKey::Relevance,
+                true,
+                &Filter::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            only_sem.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Matriks Filmi TR Dublaj", "The Matrix Reloaded 2003 1080p"]
+        );
+        // İkisi de boş → boş.
+        assert!(store
+            .search_hybrid_paged(
+                "zzqq",
+                &[],
+                10,
+                0,
+                SortKey::Relevance,
+                true,
+                &Filter::default()
+            )
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Filtre semantik-yalnız adaya da uygulanır.
+        let f = Filter {
+            block_keywords: vec!["dublaj".into()],
+            ..Default::default()
+        };
+        let filtered = store
+            .search_hybrid_paged("matrix", &sem, 10, 0, SortKey::Relevance, true, &f)
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|s| !s.name.contains("Dublaj")));
+
+        // Sayfalama.
+        let page = store
+            .search_hybrid_paged(
+                "matrix",
+                &sem,
+                1,
+                1,
+                SortKey::Relevance,
+                true,
+                &Filter::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].name, hy[1].name);
+
+        // Boyuta göre azalan sıralama aday kümesine uygulanır.
+        let by_size = store
+            .search_hybrid_paged(
+                "matrix",
+                &sem,
+                10,
+                0,
+                SortKey::Size,
+                true,
+                &Filter::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_size[0].name, "Matriks Filmi TR Dublaj");
+        assert_eq!(by_size[2].name, "The Matrix Reloaded 2003 1080p");
     }
 
     #[test]

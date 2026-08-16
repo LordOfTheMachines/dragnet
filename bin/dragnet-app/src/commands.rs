@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
+use dragnet_api::SearchMode;
 use dragnet_engine::Engine;
 use dragnet_store::{Filter, Overview, SortKey, TorrentSummary};
 
@@ -86,7 +87,11 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         match guard.as_ref() {
             Some(e) => {
                 let snap = e.snapshot().await;
-                (true, Some(snap.harvester), Some(e.harvester_addr().to_string()))
+                (
+                    true,
+                    Some(snap.harvester),
+                    Some(e.harvester_addr().to_string()),
+                )
             }
             None => (false, None, None),
         }
@@ -119,7 +124,14 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         "samples": samples,
         "unique": harvester.as_ref().map(|h| h.unique_infohashes).unwrap_or(0),
         "sample_rate": sample_rate,
+        "semantic": state.semantic.status_json().await,
     }))
+}
+
+/// Semantik arama durumu (aşama, indirme ilerlemesi, model/cihaz, indekslenen sayısı).
+#[tauri::command]
+pub async fn semantic_status(state: State<'_, AppState>) -> Result<Value, String> {
+    Ok(state.semantic.status_json().await)
 }
 
 /// Birleşik arama/gözat (tek sıralanabilir tablo). Sorgu boşsa FTS yerine tüm
@@ -139,6 +151,7 @@ pub async fn search(
     hide_adult: Option<bool>,
     only_alive: Option<bool>,
     category: Option<String>,
+    mode: Option<String>,
 ) -> Result<Value, String> {
     let blocks = block_keywords(&state);
     let filter = make_filter(
@@ -153,22 +166,23 @@ pub async fn search(
     let sort_key = SortKey::parse(sort.as_deref().unwrap_or(""));
     let desc = desc.unwrap_or(true);
 
-    let rows = if q.is_empty() {
-        // Gözat: sorgu yok → tüm indeksten sırala. Alaka sırasız olduğundan
-        // varsayılanı popülerliğe (seen) çevir.
-        let sk = if matches!(sort_key, SortKey::Relevance) { SortKey::Seen } else { sort_key };
-        state
-            .store
-            .list_paged(limit, offset, sk, desc, &filter)
-            .await
-    } else {
-        state
-            .store
-            .search_paged(q, limit, offset, sort_key, desc, &filter)
-            .await
-    }
+    // Ortak arama yolu (API ile aynı): boş sorgu → gözat; semantik yuvası doluysa hibrit.
+    let outcome = dragnet_api::search::search(
+        &state.store,
+        &state.semantic.slot,
+        q,
+        SearchMode::parse(mode.as_deref().unwrap_or("")),
+        limit,
+        offset,
+        sort_key,
+        desc,
+        &filter,
+    )
+    .await
     .map_err(|e| e.to_string())?;
-    Ok(json!({ "results": summaries_json(&rows), "count": rows.len() }))
+    Ok(
+        json!({ "results": summaries_json(&outcome.rows), "count": outcome.rows.len(), "mode": outcome.used.as_str() }),
+    )
 }
 
 /// Dashboard: genel görünüm + keşif zaman serisi. `bucket` "hour"|"day",
@@ -251,7 +265,11 @@ pub async fn stop_scan(state: State<'_, AppState>) -> Result<Value, String> {
 /// Mevcut ayarlar.
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Value {
-    let s = state.settings.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let s = state
+        .settings
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
     serde_json::to_value(s).unwrap_or(Value::Null)
 }
 
@@ -264,6 +282,9 @@ pub async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Res
         let _ = s.save();
     }
     let _ = autostart::set(settings.autostart);
+
+    // Semantik ayarları anında uygula (aç/kapa/kademe değişimi; yeniden başlatma yok).
+    state.semantic.apply(state.store.clone(), &settings).await;
 
     // Tarama açıksa yeni ayarlarla yeniden başlat. Yeni çekirdeği bırakmadan-ÖNCE
     // ayağa kaldır: başlatma başarısız olursa eski tarama çalışmaya devam etsin.

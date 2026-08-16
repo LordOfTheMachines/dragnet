@@ -31,3 +31,15 @@ fetch_peer_concurrency = 6
 
 # Başlangıçta çekilip indekslenecek infohash'ler (indeksi ısıtmak / test için).
 # seed_infohashes = ["08ada5a7a6183aae1e09d831df6748d566095a10"]  # Sintel
+
+# --- Semantik (anlamsal) arama — Faz D, opt-in ---
+# Açıksa yerel embedding modeli bir kez indirilir (HuggingFace), sonrası tamamen
+# çevrimdışıdır; /search varsayılan olarak hibrit (FTS + semantik) çalışır.
+# `mode=fts|semantic|hybrid` sorgu parametresiyle istemci modu zorlayabilir.
+semantic_enabled = false
+# Kademe: "light" (potion, statik, çok hızlı) | "balanced" (MiniLM int8) | "quality" (EmbeddingGemma Q4)
+semantic_tier = "quality"
+# Cihaz: "auto" (Windows'ta DirectML varsa GPU) | "gpu" | "cpu"
+semantic_device = "auto"
+# Model dizini — KISA/düz bir yol tut (ORT çok uzun yolları reddedebiliyor).
+semantic_models_dir = "models"

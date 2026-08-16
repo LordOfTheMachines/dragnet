@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "dragnet-semantic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dragnet — yerel embedding + anlamsal (hibrit) arama katmanı (Faz D)"
+
+[dependencies]
+dragnet-core = { path = "../dragnet-core" }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ndarray = "0.17"
+# Tokenizer: model2vec ile AYNI sürüm (0.21) ve yalnız `onig` — `esaxx_fast` (C++)
+# MSVC'de ort ile CRT çakışması (LNK2038) yaratıyor; bkz. ARCHITECTURE §7.3.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+# Statik embedding (hafif kademe). default-features kapalı: hf-hub/ureq yok (indirmeyi
+# kendimiz yapıyoruz), esaxx_fast yok. `local-only` yerel klasörden yükler.
+model2vec-rs = { version = "0.2.1", default-features = false, features = ["local-only"] }
+# Model indirme (bir kerelik; sonrası tamamen çevrimdışı).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+# ONNX Runtime — Windows'ta DirectML EP (GPU) derlenir; diğer platformlarda yalnız CPU.
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.13", features = ["ndarray", "directml"] }
+[target.'cfg(not(windows))'.dependencies]
+ort = { version = "=2.0.0-rc.13", features = ["ndarray"] }
+
+[dev-dependencies]
+tempfile = "3"

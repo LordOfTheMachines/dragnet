@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 dragnet-core = { path = "../dragnet-core" }
 dragnet-store = { path = "../dragnet-store" }
+dragnet-semantic = { path = "../dragnet-semantic" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
