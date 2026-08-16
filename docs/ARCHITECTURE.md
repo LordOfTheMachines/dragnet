@@ -57,13 +57,27 @@
   gelen JSON'u `novaprinter.prettyPrinter` sözleşmesine (`link|name|size|seeds|leech|...`) çevirir.
 - qBittorrent kaynağına dokunmaz; kullanıcı bu dosyayı kendi arama-plugin dizinine kopyalar.
 
+### 2.7 `dragnet-semantic` — Semantik arama (Faz D)
+- Yerel (çevrimdışı) embedding + hibrit arama. `Embedder` trait'i altında 3 kademe:
+  **hafif** (potion-multilingual, model2vec, saf Rust), **dengeli** (MiniLM-L12 int8, ONNX),
+  **yüksek kalite** (EmbeddingGemma-300m Q4, ONNX; Windows'ta DirectML GPU). Karar: §7.3.
+- Vektörler `torrent_embeddings` (int8 BLOB) tablosunda kalıcı; açılışta bellek-içi
+  `VecIndex`'e yüklenir, brute-force kosinüs (500k×768 ≈ 150 ms). ANN yok (açık karar §7.4).
+- Hibrit: `dragnet-api::search` FTS adaylarını ve semantik top-k'yı RRF ile harmanlar;
+  `mode=fts|semantic|hybrid`. Katman **opt-in** ve çalışma anında takılıp çıkarılabilir
+  (`SemanticSlot`) — kapalıyken davranış birebir eski FTS.
+- İndeksleme `dragnet-engine::semantic_indexer` ile Engine'den bağımsız (tarama kapalıyken
+  de çalışır): backlog → partili embed (`spawn_blocking`) → SQLite + RAM. Model dosyaları
+  kısa/düz `models/<id>/` dizinine bir kez indirilir (HF; kendi release açık karar).
+
 ## 3. Veri akışı (uçtan uca)
 
 1. `dragnet-dht` ağı tarar, ham infohash üretir.
 2. Sınırlı kanal + dedup (yakın zamanda görülenler için bloom/LRU) → gürültüyü keser.
 3. `dragnet-meta` havuzu her yeni infohash için metadata çeker (paralel, zaman aşımlı).
 4. Başarılı kayıtlar `dragnet-store`'a yazılır; FTS indeksine girer.
-5. `dragnet-api` sorguları FTS üzerinden yanıtlar.
+5. `dragnet-api` sorguları FTS üzerinden yanıtlar; semantik açıksa FTS + vektör adaylarını
+   RRF ile harmanlar (hibrit).
 6. qBittorrent plugin'i API'yi sorgular, kullanıcıya sonuç gösterir.
 
 ## 4. Veri modeli (ilk taslak)
@@ -83,6 +97,8 @@
 
 `files` tablosu (1-N): `infohash`, `path`, `size`.
 `torrents_fts` (FTS5): `name` üzerinde tam metin arama; `infohash` ile eşlenir.
+`torrent_embeddings` (Faz D): `infohash` (PK, CASCADE), `model_id`, `dim`, `scale`, `q` (int8 BLOB) —
+nicemlenmiş ad embedding'i; model değişince yeniden üretilir (ağdan yeniden-inşa edilebilir).
 
 > Not: "seeds/leech" değerleri DHT crawl'ından doğrudan gelmez; `seen_count` bir vekildir.
 > Gerçek seed sayısı istenirse sorgu anında DHT `get_peers` scrape'i ile tahmin edilebilir (Faz 4+).

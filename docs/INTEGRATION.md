@@ -59,6 +59,13 @@ koyar. Bu, qBittorrent'in `.torrent` dosyası indirmesine bile gerek bırakmaz.
 
 `base_url` plugin dosyasının başında yapılandırılır (varsayılan `http://127.0.0.1:8080`).
 
+**Opsiyonel parametreler (geriye uyumlu, plugin göndermek zorunda değil):** `offset`,
+`sort`, `desc`, `alive`, `hide_adult` ve — Faz D — `mode=fts|semantic|hybrid`
+(boş/bilinmeyen = otomatik: semantik katman açık ve hazırsa **hibrit** (FTS + anlamsal
+harman), değilse saf FTS). Yanıt gövdesine `"mode"` (kullanılan mod) ve her öğeye
+`"category"` alanı eklenmiştir; plugin bilinmeyen alanları yok sayar. Semantik durum
+`GET /stats` → `"semantic"` (kapalıysa `null`).
+
 ## 4. Kurulum (kullanıcı adımları)
 
 1. **Servisi çalıştır.** İndeks üretir ve API'yi sunar:
