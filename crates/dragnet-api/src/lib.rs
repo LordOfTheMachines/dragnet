@@ -23,6 +23,9 @@ use tracing::info;
 
 use dragnet_store::{Filter, SortKey, Store};
 
+pub mod search;
+pub use search::{SearchMode, SemanticSlot};
+
 /// API yapılandırması.
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
@@ -48,6 +51,7 @@ impl Default for ApiConfig {
 #[derive(Clone)]
 struct AppState {
     store: Store,
+    semantic: SemanticSlot,
     token: Option<String>,
     max_limit: usize,
 }
@@ -77,6 +81,10 @@ struct SearchParams {
     /// Yetişkin içeriği gizle.
     #[serde(default)]
     hide_adult: Option<bool>,
+    /// Arama modu: `fts` | `semantic` | `hybrid` (boş/bilinmeyen = otomatik: semantik
+    /// hazırsa hibrit, değilse FTS). Plugin göndermez → eski davranış korunur.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// qBittorrent kategorisini (ya da bizim adımızı) iç kategoriye eşler. `all`/boş → None.
@@ -115,18 +123,28 @@ struct SearchItem {
 #[derive(Debug, Serialize)]
 struct SearchResponse {
     results: Vec<SearchItem>,
+    /// Gerçekte kullanılan mod (`fts`/`semantic`/`hybrid`).
+    mode: &'static str,
 }
 
 #[derive(Debug, Serialize)]
 struct StatsResponse {
     fetched_torrents: i64,
     total_infohashes: i64,
+    /// Semantik katman durumu (`None` = kapalı).
+    semantic: Option<dragnet_semantic::SemanticStatus>,
 }
 
-/// Verilen store ve yapılandırmayla axum router'ı kurar.
+/// Verilen store ve yapılandırmayla axum router'ı kurar (semantik kapalı).
 pub fn router(store: Store, config: &ApiConfig) -> Router {
+    router_with_semantic(store, config, search::empty_slot())
+}
+
+/// Semantik yuvasıyla router: yuva çalışma anında doldurulup boşaltılabilir.
+pub fn router_with_semantic(store: Store, config: &ApiConfig, semantic: SemanticSlot) -> Router {
     let state = AppState {
         store,
+        semantic,
         token: config.token.clone(),
         max_limit: config.max_limit,
     };
@@ -139,7 +157,16 @@ pub fn router(store: Store, config: &ApiConfig) -> Router {
 
 /// API'yi başlatır ve bloklar (sunucu sonlanana kadar).
 pub async fn serve(config: ApiConfig, store: Store) -> std::io::Result<()> {
-    let app = router(store, &config);
+    serve_with_semantic(config, store, search::empty_slot()).await
+}
+
+/// Semantik yuvasıyla başlatır (uygulama/daemon).
+pub async fn serve_with_semantic(
+    config: ApiConfig,
+    store: Store,
+    semantic: SemanticSlot,
+) -> std::io::Result<()> {
+    let app = router_with_semantic(store, &config, semantic);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let addr = listener.local_addr()?;
     info!(%addr, "dragnet-api dinliyor");
@@ -173,11 +200,7 @@ async fn search(
         return resp;
     }
 
-    let limit = params
-        .limit
-        .unwrap_or(100)
-        .min(state.max_limit)
-        .max(1);
+    let limit = params.limit.unwrap_or(100).min(state.max_limit).max(1);
     let offset = params.offset.unwrap_or(0);
     let sort = SortKey::parse(params.sort.as_deref().unwrap_or(""));
     let desc = params.desc.unwrap_or(true);
@@ -188,13 +211,24 @@ async fn search(
         category: map_category(params.cat),
         block_keywords: Vec::new(),
     };
-    match state
-        .store
-        .search_paged(&params.q, limit as i64, offset as i64, sort, desc, &filter)
-        .await
+    let mode = SearchMode::parse(params.mode.as_deref().unwrap_or(""));
+    match search::search(
+        &state.store,
+        &state.semantic,
+        &params.q,
+        mode,
+        limit as i64,
+        offset as i64,
+        sort,
+        desc,
+        &filter,
+    )
+    .await
     {
-        Ok(rows) => {
-            let results = rows
+        Ok(outcome) => {
+            let used = outcome.used.as_str();
+            let results = outcome
+                .rows
                 .into_iter()
                 .map(|r| SearchItem {
                     // Canlılık scrape'inden peer sayısı; henüz kontrol edilmediyse -1.
@@ -207,7 +241,11 @@ async fn search(
                     category: r.category,
                 })
                 .collect();
-            Json(SearchResponse { results }).into_response()
+            Json(SearchResponse {
+                results,
+                mode: used,
+            })
+            .into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "arama hatası");
@@ -222,9 +260,11 @@ async fn stats(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respon
     }
     let fetched = state.store.count_fetched().await.unwrap_or(0);
     let total = state.store.count_total().await.unwrap_or(0);
+    let semantic = state.semantic.read().await.as_ref().map(|s| s.status());
     Json(StatsResponse {
         fetched_torrents: fetched,
         total_infohashes: total,
+        semantic,
     })
     .into_response()
 }
@@ -242,7 +282,10 @@ mod tests {
             infohash: InfoHash::from_hex(hex).unwrap(),
             name: name.to_string(),
             total_size: size,
-            files: vec![TorrentFile { path: name.to_string(), size }],
+            files: vec![TorrentFile {
+                path: name.to_string(),
+                size,
+            }],
             first_seen: 1000,
             last_seen: 2000,
             seen_count: 5,
@@ -263,7 +306,9 @@ mod tests {
     }
 
     async fn body_json(resp: Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     }
 
@@ -271,7 +316,12 @@ mod tests {
     async fn healthz_returns_ok() {
         let app = router(Store::in_memory().await.unwrap(), &ApiConfig::default());
         let resp = app
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -322,12 +372,122 @@ mod tests {
     async fn stats_reports_counts() {
         let app = router(seeded_store().await, &ApiConfig::default());
         let resp = app
-            .oneshot(Request::builder().uri("/stats").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let json = body_json(resp).await;
         assert_eq!(json["fetched_torrents"], 1);
         assert_eq!(json["total_infohashes"], 1);
+    }
+
+    #[tokio::test]
+    async fn mode_param_and_semantic_stats_over_http() {
+        use dragnet_semantic::{MockEmbedder, Semantic, Tier};
+        let store = seeded_store().await;
+        store
+            .upsert_torrent(&record(
+                "2222222222222222222222222222222222222222",
+                "Fedora Workstation 40",
+                1,
+            ))
+            .await
+            .unwrap();
+        let slot = search::empty_slot();
+        let app = || router_with_semantic(store.clone(), &ApiConfig::default(), slot.clone());
+
+        // Kapalı: mode=hybrid istense de yanıt mode=fts, stats.semantic=null.
+        let json = body_json(
+            app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/search?q=ubuntu&mode=hybrid")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json["mode"], "fts");
+        assert_eq!(json["results"].as_array().unwrap().len(), 1);
+        let st = body_json(
+            app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/stats")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(st["semantic"].is_null());
+
+        // Aç (mock) → hibrit; stats.semantic dolu; mode=fts hâlâ zorlanabilir.
+        let sem = Arc::new(Semantic::with_embedder(
+            Box::new(MockEmbedder::new(32)),
+            Tier::Light,
+            0.0,
+        ));
+        sem.embed_and_add(&[
+            (
+                InfoHash::from_hex("1111111111111111111111111111111111111111").unwrap(),
+                "Ubuntu 24.04 Desktop".into(),
+            ),
+            (
+                InfoHash::from_hex("2222222222222222222222222222222222222222").unwrap(),
+                "Fedora Workstation 40".into(),
+            ),
+        ])
+        .unwrap();
+        *slot.write().await = Some(sem);
+        let json = body_json(
+            app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/search?q=ubuntu")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json["mode"], "hybrid");
+        assert_eq!(json["results"][0]["name"], "Ubuntu 24.04 Desktop");
+        let json = body_json(
+            app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/search?q=ubuntu&mode=fts")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json["mode"], "fts");
+        let st = body_json(
+            app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/stats")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(st["semantic"]["indexed"], 2);
+        assert_eq!(st["semantic"]["model_id"], "mock");
     }
 
     #[tokio::test]
@@ -340,7 +500,12 @@ mod tests {
 
         // Token yok → 401.
         let resp = router(store.clone(), &config)
-            .oneshot(Request::builder().uri("/search?q=ubuntu").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/search?q=ubuntu")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -373,7 +538,12 @@ mod tests {
 
         // healthz auth gerektirmez.
         let resp = router(seeded_store().await, &config)
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
