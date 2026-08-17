@@ -88,6 +88,11 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       testi; canlı e2e: "tavşan animasyonu"→Big Buck Bunny, "çelik gözyaşları bilim
       kurgu"→Tears of Steel, "buck buny"→Big Buck Bunny (FTS boş dönerken); `mode=fts`
       eski davranış; DirectML aktif.
+- [x] **Faz E: bütünsel kalite çevrimi** — pipelined metadata fetch (150 hash: 1111 s→143 s),
+      öncelikli çekim kuyruğu (sıcak›popüler›taze, soğumalı yeniden deneme), sighting kaynağı +
+      BEP-51 takip get_peers peer ipuçları (peer-yok %73→~%1), FetchStats + pano kartı,
+      ad kodlaması (name.utf-8 / GBK/SJIS/CP1251), keşif grafiği (dolu seri, eksen, hover),
+      semantik gürültü tabanı kalibrasyonu, Deneysel Qwen3 kademesi. Karar: ARCHITECTURE §7.4.
 - [ ] Semantik: özel damıtılmış model (Model2Vec ile Gemma'dan torrent-adı korpusuna
       damıtma) + kendi GitHub release'inden dağıtım; CUDA EP opsiyonu; >2M kayıtta ANN (HNSW)
 - [ ] Web arayüzü (magneticow benzeri gözat/ara)

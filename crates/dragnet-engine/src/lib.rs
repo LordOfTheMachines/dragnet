@@ -44,8 +44,8 @@ impl Default for EngineConfig {
             db_path: "dragnet.db".to_string(),
             harvester_port: 0,
             harvester_max_queries_per_sec: 50.0,
-            fetch_workers: 2,
-            fetch_peer_concurrency: 6,
+            fetch_workers: 12,
+            fetch_peer_concurrency: 12,
             seed_infohashes: Vec::new(),
         }
     }
@@ -64,6 +64,10 @@ pub enum EngineError {
 #[derive(Debug, Clone)]
 pub struct EngineSnapshot {
     pub harvester: StatsSnapshot,
+    /// Metadata çekim sayaçları (Faz E): deneme/başarı/peer yok/peer başarısız/ort. süre.
+    pub fetch: dragnet_meta::FetchStatsSnapshot,
+    /// Çekim kuyruğu: (pending, sıcak-pending, unreachable, son 1 saatte fetched).
+    pub queue: (i64, i64, i64, i64),
     pub fetched_torrents: i64,
     pub total_infohashes: i64,
     pub harvester_addr: SocketAddr,
@@ -73,6 +77,7 @@ pub struct EngineSnapshot {
 pub struct Engine {
     store: Store,
     harvester_stats: Arc<dragnet_dht::Stats>,
+    fetch_stats: Arc<dragnet_meta::FetchStats>,
     harvester_addr: SocketAddr,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -84,7 +89,6 @@ impl Engine {
 
         let fetcher = Arc::new(MetadataFetcher::new(FetchConfig {
             concurrency: config.fetch_peer_concurrency,
-            peer_gather_timeout: Duration::from_secs(12),
             ..Default::default()
         })?);
 
@@ -95,6 +99,7 @@ impl Engine {
         })
         .await?;
         let harvester_stats = harvester.stats();
+        let fetch_stats = fetcher.stats();
         let harvester_addr = harvester.local_addr();
         info!(addr = %harvester_addr, "harvester çalışıyor");
 
@@ -125,7 +130,7 @@ impl Engine {
                     let store = store.clone();
                     let fetcher = Arc::clone(&fetcher);
                     tasks.push(tokio::spawn(async move {
-                        fetch_and_store(ih, &store, &fetcher).await;
+                        fetch_and_store(ih, &[], &store, &fetcher).await;
                     }));
                 }
                 None => warn!(hex, "geçersiz seed infohash (40-hex olmalı), atlanıyor"),
@@ -163,31 +168,82 @@ impl Engine {
             }));
         }
 
-        // Ana boru hattı: harvester akışını tüket, sighting yaz, gerekirse çek.
+        // Ana boru hattı: harvester akışını tüket → sighting yaz (kaynak bilgisiyle:
+        // pasif get_peers/announce = sıcak). Çekim burada TETİKLENMEZ — Faz E: firehose
+        // içinden "izin boşsa çek" yaklaşımı hem rastgeleydi hem de işçiler doluyken gelen
+        // hash'leri hiç denemiyordu; onun yerine aşağıdaki öncelikli zamanlayıcı çalışır.
+        // Peer ipuçları (BEP-51 takip get_peers'ten): infohash → taze adresler; bellek-içi,
+        // sınırlı; çekim zamanlayıcısı önce bunları dener.
+        let hints: Arc<std::sync::Mutex<PeerHints>> =
+            Arc::new(std::sync::Mutex::new(PeerHints::new(50_000)));
+        {
+            let store = store.clone();
+            let hints = Arc::clone(&hints);
+            tasks.push(tokio::spawn(async move {
+                while let Some(s) = harvester.infohashes.recv().await {
+                    if !s.peers.is_empty() {
+                        hints
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(s.infohash, s.peers.clone());
+                    }
+                    if let Err(e) = store
+                        .record_sighting_ext(s.infohash, now_unix(), s.source.is_hot())
+                        .await
+                    {
+                        debug!(error = %e, "record_sighting hatası");
+                    }
+                }
+            }));
+        }
+
+        // Çekim zamanlayıcısı: boş işçi izni oldukça depodan öncelikli adayları çeker
+        // (sıcak > popüler > taze; soğuma ile yeniden deneme). Adaylar seçilirken
+        // `last_attempt` işaretlenir; başarı → upsert (fetched), başarısızlık →
+        // deneme sınırında `unreachable`.
         {
             let store = store.clone();
             let fetcher = Arc::clone(&fetcher);
             let sem = Arc::clone(&sem);
+            let hints = Arc::clone(&hints);
+            let workers = config.fetch_workers.max(1);
             tasks.push(tokio::spawn(async move {
-                while let Some(infohash) = harvester.infohashes.recv().await {
-                    // Tek yazma: sighting kaydeder ve güncel durumu döner (ayrı SELECT yok).
-                    let status = match store.record_sighting(infohash, now_unix()).await {
-                        Ok(s) => s,
+                // Yeni açılan DHT istemcisi ısınmadan get_peers zayıf döner.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                loop {
+                    let free = sem.available_permits();
+                    if free == 0 {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
+                    let batch = match store
+                        .next_to_fetch(free.min(workers) as i64, now_unix())
+                        .await
+                    {
+                        Ok(b) => b,
                         Err(e) => {
-                            debug!(error = %e, "record_sighting hatası");
+                            warn!(error = %e, "çekim kuyruğu okunamadı");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
                             continue;
                         }
                     };
-                    // Yalnız 'pending' ise çek (fetched/unreachable atlanır).
-                    if status != "pending" {
+                    if batch.is_empty() {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
                         continue;
                     }
-                    if let Ok(permit) = Arc::clone(&sem).try_acquire_owned() {
+                    for infohash in batch {
+                        let Ok(permit) = Arc::clone(&sem).acquire_owned().await else {
+                            return;
+                        };
                         let store = store.clone();
                         let fetcher = Arc::clone(&fetcher);
+                        let peer_hints = hints
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .take(&infohash);
                         tokio::spawn(async move {
                             let _permit = permit;
-                            fetch_and_store(infohash, &store, &fetcher).await;
+                            fetch_and_store(infohash, &peer_hints, &store, &fetcher).await;
                         });
                     }
                 }
@@ -197,6 +253,7 @@ impl Engine {
         Ok(Engine {
             store,
             harvester_stats,
+            fetch_stats,
             harvester_addr,
             tasks,
         })
@@ -216,6 +273,12 @@ impl Engine {
     pub async fn snapshot(&self) -> EngineSnapshot {
         EngineSnapshot {
             harvester: self.harvester_stats.snapshot(),
+            fetch: self.fetch_stats.snapshot(),
+            queue: self
+                .store
+                .fetch_queue_stats(now_unix())
+                .await
+                .unwrap_or((0, 0, 0, 0)),
             fetched_torrents: self.store.count_fetched().await.unwrap_or(0),
             total_infohashes: self.store.count_total().await.unwrap_or(0),
             harvester_addr: self.harvester_addr,
@@ -231,9 +294,46 @@ impl Drop for Engine {
     }
 }
 
-/// Bir infohash için metadata çeker; başarılıysa yazar, başarısızsa `unreachable` işaretler.
-async fn fetch_and_store(infohash: InfoHash, store: &Store, fetcher: &MetadataFetcher) {
-    match fetcher.fetch(infohash).await {
+/// Peer ipucu önbelleği: infohash → taze adresler (en fazla `cap` kayıt, FIFO tahliye).
+struct PeerHints {
+    map: std::collections::HashMap<InfoHash, Vec<std::net::SocketAddrV4>>,
+    order: std::collections::VecDeque<InfoHash>,
+    cap: usize,
+}
+
+impl PeerHints {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: std::collections::HashMap::with_capacity(cap.min(4096)),
+            order: std::collections::VecDeque::with_capacity(cap.min(4096)),
+            cap,
+        }
+    }
+    fn insert(&mut self, ih: InfoHash, mut peers: Vec<std::net::SocketAddrV4>) {
+        peers.truncate(16);
+        if self.map.insert(ih, peers).is_none() {
+            self.order.push_back(ih);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+    fn take(&mut self, ih: &InfoHash) -> Vec<std::net::SocketAddrV4> {
+        self.map.remove(ih).unwrap_or_default()
+    }
+}
+
+/// Bir infohash için metadata çeker (ipucu peer'ler önce); başarılıysa yazar, başarısızsa
+/// deneme sınırında `unreachable` işaretler.
+async fn fetch_and_store(
+    infohash: InfoHash,
+    hints: &[std::net::SocketAddrV4],
+    store: &Store,
+    fetcher: &MetadataFetcher,
+) {
+    match fetcher.fetch_with_hints(infohash, hints).await {
         Ok(record) => {
             let files = record.files.len();
             let name = record.name.clone();
@@ -244,7 +344,7 @@ async fn fetch_and_store(infohash: InfoHash, store: &Store, fetcher: &MetadataFe
         }
         Err(e) => {
             debug!(infohash = %infohash, error = %e, "metadata çekilemedi");
-            let _ = store.mark_unreachable(infohash).await;
+            let _ = store.mark_fetch_failed(infohash).await;
         }
     }
 }

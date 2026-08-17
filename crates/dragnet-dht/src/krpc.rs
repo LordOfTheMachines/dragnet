@@ -42,6 +42,10 @@ pub struct Query {
 /// Karşı taraftan gelen bir yanıt (`y = "r"`).
 #[derive(Debug, Clone)]
 pub struct Response {
+    /// İşlem kimliği (bizim gönderdiğimiz sorguyla eşlemek için; get_peers → infohash).
+    pub txid: Vec<u8>,
+    /// `values`: get_peers yanıtındaki compact peer adresleri (BEP-5).
+    pub values: Vec<SocketAddrV4>,
     /// `nodes` alanından çözülen compact IPv4 düğümleri (crawl'ı yaymak için).
     pub nodes: Vec<SocketAddrV4>,
     /// BEP-51 `samples`: düğümün aktif olarak sunduğu infohash örnekleri.
@@ -96,7 +100,17 @@ pub fn parse(buf: &[u8]) -> Option<Message> {
                 .and_then(|r| dict_bytes(r, b"samples"))
                 .map(parse_samples)
                 .unwrap_or_default();
-            Some(Message::Response(Response { nodes, samples }))
+            let values = r
+                .and_then(|r| dict_get(r, b"values"))
+                .map(parse_values)
+                .unwrap_or_default();
+            let txid = dict_bytes(dict, b"t").unwrap_or_default().to_vec();
+            Some(Message::Response(Response {
+                txid,
+                values,
+                nodes,
+                samples,
+            }))
         }
         _ => Some(Message::Other),
     }
@@ -113,6 +127,26 @@ fn parse_compact_nodes(bytes: &[u8]) -> Vec<SocketAddrV4> {
         })
         // 0 portlu / 0.0.0.0 düğümleri ele.
         .filter(|a| a.port() != 0 && !a.ip().is_unspecified())
+        .collect()
+}
+
+/// get_peers `values`: 6 baytlık compact peer dizelerinin listesi → adresler.
+fn parse_values(v: &Value) -> Vec<SocketAddrV4> {
+    let Value::List(items) = v else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|it| match it {
+            Value::Bytes(b) if b.len() == 6 => {
+                let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+                let port = u16::from_be_bytes([b[4], b[5]]);
+                (port != 0 && !ip.is_unspecified() && !ip.is_loopback())
+                    .then_some(SocketAddrV4::new(ip, port))
+            }
+            _ => None,
+        })
+        .take(64)
         .collect()
 }
 
@@ -193,6 +227,29 @@ pub fn build_find_node(txid: &[u8], our_id: &[u8; ID_LEN], target: &[u8; ID_LEN]
     build_target_query(b"find_node", txid, our_id, target)
 }
 
+/// `get_peers` sorgusu (`a: {id, info_hash}`) — BEP-51 örneğini veren düğüme doğrudan
+/// sorulur: o düğüm bu infohash için peer saklıyordur; `values` taze peer verir.
+/// `a` içi anahtar sırası: `id < info_hash`.
+pub fn build_get_peers(txid: &[u8], our_id: &[u8; ID_LEN], info_hash: &[u8; ID_LEN]) -> Vec<u8> {
+    let mut o = Vec::with_capacity(96);
+    o.push(b'd');
+    push_str(&mut o, b"a");
+    o.push(b'd');
+    push_str(&mut o, b"id");
+    push_str(&mut o, our_id);
+    push_str(&mut o, b"info_hash");
+    push_str(&mut o, info_hash);
+    o.push(b'e');
+    push_str(&mut o, b"q");
+    push_str(&mut o, b"get_peers");
+    push_str(&mut o, b"t");
+    push_str(&mut o, txid);
+    push_str(&mut o, b"y");
+    push_str(&mut o, b"q");
+    o.push(b'e');
+    o
+}
+
 /// BEP-51 `sample_infohashes` sorgusu — düğümün sunduğu infohash örneklerini ister.
 /// Aktif ve NAT-dostu hasadın temelidir (yanıt `samples` + `nodes` içerir).
 pub fn build_sample_infohashes(
@@ -249,6 +306,32 @@ pub fn build_get_peers_response(txid: &[u8], our_id: &[u8; ID_LEN], token: &[u8]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_peers_query_roundtrips_and_values_parse() {
+        let ih = [7u8; ID_LEN];
+        let pkt = build_get_peers(b"ab", &[1u8; ID_LEN], &ih);
+        // Kendi ayrıştırıcımız sorguyu tanımalı (info_hash dahil).
+        match parse(&pkt) {
+            Some(Message::Query(q)) => {
+                assert_eq!(q.method, Method::GetPeers);
+                assert_eq!(q.info_hash, Some(ih));
+                assert_eq!(q.txid, b"ab");
+            }
+            other => panic!("beklenmeyen: {other:?}"),
+        }
+        // get_peers yanıtı: values (2 peer) + txid.
+        let resp = b"d1:rd2:id20:AAAAAAAAAAAAAAAAAAAA6:valuesl6:\x01\x02\x03\x04\x1a\xe16:\x7f\x00\x00\x01\x00Pee1:t2:ab1:y1:re";
+        match parse(resp) {
+            Some(Message::Response(r)) => {
+                assert_eq!(r.txid, b"ab");
+                // loopback ve 0 port elenir → 1 peer
+                assert_eq!(r.values.len(), 1);
+                assert_eq!(r.values[0].to_string(), "1.2.3.4:6881");
+            }
+            other => panic!("beklenmeyen: {other:?}"),
+        }
+    }
 
     #[test]
     fn parse_get_peers_query_extracts_infohash() {

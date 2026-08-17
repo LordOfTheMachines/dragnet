@@ -82,7 +82,7 @@ pub fn app_info() -> Value {
 /// Canlı durum: tarama açık mı, indeks sayaçları, harvester metrikleri, hız.
 #[tauri::command]
 pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
-    let (scanning, harvester, addr) = {
+    let (scanning, harvester, addr, fetch, queue) = {
         let guard = state.engine.lock().await;
         match guard.as_ref() {
             Some(e) => {
@@ -91,9 +91,11 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
                     true,
                     Some(snap.harvester),
                     Some(e.harvester_addr().to_string()),
+                    Some(snap.fetch),
+                    Some(snap.queue),
                 )
             }
-            None => (false, None, None),
+            None => (false, None, None, None, None),
         }
     };
 
@@ -123,7 +125,14 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         "responses": harvester.as_ref().map(|h| h.responses_seen).unwrap_or(0),
         "samples": samples,
         "unique": harvester.as_ref().map(|h| h.unique_infohashes).unwrap_or(0),
+        "peer_hints": harvester.as_ref().map(|h| h.peer_hints).unwrap_or(0),
         "sample_rate": sample_rate,
+        // Faz E: çekim boru hattı sayaçları + kuyruk (pano "Metadata çekimi" kartı).
+        "fetch": fetch.map(|f| json!({
+            "attempts": f.attempts, "ok": f.ok, "no_peers": f.no_peers,
+            "all_peers_failed": f.all_peers_failed, "avg_ms": f.avg_ms, "avg_peers": f.avg_peers,
+        })),
+        "queue": queue.map(|(p, h, u, r)| json!({ "pending": p, "hot": h, "unreachable": u, "fetched_last_hour": r })),
         "semantic": state.semantic.status_json().await,
     }))
 }

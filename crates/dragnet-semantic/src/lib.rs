@@ -75,7 +75,27 @@ pub struct Semantic {
     index: RwLock<VecIndex>,
     tier: Tier,
     min_score: f32,
+    /// Anlamsız sorguların bu indekste aldığı en yüksek benzerlik (gürültü tabanı).
+    /// Modelden modele çok değişir (MiniLM ~0.6, Gemma ~0.36); mutlak eşik yerine
+    /// bu taban + göreli kesim kullanılır. `calibrate_noise` ile ölçülür.
+    noise_floor: RwLock<f32>,
+    /// Son kalibrasyondan beri eklenen satır (yeniden kalibrasyon tetikleyicisi).
+    added_since_calib: std::sync::atomic::AtomicUsize,
 }
+
+/// Gürültü tabanı ölçümünde kullanılan anlamsız sorgular.
+const NOISE_PROBES: [&str; 4] = [
+    "asdkjhqwe zxcv",
+    "qwpoeiru mnbvcx",
+    "zzxx ccvv bbnn",
+    "lkjhg fdsa poiu",
+];
+/// Tabanın üstüne eklenen pay.
+const NOISE_MARGIN: f32 = 0.0;
+/// Göreli kesim: en iyi skorun bu oranının altındaki isabetler atılır.
+const RELATIVE_CUT: f32 = 0.80;
+/// Bu kadar yeni satırdan sonra taban yeniden ölçülür.
+const RECALIB_EVERY: usize = 5_000;
 
 impl Semantic {
     /// Yapılandırmadaki kademenin modelini yükler (indirilmiş olmalı — bkz.
@@ -102,6 +122,8 @@ impl Semantic {
             index: RwLock::new(VecIndex::new(dim)),
             tier,
             min_score,
+            noise_floor: RwLock::new(min_score),
+            added_since_calib: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -143,6 +165,61 @@ impl Semantic {
     pub fn min_score(&self) -> f32 {
         self.min_score
     }
+    /// Ölçülmüş gürültü tabanı (kalibrasyon yapılmadıysa `min_score`).
+    pub fn noise_floor(&self) -> f32 {
+        *self.noise_floor.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Gürültü tabanını ölçer: anlamsız sorguların en iyi skorlarının en büyüğü.
+    /// İndeks boşsa dokunmaz. Bloklar (birkaç sorgu embed + tarama).
+    pub fn calibrate_noise(&self) -> Result<f32, SemanticError> {
+        if self
+            .index
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
+        {
+            return Ok(self.noise_floor());
+        }
+        // Sondaların en iyi skorlarının MEDYANI: tek bir sondanın rastgele bir kod/ada
+        // (ör. "MNGS-056") sözcüksel benzemesi tabanı şişirmesin.
+        let mut tops: Vec<f32> = Vec::with_capacity(NOISE_PROBES.len());
+        for probe in NOISE_PROBES {
+            let v = self.embedder.embed_query(probe)?;
+            let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+            if let Some(top) = idx.search(&v, 1, -1.0).first() {
+                tops.push(top.score);
+            }
+        }
+        tops.sort_by(|a, b| a.total_cmp(b));
+        let floor = if tops.is_empty() {
+            self.min_score
+        } else {
+            let m = tops.len() / 2;
+            let med = if tops.len().is_multiple_of(2) {
+                (tops[m - 1] + tops[m]) / 2.0
+            } else {
+                tops[m]
+            };
+            med.max(self.min_score)
+        };
+        *self.noise_floor.write().unwrap_or_else(|p| p.into_inner()) = floor;
+        self.added_since_calib
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        Ok(floor)
+    }
+
+    /// Yeterince yeni satır eklendiyse tabanı yeniden ölçer (indeksleyici çağırır).
+    pub fn maybe_recalibrate(&self) -> Result<Option<f32>, SemanticError> {
+        if self
+            .added_since_calib
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= RECALIB_EVERY
+        {
+            return self.calibrate_noise().map(Some);
+        }
+        Ok(None)
+    }
 
     pub fn status(&self) -> SemanticStatus {
         let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
@@ -173,10 +250,14 @@ impl Semantic {
             let (q, s) = idx.add(*ih, &v);
             out.push((*ih, q, s));
         }
+        self.added_since_calib
+            .fetch_add(out.len(), std::sync::atomic::Ordering::Relaxed);
         Ok(out)
     }
 
-    /// Doğal dil sorgusu → en yakın `k` kayıt (modelin `min_score` eşiği uygulanır).
+    /// Doğal dil sorgusu → en yakın `k` kayıt. Kesim: skor ≥ max(gürültü tabanı + pay,
+    /// en iyi × RELATIVE_CUT). Böylece anlamsız sorgular boş döner, gerçek isabetlerde
+    /// yalnız üst küme kalır (Faz E kalibrasyonu: Gemma taban ~0.36, isabet 0.42–0.51).
     pub fn search(&self, query: &str, k: usize) -> Result<Vec<Hit>, SemanticError> {
         let q = query.trim();
         if q.is_empty() || k == 0 {
@@ -184,7 +265,19 @@ impl Semantic {
         }
         let v = self.embedder.embed_query(q)?;
         let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
-        Ok(idx.search(&v, k, self.min_score))
+        let raw = idx.search(&v, k, self.min_score);
+        let Some(top) = raw.first().map(|h| h.score) else {
+            return Ok(raw);
+        };
+        let cut = (self.noise_floor() + NOISE_MARGIN).max(top * RELATIVE_CUT);
+        Ok(raw.into_iter().filter(|h| h.score >= cut).collect())
+    }
+
+    /// Ham arama (kesimsiz) — teşhis/kalibrasyon araçları için.
+    pub fn search_raw(&self, query: &str, k: usize) -> Result<Vec<Hit>, SemanticError> {
+        let v = self.embedder.embed_query(query.trim())?;
+        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+        Ok(idx.search(&v, k, -1.0))
     }
 }
 

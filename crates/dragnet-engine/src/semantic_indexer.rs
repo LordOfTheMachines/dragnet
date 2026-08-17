@@ -48,7 +48,12 @@ pub async fn load_index(
             }
         }
     }
-    info!(loaded, model = %model_id, device = sem.device(), "semantik indeks yüklendi");
+    // Gürültü tabanını bu indeks/model için ölç (bloklar, birkaç yüz ms).
+    if let Ok(floor) = sem.calibrate_noise() {
+        info!(loaded, model = %model_id, device = sem.device(), noise_floor = floor, "semantik indeks yüklendi");
+    } else {
+        info!(loaded, model = %model_id, device = sem.device(), "semantik indeks yüklendi");
+    }
     Ok(loaded)
 }
 
@@ -91,6 +96,9 @@ pub fn spawn_indexer(store: Store, sem: Arc<Semantic>) -> JoinHandle<()> {
             } else {
                 debug!(n, model = %model_id, "parti indekslendi");
             }
+            // İndeks büyüdükçe gürültü tabanı kayar → periyodik yeniden kalibrasyon.
+            let sem3 = Arc::clone(&sem);
+            let _ = tokio::task::spawn_blocking(move || sem3.maybe_recalibrate()).await;
             tokio::time::sleep(BATCH_PAUSE).await;
         }
     })

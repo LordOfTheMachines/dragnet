@@ -98,11 +98,13 @@ pub async fn search(
     // Sorgu embed'i CPU-yoğun (10–60 ms) → blocking havuzunda.
     let qs = q.to_string();
     let sem2 = Arc::clone(&sem);
-    let hits = tokio::task::spawn_blocking(move || sem2.search(&qs, HYBRID_CANDIDATES as usize))
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+    // Semantik aday sayısı: FTS adaylarından az (kesim sonrası genelde çok daha az kalır).
+    let hits =
+        tokio::task::spawn_blocking(move || sem2.search(&qs, (HYBRID_CANDIDATES / 4) as usize))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
     let ids: Vec<_> = hits.iter().map(|h| h.infohash).collect();
     let (fts_query, used) = match mode {
         SearchMode::Semantic => ("", SearchMode::Semantic),

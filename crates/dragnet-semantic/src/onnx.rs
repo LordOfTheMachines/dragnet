@@ -27,6 +27,9 @@ pub struct OrtEmbedder {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
     input_names: Vec<String>,
+    /// `past_key_values.*` girdileri: (ad, f16 mi, [heads, head_dim]) — boş KV ile beslenir
+    /// (Qwen3 decoder export'u bunları zorunlu kılar).
+    kv_inputs: Vec<(String, bool, [usize; 2])>,
     has_sentence_output: bool,
     device: &'static str,
 }
@@ -45,7 +48,8 @@ impl OrtEmbedder {
         let model_path = dir.join(spec.onnx_file);
         let tokenizer = load_tokenizer(&dir.join("tokenizer.json"), spec.max_tokens)?;
 
-        // Önce istenen cihaz; GPU başarısızsa (Auto) CPU'ya düş.
+        // Önce istenen cihaz; GPU başarısızsa (Auto) CPU'ya düş. Model GPU'yu desteklemiyorsa CPU.
+        let device = if spec.gpu_ok { device } else { Device::Cpu };
         let (session, dev) = match device {
             Device::Cpu => (build_session(&model_path, false)?, "cpu"),
             Device::Gpu => (build_session(&model_path, true)?, "directml"),
@@ -57,11 +61,23 @@ impl OrtEmbedder {
                 }
             },
         };
-        let input_names: Vec<String> = session
-            .inputs()
-            .iter()
-            .map(|o| o.name().to_string())
-            .collect();
+        let mut input_names: Vec<String> = Vec::new();
+        let mut kv_inputs: Vec<(String, bool, [usize; 2])> = Vec::new();
+        for o in session.inputs() {
+            let name = o.name().to_string();
+            if name.starts_with("past_key_values") {
+                if let ort::value::ValueType::Tensor { ty, shape, .. } = o.dtype() {
+                    let is16 = matches!(ty, ort::value::TensorElementType::Float16);
+                    // Beklenen şekil [batch, heads, seq, head_dim] (seq dinamik → 0 veririz).
+                    let dims: Vec<i64> = shape.iter().copied().collect();
+                    let heads = dims.get(1).copied().unwrap_or(8).max(1) as usize;
+                    let hd = dims.get(3).copied().unwrap_or(128).max(1) as usize;
+                    kv_inputs.push((name, is16, [heads, hd]));
+                }
+            } else {
+                input_names.push(name);
+            }
+        }
         let has_sentence_output = session
             .outputs()
             .iter()
@@ -78,6 +94,7 @@ impl OrtEmbedder {
             session: Mutex::new(session),
             tokenizer,
             input_names,
+            kv_inputs,
             has_sentence_output,
             device: dev,
         })
@@ -158,6 +175,25 @@ impl OrtEmbedder {
                 }
             }
         }
+        // Boş KV önbelleği girdileri (decoder-tipi export; Qwen3).
+        for (name, is16, [heads, hd]) in &self.kv_inputs {
+            let shape = [b, *heads, 0usize, *hd];
+            if *is16 {
+                inputs.push((
+                    name.clone(),
+                    Tensor::<half::f16>::from_array((shape, Vec::<half::f16>::new()))
+                        .map_err(ort_err)?
+                        .into(),
+                ));
+            } else {
+                inputs.push((
+                    name.clone(),
+                    Tensor::<f32>::from_array((shape, Vec::<f32>::new()))
+                        .map_err(ort_err)?
+                        .into(),
+                ));
+            }
+        }
         let mut sess = self.session.lock().unwrap_or_else(|p| p.into_inner());
         let outputs = sess.run(inputs).map_err(ort_err)?;
         let dim = self.spec.dim;
@@ -195,16 +231,21 @@ impl OrtEmbedder {
             }
             for (i, &len) in lens.iter().enumerate() {
                 let mut v = vec![0f32; hid];
-                let n = len.min(osl);
-                for j in 0..n {
-                    let off = (i * osl + j) * hid;
-                    for (k, x) in v.iter_mut().enumerate() {
-                        *x += data[off + k];
+                let n = len.min(osl).max(1);
+                if self.spec.pooling == Pooling::LastToken {
+                    let off = (i * osl + (n - 1)) * hid;
+                    v.copy_from_slice(&data[off..off + hid]);
+                } else {
+                    for j in 0..n {
+                        let off = (i * osl + j) * hid;
+                        for (k, x) in v.iter_mut().enumerate() {
+                            *x += data[off + k];
+                        }
                     }
-                }
-                let inv = 1.0 / n as f32;
-                for x in v.iter_mut() {
-                    *x *= inv;
+                    let inv = 1.0 / n as f32;
+                    for x in v.iter_mut() {
+                        *x *= inv;
+                    }
                 }
                 l2_normalize(&mut v);
                 out.push(v);

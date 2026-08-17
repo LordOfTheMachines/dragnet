@@ -233,7 +233,49 @@ yeniden kurulur (ağdan yeniden-inşa ilkesi korunur — vektörler adlardan tü
 "File doesn't exist" diye reddetti; kısa yol çalıştı → modeller **kısa/düz** bir dizine
 indirilir (`<data>/models/<id>/model.onnx`), HF snapshot iç içe düzeni kullanılmaz.
 
-### 7.4 Hâlâ açık kararlar
+### 7.4 Faz E — bütünsel kalite çevrimi: çekim boru hattı, kodlama, kalibrasyon (KARAR VERİLDİ)
+
+**Ölçüm (2026-08-17, gerçek DB: 797k bilinen infohash, 528 fetched, 34.6k unreachable):**
+çekim başarı oranı **%1,5**; kontrollü deney (150 popüler pending, eski fetcher): 0 → tek
+eşzamanlı istemcide %100 (BBB/Sintel/ToS), 10 eşzamanlıda %18 ama 150 hash **1111 s** —
+başarılı çekim medyanı 14 s, kuyruk 40 s+, `peer_gather_timeout=20 s` bunları kesiyordu;
+başarısız çekim ~70 s sürüyordu (50 peer × 8 s, önce topla sonra dene). Ayrıca engine
+"izin boşsa çek" (`try_acquire`) ile firehose'daki hash'lerin çoğunu **hiç denemiyordu**.
+
+**Kararlar ve etkileri:**
+1. **Pipelined fetch** (`dragnet-meta`): `get_peers` akışı sürerken gelen peer'e hemen
+   bağlan; ilk başarı kazanır; tek bütçe (`overall_timeout=45 s`), bağlanma zaman aşımı
+   ayrı (3,5 s — peer denemelerinin ~%92'si NAT'lı adreslerin bağlanma zaman aşımıydı),
+   çekim başına 12 eşzamanlı / 40 peer. Aynı 150 hash: 1111 s → **143 s**, başarı medyanı
+   14 s → 4 s; saatlik verim ~3× (başarısızlar 70 s yerine ~6 s harcar).
+2. **Öncelikli çekim kuyruğu** (`store.next_to_fetch`): sıcak (2 saat içinde pasif trafikte
+   ya da peer-ipuçlu görülen) › popüler (`seen_count`) › taze; en çok 3 deneme, 6 saat soğuma;
+   `fetch_attempts/last_attempt/hot_seen/hot_count/fetched_at` kolonları; eski `unreachable`
+   kayıtlar bir kez geri kuyruğa (`PRAGMA user_version=1`).
+3. **Sighting kaynağı** (`dragnet-dht`): `Sighting { infohash, source, peers }`;
+   get_peers/announce = sıcak (ana dedup'ı atlar, kısa pencerede bastırılır).
+4. **BEP-51 takip `get_peers`**: örnek veren düğüm o infohash için peer saklıyordur → yeni
+   örneklerin birkaçı (3/yanıt, rate-limit bütçesinden) için aynı düğüme doğrudan
+   `get_peers`; `values` → `SamplePeers` sighting (sıcak, peer ipuçlu). Engine ipuçlarını
+   bellek-içi (50k) tutar, fetch önce onları dener. Canlıda: peer-yok oranı %73 → ~%1,
+   başarı %3 → %8 (asıl kalan darboğaz NAT'lı peer'ler).
+5. **Ad kodlaması** (`dragnet-meta::text`): `name.utf-8`/`path.utf-8` tercih; değilse
+   chardetng tahmini + GB18030/Shift_JIS/EUC-KR/CP1251/CP1254/CP1252 adayları arasından
+   hatasız çözülüp "harf oranı" en yüksek olan (kısa CJK dizeler GBK/SJIS arasında doğası
+   gereği belirsiz). Bozuk (`�`) adlar semantik indekse alınmaz.
+6. **Semantik kalibrasyon**: mutlak `min_score` yerine **kendi kendini kalibre eden gürültü
+   tabanı** (4 anlamsız sonda → en iyi skorların medyanı; her 5000 eklemede yenilenir) +
+   göreli kesim (en iyi × 0,80). Gerçek DB'de Gemma taban 0,377 (isabet 0,42–0,69), MiniLM
+   0,645, potion 0,352. Semantik aday sayısı 100'e düşürüldü. 4. kademe **Deneysel**:
+   Qwen3-Embedding-0.6B q4f16 (last-token pooling, boş KV girdileri; yalnız CPU).
+7. **Keşif grafiği**: `discovery` artık şimdiden geriye tam N kova (boş=0) döner; eksen
+   işaretleri, "şimdi" çizgisi, hover ipucu. `FetchStats` (peer hata türleriyle) → `/stats`,
+   daemon log ve pano "Metadata çekimi" kartı.
+
+**Açık:** NAT'lı peer'lere uTP/holepunch (BEP-55) ile ulaşmak; sıcak kuyruk büyüdükçe
+öncelik ağırlıklarını yeniden ayarlamak; peer ipuçlarını kalıcılaştırmak.
+
+### 7.5 Hâlâ açık kararlar
 
 - BitTorrent v2 (SHA-256 infohash) desteği ne zaman? → v1 çalıştıktan sonra.
 - Daemon'da (Faz 5) harvester ile fetcher aynı DHT düğümünü mü paylaşmalı? → Faz 5'te ölçülecek.

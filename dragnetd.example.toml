@@ -23,11 +23,11 @@ harvester_port = 0
 harvester_max_queries_per_sec = 50
 
 # Aynı anda metadata çekilecek azami infohash sayısı (fetcher havuzu boyutu).
-# Düşük tut; her biri birçok eşzamanlı TCP bağlantısı açar.
-fetch_workers = 2
+# Çekimler çoğunlukla ağ beklemesidir; 12 makul. Toplam eşzamanlı TCP ≈ fetch_workers × fetch_peer_concurrency.
+fetch_workers = 12
 
 # Tek bir metadata çekiminde denenecek eşzamanlı peer sayısı.
-fetch_peer_concurrency = 6
+fetch_peer_concurrency = 12
 
 # Başlangıçta çekilip indekslenecek infohash'ler (indeksi ısıtmak / test için).
 # seed_infohashes = ["08ada5a7a6183aae1e09d831df6748d566095a10"]  # Sintel

@@ -28,11 +28,11 @@ mod dedup;
 mod krpc;
 mod ratelimit;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -68,6 +68,9 @@ pub struct HarvesterConfig {
     pub id_rotation: Duration,
     /// Yakın zamanda görülen benzersiz infohash filtresinin kapasitesi.
     pub dedup_capacity: usize,
+    /// Her BEP-51 örnek yanıtı için en fazla kaç yeni infohash'e o düğüme doğrudan
+    /// `get_peers` sorulacağı (taze peer ipucu; rate-limit bütçesinden harcanır). 0 = kapalı.
+    pub followups_per_sample: usize,
     /// Sorgulanmayı bekleyen düğüm kuyruğunun azami boyutu.
     pub node_queue_capacity: usize,
 }
@@ -86,6 +89,7 @@ impl Default for HarvesterConfig {
             crawl_batch: 4,
             id_rotation: Duration::from_secs(600),
             dedup_capacity: 1 << 18,
+            followups_per_sample: 3,
             node_queue_capacity: 8192,
         }
     }
@@ -109,6 +113,8 @@ pub struct Stats {
     pub samples_seen: AtomicU64,
     /// Rate-limit nedeniyle gönderilemeyen crawl sorgusu sayısı.
     pub rate_limited: AtomicU64,
+    /// Takip get_peers ile `values` (taze peer) alınan örnek sayısı (Faz E).
+    pub peer_hints: AtomicU64,
 }
 
 /// Anlık sayaç görüntüsü (kolay loglama için).
@@ -126,6 +132,7 @@ pub struct StatsSnapshot {
     pub queries_sent: u64,
     pub samples_seen: u64,
     pub rate_limited: u64,
+    pub peer_hints: u64,
 }
 
 impl Stats {
@@ -143,15 +150,45 @@ impl Stats {
             queries_sent: self.queries_sent.load(Ordering::Relaxed),
             samples_seen: self.samples_seen.load(Ordering::Relaxed),
             rate_limited: self.rate_limited.load(Ordering::Relaxed),
+            peer_hints: self.peer_hints.load(Ordering::Relaxed),
         }
     }
+}
+
+/// Bir infohash görülmesinin kaynağı. Pasif kaynaklar (`GetPeers`, `Announce`) "şu anda
+/// birileri bunu arıyor/sunuyor" demektir → metadata çekiminde öncelik sinyali ("sıcak").
+/// `Sample` (BEP-51) düğüm deposundan örnek: eski/ölü olabilir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SightingSource {
+    Sample,
+    /// BEP-51 örneğini veren düğüme doğrudan `get_peers` sorulup `values` alındı:
+    /// infohash için **şu anda** peer var (taze) — `Sighting::peers` dolu.
+    SamplePeers,
+    GetPeers,
+    Announce,
+}
+
+impl SightingSource {
+    /// Sıcak sinyal mi (şu anda peer/ilgi var)?
+    pub fn is_hot(self) -> bool {
+        !matches!(self, Self::Sample)
+    }
+}
+
+/// Hasat akışının bir öğesi: infohash + kaynak (+ varsa peer ipuçları).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sighting {
+    pub infohash: InfoHash,
+    pub source: SightingSource,
+    /// Doğrudan bilinen peer adresleri (fetcher önce bunları dener; DHT aramasını atlar).
+    pub peers: Vec<SocketAddrV4>,
 }
 
 /// Çalışan hasatçı. `infohashes` alanından benzersiz infohash akışı okunur.
 /// Bırakılınca (drop) arka plan görevleri de durur.
 pub struct Harvester {
     /// Benzersiz infohash akışı (sınırlı kanal).
-    pub infohashes: mpsc::Receiver<InfoHash>,
+    pub infohashes: mpsc::Receiver<Sighting>,
     stats: Arc<Stats>,
     tasks: Vec<JoinHandle<()>>,
     local_addr: SocketAddr,
@@ -184,13 +221,20 @@ struct Shared {
     nodes: Mutex<VecDeque<SocketAddrV4>>,
     limiter: Mutex<TokenBucket>,
     dedup: Mutex<RecentSet>,
+    /// Pasif (sıcak) sighting'ler ana dedup'ı atlar ama kısa pencerede tekrarları bastırır.
+    hot_dedup: Mutex<RecentSet>,
     stats: Arc<Stats>,
-    sink: mpsc::Sender<InfoHash>,
+    sink: mpsc::Sender<Sighting>,
     /// Giden yanıtlar (ping/find_node/get_peers ack) — ayrı gönderici task drenajlar,
     /// böylece yanıt gönderimi paket ALIMINI bloklamaz (yük altında UDP kaybını azaltır).
     reply_tx: mpsc::Sender<(Vec<u8>, SocketAddrV4)>,
     node_queue_capacity: usize,
     txid: AtomicU32,
+    /// Gönderdiğimiz `get_peers` sorguları: txid → (infohash, zaman). Yanıt gelince
+    /// `values` bu infohash'e bağlanır. Eskiler (>30 s) budanır.
+    pending_gp: Mutex<HashMap<u16, ([u8; ID_LEN], Instant)>>,
+    /// Örnek yanıtı başına en fazla kaç takip get_peers (rate-limit içinden harcanır).
+    followups_per_sample: usize,
 }
 
 impl Shared {
@@ -257,11 +301,14 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         nodes: Mutex::new(VecDeque::with_capacity(config.node_queue_capacity)),
         limiter: Mutex::new(TokenBucket::new(config.max_queries_per_sec)),
         dedup: Mutex::new(RecentSet::new(config.dedup_capacity)),
+        hot_dedup: Mutex::new(RecentSet::new(4096)),
         stats: Arc::clone(&stats),
         sink: tx,
         reply_tx,
         node_queue_capacity: config.node_queue_capacity,
         txid: AtomicU32::new(0),
+        pending_gp: Mutex::new(HashMap::new()),
+        followups_per_sample: config.followups_per_sample,
     });
 
     // Kuyruğu bootstrap düğümleriyle doldur.
@@ -350,7 +397,7 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 Method::GetPeers => {
                     shared.stats.get_peers_seen.fetch_add(1, Ordering::Relaxed);
                     if let Some(ih) = q.info_hash {
-                        harvest(shared, ih);
+                        harvest(shared, ih, SightingSource::GetPeers);
                     }
                     Some(krpc::build_get_peers_response(
                         &q.txid,
@@ -361,7 +408,7 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 Method::AnnouncePeer => {
                     shared.stats.announce_seen.fetch_add(1, Ordering::Relaxed);
                     if let Some(ih) = q.info_hash {
-                        harvest(shared, ih);
+                        harvest(shared, ih, SightingSource::Announce);
                     }
                     Some(krpc::build_response_id_only(&q.txid, &id))
                 }
@@ -385,14 +432,48 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                     .nodes_learned
                     .fetch_add(added, Ordering::Relaxed);
             }
-            // BEP-51: yanıttaki infohash örneklerini aktif olarak hasat et.
+            // Bizim get_peers sorgumuzun yanıtı mı? (`values` → taze peer ipuçları)
+            if r.txid.len() == 2 {
+                let key = u16::from_be_bytes([r.txid[0], r.txid[1]]);
+                let hit = shared.pending_gp.lock().unwrap().remove(&key);
+                if let Some((ih, _)) = hit {
+                    if !r.values.is_empty() {
+                        shared.stats.peer_hints.fetch_add(1, Ordering::Relaxed);
+                        emit(shared, ih, SightingSource::SamplePeers, r.values.clone());
+                    }
+                }
+            }
+            // BEP-51: yanıttaki infohash örneklerini aktif olarak hasat et. Örneği veren
+            // düğüm bu infohash'ler için peer saklıyordur → birkaçı için hemen ona
+            // get_peers sor (takip); yanıtı `values` ile döner.
             if !r.samples.is_empty() {
                 shared
                     .stats
                     .samples_seen
                     .fetch_add(r.samples.len() as u64, Ordering::Relaxed);
+                let mut followups = 0usize;
                 for ih in r.samples {
-                    harvest(shared, ih);
+                    let is_new = harvest(shared, ih, SightingSource::Sample);
+                    if is_new && followups < shared.followups_per_sample {
+                        if shared.limiter.lock().unwrap().try_take() {
+                            followups += 1;
+                            let txid = shared.next_txid();
+                            let key = u16::from_be_bytes(txid);
+                            {
+                                let mut p = shared.pending_gp.lock().unwrap();
+                                if p.len() > 4096 {
+                                    let cutoff = Instant::now() - Duration::from_secs(30);
+                                    p.retain(|_, (_, t)| *t > cutoff);
+                                }
+                                p.insert(key, (ih, Instant::now()));
+                            }
+                            let pkt = krpc::build_get_peers(&txid, &shared.our_id(), &ih);
+                            let _ = shared.reply_tx.try_send((pkt, from));
+                            shared.stats.queries_sent.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            shared.stats.rate_limited.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
                 }
             }
         }
@@ -400,14 +481,31 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
     }
 }
 
-/// Benzersiz bir infohash'i dedup'tan geçirip kanala yayar.
-fn harvest(shared: &Shared, ih: [u8; ID_LEN]) {
-    let is_new = shared.dedup.lock().unwrap().insert(ih);
+/// Bir infohash görülmesini dedup'tan geçirip kanala yayar. Örnekler (Sample) büyük
+/// dedup'tan geçer; pasif kaynaklar (sıcak) daha önce örneklenmiş olsa da yayılır — yalnız
+/// kısa pencerede tekrarları bastırılır — çünkü "şu anda aranıyor" sinyali değerlidir.
+/// Döndürdüğü: dedup'a göre yeni miydi.
+fn harvest(shared: &Shared, ih: [u8; ID_LEN], source: SightingSource) -> bool {
+    let is_new = if source.is_hot() {
+        shared.hot_dedup.lock().unwrap().insert(ih)
+    } else {
+        shared.dedup.lock().unwrap().insert(ih)
+    };
     if !is_new {
         shared.stats.duplicates.fetch_add(1, Ordering::Relaxed);
-        return;
+        return false;
     }
-    match shared.sink.try_send(InfoHash::from_bytes(ih)) {
+    emit(shared, ih, source, Vec::new());
+    true
+}
+
+/// Sighting'i kanala yazar (dedup'suz).
+fn emit(shared: &Shared, ih: [u8; ID_LEN], source: SightingSource, peers: Vec<SocketAddrV4>) {
+    match shared.sink.try_send(Sighting {
+        infohash: InfoHash::from_bytes(ih),
+        source,
+        peers,
+    }) {
         Ok(()) => {
             shared
                 .stats

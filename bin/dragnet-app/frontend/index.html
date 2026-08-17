@@ -36,6 +36,22 @@
 
       <div class="card">
         <div class="card-head">
+          <h3>Metadata çekimi</h3>
+          <span id="fetch-summary" class="muted small"></span>
+        </div>
+        <div class="tiles tiles-6">
+          <div class="tile sm"><div class="tval" id="f-rate">–</div><div class="tlabel">Son 1 saatte indekslenen</div></div>
+          <div class="tile sm"><div class="tval" id="f-success">–</div><div class="tlabel">Başarı oranı (oturum)</div></div>
+          <div class="tile sm"><div class="tval" id="f-attempts">–</div><div class="tlabel">Deneme (oturum)</div></div>
+          <div class="tile sm"><div class="tval" id="f-avg">–</div><div class="tlabel">Ort. çekim süresi</div></div>
+          <div class="tile sm"><div class="tval" id="f-hot">–</div><div class="tlabel">Sıcak kuyruk (2 saat)</div></div>
+          <div class="tile sm"><div class="tval" id="f-pending">–</div><div class="tlabel">Bekleyen / ulaşılamayan</div></div>
+        </div>
+        <div id="fetch-detail" class="muted small" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <h3>Keşif zaman serisi</h3>
           <div class="seg" id="chart-seg">
             <button class="seg-btn active" data-bucket="hour" data-points="48">Saatlik (48s)</button>
@@ -45,6 +61,7 @@
           </div>
         </div>
         <div id="chart" class="chart"></div>
+        <div id="chart-caption" class="muted small" style="margin-top:6px"></div>
       </div>
 
       <div class="card">
@@ -144,8 +161,8 @@
             <small>İnternet yavaşlıyorsa düşür (20–40). Port-forward + iyi bağlantıda artır.</small>
           </label>
           <label>Fetch işçileri (aynı anda metadata)
-            <input id="set-workers" type="number" min="1" max="20" />
-            <small>İsimleri daha hızlı çekmek için artır (ör. 8-10); internet yavaşlarsa düşür.</small>
+            <input id="set-workers" type="number" min="1" max="64" />
+            <small>Varsayılan 12. Daha hızlı isim çekmek için artır (ör. 24); internet yavaşlarsa düşür. Toplam eşzamanlı bağlantı ≈ işçi × peer.</small>
           </label>
           <label>Fetch başına eşzamanlı peer
             <input id="set-peers" type="number" min="1" max="30" />
@@ -170,6 +187,7 @@
               <option value="light">Hafif — potion-multilingual (statik; anında indeksleme, ~500 MB)</option>
               <option value="balanced">Dengeli — MiniLM-L12 multilingual (int8; ~250 MB)</option>
               <option value="quality">Yüksek kalite — EmbeddingGemma-300m Q4 (~230 MB; GPU önerilir)</option>
+              <option value="experimental">Deneysel — Qwen3-Embedding-0.6B (~570 MB; yalnız CPU, yavaş)</option>
             </select>
             <small>Kademe değişince indeks yeniden kurulur.</small>
           </label>
