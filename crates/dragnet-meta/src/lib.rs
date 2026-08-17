@@ -52,9 +52,9 @@ impl Default for FetchConfig {
             // Nazik varsayılanlar: çekim başına eşzamanlı TCP peer bağlantısını sınırlı
             // tutarak router bağlantı-izleme tablosunu korur; toplam yük çekim işçisi
             // sayısı × concurrency'dir.
-            max_peers: 30,
-            per_peer_timeout: Duration::from_secs(6),
-            concurrency: 8,
+            max_peers: 40,
+            per_peer_timeout: Duration::from_secs(8),
+            concurrency: 12,
             overall_timeout: Duration::from_secs(45),
         }
     }
@@ -78,6 +78,13 @@ pub struct FetchStats {
     pub total_ms: AtomicU64,
     /// Toplam bulunan peer sayısı.
     pub peers_found: AtomicU64,
+    // Peer denemesi sonuçları (neden başarısız? teşhis):
+    pub peer_ok: AtomicU64,
+    pub peer_io: AtomicU64,
+    pub peer_timeout: AtomicU64,
+    pub peer_bad_handshake: AtomicU64,
+    pub peer_no_metadata_ext: AtomicU64,
+    pub peer_other: AtomicU64,
 }
 
 /// Anlık kopya.
@@ -89,6 +96,12 @@ pub struct FetchStatsSnapshot {
     pub all_peers_failed: u64,
     pub avg_ms: u64,
     pub avg_peers: f32,
+    pub peer_ok: u64,
+    pub peer_io: u64,
+    pub peer_timeout: u64,
+    pub peer_bad_handshake: u64,
+    pub peer_no_metadata_ext: u64,
+    pub peer_other: u64,
 }
 
 impl FetchStats {
@@ -99,16 +112,22 @@ impl FetchStats {
             ok: self.ok.load(Ordering::Relaxed),
             no_peers: self.no_peers.load(Ordering::Relaxed),
             all_peers_failed: self.all_peers_failed.load(Ordering::Relaxed),
-            avg_ms: if attempts > 0 {
-                self.total_ms.load(Ordering::Relaxed) / attempts
-            } else {
-                0
-            },
+            avg_ms: self
+                .total_ms
+                .load(Ordering::Relaxed)
+                .checked_div(attempts)
+                .unwrap_or(0),
             avg_peers: if attempts > 0 {
                 self.peers_found.load(Ordering::Relaxed) as f32 / attempts as f32
             } else {
                 0.0
             },
+            peer_ok: self.peer_ok.load(Ordering::Relaxed),
+            peer_io: self.peer_io.load(Ordering::Relaxed),
+            peer_timeout: self.peer_timeout.load(Ordering::Relaxed),
+            peer_bad_handshake: self.peer_bad_handshake.load(Ordering::Relaxed),
+            peer_no_metadata_ext: self.peer_no_metadata_ext.load(Ordering::Relaxed),
+            peer_other: self.peer_other.load(Ordering::Relaxed),
         }
     }
 }
@@ -156,8 +175,18 @@ impl MetadataFetcher {
     /// biriktirip sonra denemek başarılı çekimleri (medyan ~14 s, kuyruk 40 s+) kesiyor ve
     /// başarısızları ~70 s sürüklüyordu.
     pub async fn fetch(&self, infohash: InfoHash) -> Result<TorrentRecord, FetchError> {
+        self.fetch_with_hints(infohash, &[]).await
+    }
+
+    /// [`MetadataFetcher::fetch`] + bilinen peer ipuçları: ipuçları DHT aramasını
+    /// beklemeden **hemen** denenir (BEP-51 takip `get_peers`'ten gelen taze adresler).
+    pub async fn fetch_with_hints(
+        &self,
+        infohash: InfoHash,
+        hints: &[SocketAddrV4],
+    ) -> Result<TorrentRecord, FetchError> {
         let started = Instant::now();
-        let res = self.fetch_inner(infohash).await;
+        let res = self.fetch_inner(infohash, hints).await;
         self.stats.attempts.fetch_add(1, Ordering::Relaxed);
         self.stats
             .total_ms
@@ -177,7 +206,11 @@ impl MetadataFetcher {
         res
     }
 
-    async fn fetch_inner(&self, infohash: InfoHash) -> Result<TorrentRecord, FetchError> {
+    async fn fetch_inner(
+        &self,
+        infohash: InfoHash,
+        hints: &[SocketAddrV4],
+    ) -> Result<TorrentRecord, FetchError> {
         let ih_bytes = *infohash.as_bytes();
         let per_peer = self.config.per_peer_timeout;
         let conc = self.config.concurrency.max(1);
@@ -189,6 +222,11 @@ impl MetadataFetcher {
         let mut stream_done = false;
         let mut seen: HashSet<SocketAddrV4> = HashSet::new();
         let mut queue: std::collections::VecDeque<SocketAddrV4> = std::collections::VecDeque::new();
+        for &h in hints {
+            if seen.insert(h) {
+                queue.push_back(h);
+            }
+        }
         let mut set = tokio::task::JoinSet::new();
         let mut tried = 0usize;
         let mut launched = 0usize;
@@ -229,10 +267,23 @@ impl MetadataFetcher {
                     tried += 1;
                     match res {
                         Some(Ok(Ok(info_bytes))) => match parse_info_dict(&info_bytes, infohash) {
-                            Ok(record) => return Ok(record), // set drop → kalanlar iptal
+                            Ok(record) => {
+                                self.stats.peer_ok.fetch_add(1, Ordering::Relaxed);
+                                return Ok(record); // set drop → kalanlar iptal
+                            }
                             Err(e) => debug!(error = %e, "info sözlüğü çözülemedi"),
                         },
-                        Some(Ok(Err(e))) => debug!(error = %e, "peer denemesi başarısız"),
+                        Some(Ok(Err(e))) => {
+                            let c = match &e {
+                                PeerError::Io(_) => &self.stats.peer_io,
+                                PeerError::Timeout => &self.stats.peer_timeout,
+                                PeerError::BadHandshake | PeerError::InfoHashMismatch => &self.stats.peer_bad_handshake,
+                                PeerError::NoExtension | PeerError::NoUtMetadata => &self.stats.peer_no_metadata_ext,
+                                _ => &self.stats.peer_other,
+                            };
+                            c.fetch_add(1, Ordering::Relaxed);
+                            debug!(error = %e, "peer denemesi başarısız");
+                        }
                         _ => {}
                     }
                 }

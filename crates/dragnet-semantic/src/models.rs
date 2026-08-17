@@ -25,6 +25,10 @@ pub enum Tier {
     /// EmbeddingGemma-300m Q4 ONNX — en iyi kalite; GPU'da 2–3× hızlı indeksleme.
     #[default]
     Quality,
+    /// Qwen3-Embedding-0.6B (q4f16 ONNX, 1024d) — deneysel: en büyük model; CPU'da yavaş
+    /// (~8 ad/sn), bu ONNX export'u DirectML'de çalışmıyor. Bake-off'ta torrent adlarında
+    /// Gemma'nın altında kaldı (0.82 vs 0.93) ama talimat-takipli sorgularda denenmeye değer.
+    Experimental,
 }
 
 impl Tier {
@@ -32,6 +36,7 @@ impl Tier {
         match s.trim().to_ascii_lowercase().as_str() {
             "light" | "hafif" => Self::Light,
             "balanced" | "dengeli" => Self::Balanced,
+            "experimental" | "deneysel" | "qwen" | "qwen3" => Self::Experimental,
             _ => Self::Quality,
         }
     }
@@ -40,6 +45,7 @@ impl Tier {
             Self::Light => "light",
             Self::Balanced => "balanced",
             Self::Quality => "quality",
+            Self::Experimental => "experimental",
         }
     }
     pub fn spec(self) -> &'static ModelSpec {
@@ -47,6 +53,7 @@ impl Tier {
             Self::Light => &POTION,
             Self::Balanced => &MINILM,
             Self::Quality => &GEMMA,
+            Self::Experimental => &QWEN3,
         }
     }
 }
@@ -95,6 +102,8 @@ pub enum Pooling {
     SentenceOutput,
     /// `last_hidden_state` üzerinde maskeli ortalama.
     Mean,
+    /// Son gerçek token'ın gizli durumu (Qwen3-Embedding; sağa pad).
+    LastToken,
 }
 
 /// İndirilecek dosya: yerel ad + URL + yaklaşık boyut (ilerleme çubuğu için).
@@ -124,6 +133,8 @@ pub struct ModelSpec {
     pub max_tokens: usize,
     /// Bu kosinüs benzerliğinin altındaki isabetler "alakasız" sayılır (aday kırpma).
     pub min_score: f32,
+    /// DirectML (GPU) ile çalışabilir mi? (Qwen3 export'u DML'de Concat hatası veriyor.)
+    pub gpu_ok: bool,
     pub license: &'static str,
 }
 
@@ -165,6 +176,7 @@ pub static POTION: ModelSpec = ModelSpec {
     query_prefix: "",
     max_tokens: 128,
     min_score: 0.20,
+    gpu_ok: false,
     license: "MIT",
 };
 
@@ -184,6 +196,7 @@ pub static MINILM: ModelSpec = ModelSpec {
     query_prefix: "",
     max_tokens: 64,
     min_score: 0.25,
+    gpu_ok: true,
     license: "Apache-2.0",
 };
 
@@ -205,7 +218,29 @@ pub static GEMMA: ModelSpec = ModelSpec {
     query_prefix: "task: search result | query: ",
     max_tokens: 64,
     min_score: 0.30,
+    gpu_ok: true,
     license: "Gemma Terms of Use (kullanıcı çalışma anında indirir; koda gömülmez)",
+};
+
+pub static QWEN3: ModelSpec = ModelSpec {
+    tier: Tier::Experimental,
+    id: "qwen3-embedding-0.6b-q4f16",
+    display_name: "Qwen3-Embedding-0.6B (q4f16 ONNX, deneysel)",
+    engine: Engine::Onnx,
+    dim: 1024,
+    files: &[
+        ModelFile { name: "tokenizer.json", url: "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json", approx_bytes: 11_400_000 },
+        ModelFile { name: "model_q4f16.onnx", url: "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/onnx/model_q4f16.onnx", approx_bytes: 567_500_000 },
+    ],
+    onnx_file: "model_q4f16.onnx",
+    pooling: Pooling::LastToken,
+    doc_prefix: "",
+    query_prefix: "Instruct: Given a web search query, retrieve relevant passages that answer the query
+Query: ",
+    max_tokens: 64,
+    min_score: 0.30,
+    gpu_ok: false,
+    license: "Apache-2.0",
 };
 
 /// İndirme ilerleme geri çağrısı: (dosya adı, indirilen bayt, toplam bayt (bilinmiyorsa 0)).

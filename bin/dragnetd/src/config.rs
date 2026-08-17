@@ -49,7 +49,7 @@ impl Default for Config {
             harvester_port: 0,
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 12,
-            fetch_peer_concurrency: 8,
+            fetch_peer_concurrency: 12,
             seed_infohashes: Vec::new(),
             semantic_enabled: false,
             semantic_tier: "quality".to_string(),

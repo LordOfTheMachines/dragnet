@@ -125,6 +125,7 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         "responses": harvester.as_ref().map(|h| h.responses_seen).unwrap_or(0),
         "samples": samples,
         "unique": harvester.as_ref().map(|h| h.unique_infohashes).unwrap_or(0),
+        "peer_hints": harvester.as_ref().map(|h| h.peer_hints).unwrap_or(0),
         "sample_rate": sample_rate,
         // Faz E: çekim boru hattı sayaçları + kuyruk (pano "Metadata çekimi" kartı).
         "fetch": fetch.map(|f| json!({

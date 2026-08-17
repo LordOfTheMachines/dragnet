@@ -196,7 +196,7 @@ impl Semantic {
             self.min_score
         } else {
             let m = tops.len() / 2;
-            let med = if tops.len() % 2 == 0 {
+            let med = if tops.len().is_multiple_of(2) {
                 (tops[m - 1] + tops[m]) / 2.0
             } else {
                 tops[m]

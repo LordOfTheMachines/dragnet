@@ -74,6 +74,7 @@ async function pollStats() {
     $("status-pill").className = "pill " + (scanning ? "on" : "off");
     $("btn-toggle").textContent = scanning ? "Taramayı Durdur" : "Taramayı Başlat";
     renderSemantic(s.semantic);
+    renderFetch._hints = s.peer_hints;
     renderFetch(s.fetch, s.queue, scanning);
   } catch (e) {}
 }
@@ -95,7 +96,7 @@ function renderFetch(f, q, on) {
   set("f-hot", q ? nf(q.hot) : "–");
   set("f-pending", q ? `${nf(q.pending)} / ${nf(q.unreachable)}` : "–");
   const perHour = f.attempts && f.avg_ms ? Math.round(3600000 / f.avg_ms) : 0;
-  $("fetch-summary").textContent = f.attempts ? `${nf(f.ok)} başarılı · ${nf(f.no_peers)} peer yok · ${nf(f.all_peers_failed)} peer başarısız` : "";
+  $("fetch-summary").textContent = f.attempts ? `${nf(f.ok)} başarılı · ${nf(f.no_peers)} peer yok · ${nf(f.all_peers_failed)} peer başarısız · ${nf(renderFetch._hints || 0)} peer ipucu` : "";
   $("fetch-detail").textContent = f.attempts
     ? `Ort. ${f.avg_peers.toFixed(1)} peer/çekim. Peer bulunamayan çekimler DHT'de o an kimsenin sunmadığı (ölü) torrent'lerdir; ` +
       `peer bulunup başarısız olanlar çoğunlukla NAT arkasındaki ya da metadata paylaşmayan peer'lerdir. Kuyruk sıcak › popüler › taze sırasıyla işlenir; başarısızlar 6 saat sonra tekrar denenir (en çok 3).`

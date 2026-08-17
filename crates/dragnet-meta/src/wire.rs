@@ -55,8 +55,16 @@ pub async fn fetch_info_from_peer(
     }
 }
 
+/// TCP bağlanma için ayrı, kısa zaman aşımı: Faz E ölçümünde peer denemelerinin ~%92'si
+/// bağlanma zaman aşımıydı (NAT/güvenlik duvarı arkasındaki peer'ler); başarılı bağlantılar
+/// tipik olarak <2 s. Böylece ölü adresler eşzamanlılık yuvasını uzun tutmaz.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
+
 async fn fetch_inner(addr: SocketAddrV4, infohash: [u8; 20]) -> Result<Vec<u8>, PeerError> {
-    let mut stream = TcpStream::connect(addr).await?;
+    let mut stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+        Ok(s) => s?,
+        Err(_) => return Err(PeerError::Timeout),
+    };
 
     // --- BEP-3 handshake ---
     stream.write_all(&build_handshake(&infohash)).await?;

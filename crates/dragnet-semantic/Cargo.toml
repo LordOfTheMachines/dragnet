@@ -13,6 +13,7 @@ serde_json = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ndarray = "0.17"
+half = "2"
 # Tokenizer: model2vec ile AYNI sürüm (0.21) ve yalnız `onig` — `esaxx_fast` (C++)
 # MSVC'de ort ile CRT çakışması (LNK2038) yaratıyor; bkz. ARCHITECTURE §7.3.
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
@@ -24,9 +25,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 
 # ONNX Runtime — Windows'ta DirectML EP (GPU) derlenir; diğer platformlarda yalnız CPU.
 [target.'cfg(windows)'.dependencies]
-ort = { version = "=2.0.0-rc.13", features = ["ndarray", "directml"] }
+ort = { version = "=2.0.0-rc.13", features = ["ndarray", "half", "directml"] }
 [target.'cfg(not(windows))'.dependencies]
-ort = { version = "=2.0.0-rc.13", features = ["ndarray"] }
+ort = { version = "=2.0.0-rc.13", features = ["ndarray", "half"] }
 
 [dev-dependencies]
 tempfile = "3"

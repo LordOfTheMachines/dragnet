@@ -45,7 +45,7 @@ impl Default for EngineConfig {
             harvester_port: 0,
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 12,
-            fetch_peer_concurrency: 8,
+            fetch_peer_concurrency: 12,
             seed_infohashes: Vec::new(),
         }
     }
@@ -130,7 +130,7 @@ impl Engine {
                     let store = store.clone();
                     let fetcher = Arc::clone(&fetcher);
                     tasks.push(tokio::spawn(async move {
-                        fetch_and_store(ih, &store, &fetcher).await;
+                        fetch_and_store(ih, &[], &store, &fetcher).await;
                     }));
                 }
                 None => warn!(hex, "geçersiz seed infohash (40-hex olmalı), atlanıyor"),
@@ -172,10 +172,21 @@ impl Engine {
         // pasif get_peers/announce = sıcak). Çekim burada TETİKLENMEZ — Faz E: firehose
         // içinden "izin boşsa çek" yaklaşımı hem rastgeleydi hem de işçiler doluyken gelen
         // hash'leri hiç denemiyordu; onun yerine aşağıdaki öncelikli zamanlayıcı çalışır.
+        // Peer ipuçları (BEP-51 takip get_peers'ten): infohash → taze adresler; bellek-içi,
+        // sınırlı; çekim zamanlayıcısı önce bunları dener.
+        let hints: Arc<std::sync::Mutex<PeerHints>> =
+            Arc::new(std::sync::Mutex::new(PeerHints::new(50_000)));
         {
             let store = store.clone();
+            let hints = Arc::clone(&hints);
             tasks.push(tokio::spawn(async move {
                 while let Some(s) = harvester.infohashes.recv().await {
+                    if !s.peers.is_empty() {
+                        hints
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(s.infohash, s.peers.clone());
+                    }
                     if let Err(e) = store
                         .record_sighting_ext(s.infohash, now_unix(), s.source.is_hot())
                         .await
@@ -194,6 +205,7 @@ impl Engine {
             let store = store.clone();
             let fetcher = Arc::clone(&fetcher);
             let sem = Arc::clone(&sem);
+            let hints = Arc::clone(&hints);
             let workers = config.fetch_workers.max(1);
             tasks.push(tokio::spawn(async move {
                 // Yeni açılan DHT istemcisi ısınmadan get_peers zayıf döner.
@@ -225,9 +237,13 @@ impl Engine {
                         };
                         let store = store.clone();
                         let fetcher = Arc::clone(&fetcher);
+                        let peer_hints = hints
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .take(&infohash);
                         tokio::spawn(async move {
                             let _permit = permit;
-                            fetch_and_store(infohash, &store, &fetcher).await;
+                            fetch_and_store(infohash, &peer_hints, &store, &fetcher).await;
                         });
                     }
                 }
@@ -278,9 +294,46 @@ impl Drop for Engine {
     }
 }
 
-/// Bir infohash için metadata çeker; başarılıysa yazar, başarısızsa `unreachable` işaretler.
-async fn fetch_and_store(infohash: InfoHash, store: &Store, fetcher: &MetadataFetcher) {
-    match fetcher.fetch(infohash).await {
+/// Peer ipucu önbelleği: infohash → taze adresler (en fazla `cap` kayıt, FIFO tahliye).
+struct PeerHints {
+    map: std::collections::HashMap<InfoHash, Vec<std::net::SocketAddrV4>>,
+    order: std::collections::VecDeque<InfoHash>,
+    cap: usize,
+}
+
+impl PeerHints {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: std::collections::HashMap::with_capacity(cap.min(4096)),
+            order: std::collections::VecDeque::with_capacity(cap.min(4096)),
+            cap,
+        }
+    }
+    fn insert(&mut self, ih: InfoHash, mut peers: Vec<std::net::SocketAddrV4>) {
+        peers.truncate(16);
+        if self.map.insert(ih, peers).is_none() {
+            self.order.push_back(ih);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+    fn take(&mut self, ih: &InfoHash) -> Vec<std::net::SocketAddrV4> {
+        self.map.remove(ih).unwrap_or_default()
+    }
+}
+
+/// Bir infohash için metadata çeker (ipucu peer'ler önce); başarılıysa yazar, başarısızsa
+/// deneme sınırında `unreachable` işaretler.
+async fn fetch_and_store(
+    infohash: InfoHash,
+    hints: &[std::net::SocketAddrV4],
+    store: &Store,
+    fetcher: &MetadataFetcher,
+) {
+    match fetcher.fetch_with_hints(infohash, hints).await {
         Ok(record) => {
             let files = record.files.len();
             let name = record.name.clone();
