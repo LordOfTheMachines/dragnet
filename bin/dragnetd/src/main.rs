@@ -133,6 +133,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     hasat_benzersiz = s.harvester.unique_infohashes,
                     indekslenen = s.fetched_torrents,
                     bilinen = s.total_infohashes,
+                    cekim_deneme = s.fetch.attempts,
+                    cekim_ok = s.fetch.ok,
+                    cekim_peer_yok = s.fetch.no_peers,
+                    cekim_peer_basarisiz = s.fetch.all_peers_failed,
+                    cekim_ort_ms = s.fetch.avg_ms,
+                    kuyruk_sicak = s.queue.1,
+                    son_saat_fetched = s.queue.3,
                     "durum"
                 );
                 if s.harvester.queries_sent > 0 && s.harvester.responses_seen == 0 {

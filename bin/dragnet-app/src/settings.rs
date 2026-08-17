@@ -55,8 +55,8 @@ impl Default for Settings {
             harvester_port: 0,
             // Nazik varsayılan (router/internet dostu).
             harvester_max_queries_per_sec: 50.0,
-            fetch_workers: 5,
-            fetch_peer_concurrency: 6,
+            fetch_workers: 12,
+            fetch_peer_concurrency: 8,
             autostart: false,
             auto_scan: true,
             block_keywords: Vec::new(),

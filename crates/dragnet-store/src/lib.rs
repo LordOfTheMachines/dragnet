@@ -234,6 +234,44 @@ impl Store {
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_category ON torrents(category);")
             .execute(&self.pool)
             .await;
+        // Faz E: çekim zamanlayıcısı (öncelik + yeniden deneme) ve keşif zaman damgası.
+        for col in [
+            "ALTER TABLE torrents ADD COLUMN fetch_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE torrents ADD COLUMN last_attempt INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE torrents ADD COLUMN hot_seen INTEGER DEFAULT NULL",
+            "ALTER TABLE torrents ADD COLUMN hot_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE torrents ADD COLUMN fetched_at INTEGER DEFAULT NULL",
+        ] {
+            let _ = sqlx::query(col).execute(&self.pool).await;
+        }
+        let _ = sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_fetch_queue ON torrents(seen_count DESC, hot_count DESC, last_seen DESC) WHERE metadata_status='pending';",
+        )
+        .execute(&self.pool)
+        .await;
+        // Tek seferlik onarım (şema sürümü 1): eski `unreachable` kayıtları Faz E öncesi
+        // boru hattının (kısa zaman aşımı, tek deneme) kurbanıydı → 1 denemeyle geri kuyruğa.
+        let ver: i64 = sqlx::query("PRAGMA user_version")
+            .fetch_one(&self.pool)
+            .await?
+            .get(0);
+        if ver < 1 {
+            let r = sqlx::query(
+                "UPDATE torrents SET metadata_status = 'pending', fetch_attempts = 1
+                  WHERE metadata_status = 'unreachable'",
+            )
+            .execute(&self.pool)
+            .await?;
+            if r.rows_affected() > 0 {
+                debug!(
+                    requeued = r.rows_affected(),
+                    "eski unreachable kayıtlar yeniden kuyruğa alındı"
+                );
+            }
+            sqlx::query("PRAGMA user_version = 1")
+                .execute(&self.pool)
+                .await?;
+        }
         // Sık kullanılan ORDER BY / WHERE / canlılık kolonları için (kısmi) indexler —
         // aksi halde her dashboard/liveness sorgusu tam tablo taraması yapar.
         for idx in [
@@ -285,26 +323,123 @@ impl Store {
     }
 
     /// Harvester yolu: bir infohash görüldüğünde çağrılır. Yeniyse `pending` bir
-    /// iskelet satır açar; varsa `last_seen`/`seen_count` günceller. Metadata'ya
-    /// dokunmaz (FTS'e yazmaz). Kaydın **güncel metadata_status**'ünü döner —
-    /// böylece çağıran ayrı bir SELECT yapmadan çekim gerekip gerekmediğini bilir
-    /// (`'pending'` = çekilmeli).
+    /// iskelet satır açar; varsa `last_seen`/`seen_count` günceller. `hot` = pasif
+    /// trafikten (get_peers/announce) geldi → `hot_seen`/`hot_count` (çekim önceliği).
+    /// Metadata'ya dokunmaz. Kaydın **güncel metadata_status**'ünü döner.
     pub async fn record_sighting(&self, infohash: InfoHash, ts: i64) -> Result<String, StoreError> {
+        self.record_sighting_ext(infohash, ts, false).await
+    }
+
+    /// [`Store::record_sighting`] — kaynak bilgisiyle.
+    pub async fn record_sighting_ext(
+        &self,
+        infohash: InfoHash,
+        ts: i64,
+        hot: bool,
+    ) -> Result<String, StoreError> {
         let hex = infohash.to_hex();
+        let hot_i = if hot { 1i64 } else { 0 };
         let row = sqlx::query(
             r#"INSERT INTO torrents
-                 (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status)
-               VALUES (?1, '', 0, 0, ?2, ?2, 1, 'pending')
+                 (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status,
+                  hot_seen, hot_count)
+               VALUES (?1, '', 0, 0, ?2, ?2, 1, 'pending', CASE WHEN ?3 = 1 THEN ?2 ELSE NULL END, ?3)
                ON CONFLICT(infohash) DO UPDATE SET
                  last_seen  = MAX(last_seen, excluded.last_seen),
-                 seen_count = seen_count + 1
+                 seen_count = seen_count + 1,
+                 hot_seen   = CASE WHEN ?3 = 1 THEN excluded.last_seen ELSE hot_seen END,
+                 hot_count  = hot_count + ?3
                RETURNING metadata_status;"#,
         )
         .bind(&hex)
         .bind(ts)
+        .bind(hot_i)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<String, _>("metadata_status"))
+    }
+
+    /// Çekim zamanlayıcısı için sıradaki adaylar (öncelikli kuyruk): `pending` olup
+    /// hiç denenmemiş ya da soğuma süresi dolmuş (en fazla `MAX_FETCH_ATTEMPTS` deneme)
+    /// kayıtlar; **sıcak** (yakın zamanda pasif trafikte görülen) > **popüler**
+    /// (`seen_count`) > **taze** (`last_seen`). Seçilenlerin `last_attempt`'ı hemen
+    /// `now` yapılır ki eşzamanlı çağrılar aynı adayları almasın.
+    pub async fn next_to_fetch(&self, limit: i64, now: i64) -> Result<Vec<InfoHash>, StoreError> {
+        let cooldown = now - FETCH_RETRY_COOLDOWN_SECS;
+        let hot_window = now - HOT_WINDOW_SECS;
+        let rows = sqlx::query(
+            "SELECT infohash FROM torrents
+              WHERE metadata_status = 'pending'
+                AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
+              ORDER BY (hot_seen IS NOT NULL AND hot_seen > ?3) DESC,
+                       seen_count DESC, hot_count DESC, last_seen DESC
+              LIMIT ?4",
+        )
+        .bind(MAX_FETCH_ATTEMPTS)
+        .bind(cooldown)
+        .bind(hot_window)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let hex: String = r.get("infohash");
+            if let Some(ih) = InfoHash::from_hex(&hex) {
+                out.push(ih);
+            }
+        }
+        if !out.is_empty() {
+            let placeholders = std::iter::repeat_n("?", out.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE torrents SET last_attempt = ?, fetch_attempts = fetch_attempts + 1
+                  WHERE infohash IN ({placeholders})"
+            );
+            let mut q = sqlx::query(&sql).bind(now);
+            for ih in &out {
+                q = q.bind(ih.to_hex());
+            }
+            q.execute(&self.pool).await?;
+        }
+        Ok(out)
+    }
+
+    /// Çekim başarısızlığını işler: deneme sınırına ulaşan `pending` kayıt
+    /// `unreachable` olur (kalıcı); değilse soğuma sonrası yeniden denenmek üzere
+    /// `pending` kalır. (Deneme sayacı `next_to_fetch` seçiminde artırılır.)
+    pub async fn mark_fetch_failed(&self, infohash: InfoHash) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE torrents SET metadata_status = 'unreachable'
+              WHERE infohash = ?1 AND metadata_status = 'pending' AND fetch_attempts >= ?2",
+        )
+        .bind(infohash.to_hex())
+        .bind(MAX_FETCH_ATTEMPTS)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Çekim kuyruğu istatistikleri: (pending, sıcak-pending, unreachable, son 1 saatte fetched).
+    pub async fn fetch_queue_stats(&self, now: i64) -> Result<(i64, i64, i64, i64), StoreError> {
+        let r = sqlx::query(
+            "SELECT
+               SUM(metadata_status='pending') AS pending,
+               SUM(metadata_status='pending' AND hot_seen > ?1) AS hot,
+               SUM(metadata_status='unreachable') AS unreachable,
+               SUM(metadata_status='fetched' AND fetched_at > ?2) AS recent
+             FROM torrents",
+        )
+        .bind(now - HOT_WINDOW_SECS)
+        .bind(now - 3600)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((
+            r.get::<Option<i64>, _>("pending").unwrap_or(0),
+            r.get::<Option<i64>, _>("hot").unwrap_or(0),
+            r.get::<Option<i64>, _>("unreachable").unwrap_or(0),
+            r.get::<Option<i64>, _>("recent").unwrap_or(0),
+        ))
     }
 
     /// Fetcher yolu: çekilmiş metadata'yı yazar. Idempotent — tekrar çağrılırsa
@@ -315,9 +450,10 @@ impl Store {
 
         sqlx::query(
             r#"INSERT INTO torrents
-                 (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status, category)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'fetched', ?8)
+                 (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status, category, fetched_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'fetched', ?8, ?6)
                ON CONFLICT(infohash) DO UPDATE SET
+                 fetched_at      = CASE WHEN metadata_status != 'fetched' THEN excluded.last_seen ELSE fetched_at END,
                  name            = excluded.name,
                  total_size      = excluded.total_size,
                  file_count      = excluded.file_count,
@@ -532,25 +668,40 @@ impl Store {
     }
 
     /// Zaman serisi keşif sayıları (grafik): `bucket_secs` kova genişliği (saat=3600,
-    /// gün=86400), en fazla `points` kova, en yeni önce. `(kova_başı_unix, sayı)`.
+    /// gün=86400), **şimdiden geriye tam `points` kova** — boş kovalar 0 ile doldurulur
+    /// (aksi hâlde "son 48 saat" grafiği yalnız dolu saatleri gösterip günlere yayılıyordu).
+    /// En yeni önce: `(kova_başı_unix, sayı)`.
     pub async fn discovery(
         &self,
         bucket_secs: i64,
         points: i64,
     ) -> Result<Vec<(i64, i64)>, StoreError> {
         let bucket = bucket_secs.max(1);
+        let points = points.max(1);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let newest = (now / bucket) * bucket;
+        let oldest = newest - (points - 1) * bucket;
         let rows = sqlx::query(
             "SELECT (first_seen / ?1) * ?1 AS bkt, COUNT(*) AS n
-               FROM torrents WHERE metadata_status = 'fetched'
-              GROUP BY bkt ORDER BY bkt DESC LIMIT ?2",
+               FROM torrents WHERE metadata_status = 'fetched' AND first_seen >= ?2
+              GROUP BY bkt",
         )
         .bind(bucket)
-        .bind(points.max(1))
+        .bind(oldest)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
+        let counts: std::collections::HashMap<i64, i64> = rows
             .iter()
             .map(|r| (r.get::<i64, _>("bkt"), r.get::<i64, _>("n")))
+            .collect();
+        Ok((0..points)
+            .map(|i| {
+                let t = newest - i * bucket;
+                (t, counts.get(&t).copied().unwrap_or(0))
+            })
             .collect())
     }
 
@@ -704,6 +855,7 @@ impl Store {
             "SELECT t.infohash, t.name FROM torrents t
                LEFT JOIN torrent_embeddings e ON e.infohash = t.infohash AND e.model_id = ?1
               WHERE t.metadata_status = 'fetched' AND e.infohash IS NULL
+                AND instr(t.name, char(65533)) = 0 AND length(t.name) >= 2
               ORDER BY t.first_seen DESC LIMIT ?2",
         )
         .bind(model_id)
@@ -889,6 +1041,13 @@ impl Store {
         Ok(items[start..end].to_vec())
     }
 }
+
+/// Bir infohash için en fazla metadata çekim denemesi; sonra kalıcı `unreachable`.
+pub const MAX_FETCH_ATTEMPTS: i64 = 3;
+/// Başarısız denemeler arası soğuma (sn) — peer'ler zamanla değişir, tekrar denemeye değer.
+pub const FETCH_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
+/// "Sıcak" sayılma penceresi (sn): bu süre içinde pasif trafikte görülen infohash öncelikli.
+pub const HOT_WINDOW_SECS: i64 = 2 * 3600;
 
 /// Hibrit aramada FTS tarafından alınacak en fazla aday sayısı (semantik taraf da
 /// çağıran tarafından benzer sayıda verilir; RRF sonrası sayfalama bunun içinde gezer).
@@ -1138,9 +1297,30 @@ mod tests {
         assert_eq!(by_size[0].name, "Beta"); // en büyük önce
 
         assert_eq!(store.recent(10, &Filter::default()).await.unwrap().len(), 2);
-        // Saatlik keşif: iki kayıt aynı saatte → toplam 2.
+        // Saatlik keşif: kayıtlar 1970'te (first_seen=1000) → son 48 saat penceresinin
+        // DIŞINDA; seri yine tam 48 bitişik kova (0 dolu) döner.
         let hourly = store.hourly_discovery(48).await.unwrap();
-        assert_eq!(hourly.iter().map(|(_, n)| n).sum::<i64>(), 2);
+        assert_eq!(hourly.len(), 48);
+        assert_eq!(hourly.iter().map(|(_, n)| n).sum::<i64>(), 0);
+        assert!(
+            hourly.windows(2).all(|w| w[0].0 - w[1].0 == 3600),
+            "kovalar bitişik olmalı"
+        );
+        // Şimdi görülen bir kayıt en yeni kovaya düşer.
+        let mut c = record("3333333333333333333333333333333333333333", "Gamma", 1);
+        c.first_seen = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        c.last_seen = c.first_seen;
+        store.upsert_torrent(&c).await.unwrap();
+        let hourly = store.hourly_discovery(48).await.unwrap();
+        assert_eq!(
+            hourly[0].1,
+            1,
+            "en yeni kova (şimdi) 1 olmalı: {:?}",
+            &hourly[..3]
+        );
     }
 
     #[tokio::test]
@@ -1228,9 +1408,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(by_size[0].name, "Alpha"); // 300 en büyük
-                                              // Gün kovası: hepsi aynı gün → tek kova, toplam 3.
+                                              // Gün kovası: 1970 tarihli kayıtlar pencere dışında; seri tam 30 kova.
         let daily = store.discovery(86_400, 30).await.unwrap();
-        assert_eq!(daily.iter().map(|(_, n)| n).sum::<i64>(), 3);
+        assert_eq!(daily.len(), 30);
+        assert_eq!(daily.iter().map(|(_, n)| n).sum::<i64>(), 0);
     }
 
     #[test]
@@ -1505,6 +1686,68 @@ mod tests {
             .unwrap();
         assert_eq!(by_size[0].name, "Matriks Filmi TR Dublaj");
         assert_eq!(by_size[2].name, "The Matrix Reloaded 2003 1080p");
+    }
+
+    #[tokio::test]
+    async fn fetch_queue_prioritizes_hot_then_popular_and_retries_with_cooldown() {
+        let store = Store::in_memory().await.unwrap();
+        let ih = |n: u8| InfoHash::from_bytes([n; 20]);
+        let now = 1_000_000i64;
+        // A: 5 kez görülmüş (popüler); B: 1 kez ama sıcak; C: 1 kez soğuk; D: fetched.
+        for _ in 0..5 {
+            store
+                .record_sighting_ext(ih(1), now - 100, false)
+                .await
+                .unwrap();
+        }
+        store
+            .record_sighting_ext(ih(2), now - 50, true)
+            .await
+            .unwrap();
+        store
+            .record_sighting_ext(ih(3), now - 10, false)
+            .await
+            .unwrap();
+        store
+            .upsert_torrent(&record(
+                "0404040404040404040404040404040404040404",
+                "Done",
+                1,
+            ))
+            .await
+            .unwrap();
+
+        // Sıra: sıcak (B) > popüler (A) > taze-soğuk (C); D (fetched) yok.
+        let q = store.next_to_fetch(10, now).await.unwrap();
+        assert_eq!(q, vec![ih(2), ih(1), ih(3)]);
+        // Seçilenler işaretlendi → hemen tekrar sorulunca gelmezler (soğuma).
+        assert!(store.next_to_fetch(10, now).await.unwrap().is_empty());
+        // Soğuma dolunca tekrar gelirler (deneme 2).
+        let later = now + FETCH_RETRY_COOLDOWN_SECS + 1;
+        assert_eq!(store.next_to_fetch(10, later).await.unwrap().len(), 3);
+        // Sıcaklık penceresi geçince B artık öne çıkmaz → popüler A önce.
+        let much_later = later + FETCH_RETRY_COOLDOWN_SECS + 1;
+        let q3 = store.next_to_fetch(10, much_later).await.unwrap();
+        assert_eq!(q3[0], ih(1));
+        // 3. deneme yapıldı → başarısızlık artık kalıcı unreachable.
+        store.mark_fetch_failed(ih(1)).await.unwrap();
+        let (pending, _hot, unreachable, _recent) =
+            store.fetch_queue_stats(much_later).await.unwrap();
+        assert_eq!(unreachable, 1);
+        assert_eq!(pending, 2);
+        // Kuyruk tükendi (hepsi 3 denemede).
+        assert!(store
+            .next_to_fetch(10, much_later + FETCH_RETRY_COOLDOWN_SECS + 1)
+            .await
+            .unwrap()
+            .is_empty());
+        // Başarı: upsert → fetched + fetched_at set, sayaçtan düşer.
+        let mut r = record("0202020202020202020202020202020202020202", "Hot Item", 1);
+        r.first_seen = much_later;
+        r.last_seen = much_later;
+        store.upsert_torrent(&r).await.unwrap();
+        let (_p, _h, _u, recent) = store.fetch_queue_stats(much_later + 10).await.unwrap();
+        assert_eq!(recent, 1, "fetched_at ile son 1 saat sayacı");
     }
 
     #[test]

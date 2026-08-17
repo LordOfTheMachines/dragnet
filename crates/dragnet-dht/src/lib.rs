@@ -147,11 +147,35 @@ impl Stats {
     }
 }
 
+/// Bir infohash görülmesinin kaynağı. Pasif kaynaklar (`GetPeers`, `Announce`) "şu anda
+/// birileri bunu arıyor/sunuyor" demektir → metadata çekiminde öncelik sinyali ("sıcak").
+/// `Sample` (BEP-51) düğüm deposundan örnek: eski/ölü olabilir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SightingSource {
+    Sample,
+    GetPeers,
+    Announce,
+}
+
+impl SightingSource {
+    /// Sıcak sinyal mi (pasif trafik)?
+    pub fn is_hot(self) -> bool {
+        !matches!(self, Self::Sample)
+    }
+}
+
+/// Hasat akışının bir öğesi: infohash + kaynak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sighting {
+    pub infohash: InfoHash,
+    pub source: SightingSource,
+}
+
 /// Çalışan hasatçı. `infohashes` alanından benzersiz infohash akışı okunur.
 /// Bırakılınca (drop) arka plan görevleri de durur.
 pub struct Harvester {
     /// Benzersiz infohash akışı (sınırlı kanal).
-    pub infohashes: mpsc::Receiver<InfoHash>,
+    pub infohashes: mpsc::Receiver<Sighting>,
     stats: Arc<Stats>,
     tasks: Vec<JoinHandle<()>>,
     local_addr: SocketAddr,
@@ -184,8 +208,10 @@ struct Shared {
     nodes: Mutex<VecDeque<SocketAddrV4>>,
     limiter: Mutex<TokenBucket>,
     dedup: Mutex<RecentSet>,
+    /// Pasif (sıcak) sighting'ler ana dedup'ı atlar ama kısa pencerede tekrarları bastırır.
+    hot_dedup: Mutex<RecentSet>,
     stats: Arc<Stats>,
-    sink: mpsc::Sender<InfoHash>,
+    sink: mpsc::Sender<Sighting>,
     /// Giden yanıtlar (ping/find_node/get_peers ack) — ayrı gönderici task drenajlar,
     /// böylece yanıt gönderimi paket ALIMINI bloklamaz (yük altında UDP kaybını azaltır).
     reply_tx: mpsc::Sender<(Vec<u8>, SocketAddrV4)>,
@@ -257,6 +283,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         nodes: Mutex::new(VecDeque::with_capacity(config.node_queue_capacity)),
         limiter: Mutex::new(TokenBucket::new(config.max_queries_per_sec)),
         dedup: Mutex::new(RecentSet::new(config.dedup_capacity)),
+        hot_dedup: Mutex::new(RecentSet::new(4096)),
         stats: Arc::clone(&stats),
         sink: tx,
         reply_tx,
@@ -350,7 +377,7 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 Method::GetPeers => {
                     shared.stats.get_peers_seen.fetch_add(1, Ordering::Relaxed);
                     if let Some(ih) = q.info_hash {
-                        harvest(shared, ih);
+                        harvest(shared, ih, SightingSource::GetPeers);
                     }
                     Some(krpc::build_get_peers_response(
                         &q.txid,
@@ -361,7 +388,7 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 Method::AnnouncePeer => {
                     shared.stats.announce_seen.fetch_add(1, Ordering::Relaxed);
                     if let Some(ih) = q.info_hash {
-                        harvest(shared, ih);
+                        harvest(shared, ih, SightingSource::Announce);
                     }
                     Some(krpc::build_response_id_only(&q.txid, &id))
                 }
@@ -392,7 +419,7 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                     .samples_seen
                     .fetch_add(r.samples.len() as u64, Ordering::Relaxed);
                 for ih in r.samples {
-                    harvest(shared, ih);
+                    harvest(shared, ih, SightingSource::Sample);
                 }
             }
         }
@@ -400,14 +427,23 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
     }
 }
 
-/// Benzersiz bir infohash'i dedup'tan geçirip kanala yayar.
-fn harvest(shared: &Shared, ih: [u8; ID_LEN]) {
-    let is_new = shared.dedup.lock().unwrap().insert(ih);
+/// Bir infohash görülmesini dedup'tan geçirip kanala yayar. Örnekler (Sample) büyük
+/// dedup'tan geçer; pasif kaynaklar (sıcak) daha önce örneklenmiş olsa da yayılır — yalnız
+/// kısa pencerede tekrarları bastırılır — çünkü "şu anda aranıyor" sinyali değerlidir.
+fn harvest(shared: &Shared, ih: [u8; ID_LEN], source: SightingSource) {
+    let is_new = if source.is_hot() {
+        shared.hot_dedup.lock().unwrap().insert(ih)
+    } else {
+        shared.dedup.lock().unwrap().insert(ih)
+    };
     if !is_new {
         shared.stats.duplicates.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    match shared.sink.try_send(InfoHash::from_bytes(ih)) {
+    match shared.sink.try_send(Sighting {
+        infohash: InfoHash::from_bytes(ih),
+        source,
+    }) {
         Ok(()) => {
             shared
                 .stats

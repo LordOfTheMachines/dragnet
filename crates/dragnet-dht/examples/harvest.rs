@@ -55,10 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             maybe = harvester.infohashes.recv() => {
                 match maybe {
-                    Some(ih) => {
+                    Some(s) => {
                         count += 1;
+                        let ih = s.infohash;
                         // magnet linki qBittorrent'in tükettiği biçimdir.
-                        println!("{count:>6}  {}  {}", ih.to_hex(), ih.to_magnet(None));
+                        println!("{count:>6}  {:<9?} {}  {}", s.source, ih.to_hex(), ih.to_magnet(None));
                     }
                     None => break,
                 }

@@ -74,7 +74,32 @@ async function pollStats() {
     $("status-pill").className = "pill " + (scanning ? "on" : "off");
     $("btn-toggle").textContent = scanning ? "Taramayı Durdur" : "Taramayı Başlat";
     renderSemantic(s.semantic);
+    renderFetch(s.fetch, s.queue, scanning);
   } catch (e) {}
+}
+
+// --- Metadata çekim kartı (Faz E) ---
+function renderFetch(f, q, on) {
+  const set = (id, v) => { $(id).textContent = v; };
+  if (!on || !f) {
+    ["f-rate","f-success","f-attempts","f-avg","f-hot","f-pending"].forEach((id) => set(id, "–"));
+    $("fetch-summary").textContent = on ? "" : "Tarama durdu";
+    $("fetch-detail").textContent = "";
+    return;
+  }
+  const rate = f.attempts ? Math.round(100 * f.ok / f.attempts) : 0;
+  set("f-rate", q ? nf(q.fetched_last_hour) : "–");
+  set("f-success", f.attempts ? `%${rate}` : "–");
+  set("f-attempts", nf(f.attempts));
+  set("f-avg", f.attempts ? (f.avg_ms >= 1000 ? (f.avg_ms / 1000).toFixed(1) + " sn" : f.avg_ms + " ms") : "–");
+  set("f-hot", q ? nf(q.hot) : "–");
+  set("f-pending", q ? `${nf(q.pending)} / ${nf(q.unreachable)}` : "–");
+  const perHour = f.attempts && f.avg_ms ? Math.round(3600000 / f.avg_ms) : 0;
+  $("fetch-summary").textContent = f.attempts ? `${nf(f.ok)} başarılı · ${nf(f.no_peers)} peer yok · ${nf(f.all_peers_failed)} peer başarısız` : "";
+  $("fetch-detail").textContent = f.attempts
+    ? `Ort. ${f.avg_peers.toFixed(1)} peer/çekim. Peer bulunamayan çekimler DHT'de o an kimsenin sunmadığı (ölü) torrent'lerdir; ` +
+      `peer bulunup başarısız olanlar çoğunlukla NAT arkasındaki ya da metadata paylaşmayan peer'lerdir. Kuyruk sıcak › popüler › taze sırasıyla işlenir; başarısızlar 6 saat sonra tekrar denenir (en çok 3).`
+    : "Çekim istatistikleri tarama sürdükçe dolar.";
 }
 
 // --- Semantik arama durumu (ayarlar kartı + arama rozeti) ---
@@ -122,13 +147,14 @@ $("chart-seg").addEventListener("click", (e) => {
 
 function drawChart() {
   const el = $("chart");
-  const W = el.clientWidth || 900, H = 190;
-  const data = chart.series.slice().reverse(); // eski → yeni
+  const W = el.clientWidth || 900, H = 210;
+  const data = chart.series.slice().reverse(); // eski → yeni (dolu seri: boş kovalar 0)
   if (!data.length) {
     el.innerHTML = `<svg viewBox="0 0 ${W} ${H}"><text class="empty" x="${W / 2}" y="${H / 2}" text-anchor="middle">Henüz veri yok — tarama sürdükçe dolar</text></svg>`;
     return;
   }
-  const padL = 10, padR = 10, padT = 14, padB = 24;
+  const isDay = chart.bucket === "day";
+  const padL = 34, padR = 14, padT = 14, padB = 30;
   const max = Math.max(...data.map((x) => x.count), 1);
   const n = data.length;
   const iw = W - padL - padR, ih = H - padT - padB;
@@ -141,33 +167,70 @@ function drawChart() {
     pts.map((p) => "L" + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ") +
     ` L${pts[n - 1][0].toFixed(1)} ${(padT + ih).toFixed(1)} Z`;
 
-  // yatay ızgara + y etiketleri (0, max/2, max)
-  const grid = [0, 0.5, 1].map((f) => {
+  // Y ızgarası: 0 / ½ / max (tam sayı; max küçükse yalnız 0 ve max).
+  const yTicks = max >= 2 ? [0, 0.5, 1] : [0, 1];
+  const grid = yTicks.map((f) => {
     const y = padT + ih - f * ih;
     return `<line class="grid-line" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" />
-            <text class="axlabel" x="${padL}" y="${(y - 3).toFixed(1)}">${Math.round(f * max)}</text>`;
+            <text class="axlabel" x="${padL - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end">${Math.round(f * max)}</text>`;
   }).join("");
 
-  const fmt = (t) => chart.bucket === "day"
-    ? new Date(t * 1000).toLocaleDateString("tr", { day: "2-digit", month: "2-digit" })
-    : new Date(t * 1000).toLocaleString("tr", { day: "2-digit", month: "2-digit", hour: "2-digit" });
+  // X ekseni: anlamlı zaman işaretleri — saatlik: her 6 saat (tam saatte), günlük: her N gün.
+  const d0 = (t) => new Date(t * 1000);
+  const two = (v) => String(v).padStart(2, "0");
+  const fmtTick = (t) => { const d = d0(t); return isDay ? `${two(d.getDate())}.${two(d.getMonth() + 1)}` : (d.getHours() === 0 ? `${two(d.getDate())}.${two(d.getMonth() + 1)}` : `${two(d.getHours())}:00`); };
+  const fmtFull = (t) => { const d = d0(t); return isDay
+    ? d.toLocaleDateString("tr", { day: "2-digit", month: "2-digit", year: "numeric" })
+    : `${d.toLocaleDateString("tr", { day: "2-digit", month: "2-digit" })} ${two(d.getHours())}:00–${two((d.getHours() + 1) % 24)}:00`; };
+  const step = isDay ? Math.max(1, Math.round(n / 8)) : (n > 96 ? 24 : 6);
+  const ticks = [];
+  data.forEach((x, i) => {
+    const d = d0(x.t);
+    const on = isDay ? ((n - 1 - i) % step === 0) : (d.getHours() % step === 0);
+    if (on) ticks.push(`<line class="tick" x1="${xAt(i).toFixed(1)}" y1="${padT + ih}" x2="${xAt(i).toFixed(1)}" y2="${padT + ih + 4}" />
+      <text class="axlabel" x="${xAt(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${fmtTick(x.t)}</text>`);
+  });
+  // "şimdi" vurgusu (en sağ kova = içinde bulunulan saat/gün, henüz dolmamış).
+  const nowX = xAt(n - 1).toFixed(1);
+  const nowMark = `<line class="now" x1="${nowX}" y1="${padT}" x2="${nowX}" y2="${padT + ih}" /><text class="axlabel now-label" x="${nowX}" y="${padT - 3}" text-anchor="end">şimdi</text>`;
+
   const dots = pts.map((p, i) =>
-    `<circle class="pt" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6"><title>${fmt(data[i].t)} — ${nf(data[i].count)} keşif</title></circle>`
+    `<circle class="pt${data[i].count ? "" : " zero"}" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${n > 100 ? 1.8 : 2.6}" data-i="${i}"></circle>`
   ).join("");
-  const xLabels =
-    `<text class="axlabel" x="${padL}" y="${H - 6}" text-anchor="start">${fmt(data[0].t)}</text>` +
-    `<text class="axlabel" x="${W - padR}" y="${H - 6}" text-anchor="end">${fmt(data[n - 1].t)}</text>`;
+  // Hover için görünmez dikey şeritler (her kova) → ipucu.
+  const bandW = n > 1 ? iw / (n - 1) : iw;
+  const bands = data.map((x, i) =>
+    `<rect class="band" data-i="${i}" x="${(xAt(i) - bandW / 2).toFixed(1)}" y="${padT}" width="${bandW.toFixed(1)}" height="${ih}" />`
+  ).join("");
 
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}">
     <defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#4f8cf7" stop-opacity="0.45" />
       <stop offset="100%" stop-color="#4f8cf7" stop-opacity="0" />
     </linearGradient></defs>
-    ${grid}
+    ${grid}${ticks.join("")}
+    <line class="axis" x1="${padL}" y1="${padT + ih}" x2="${W - padR}" y2="${padT + ih}" />
     <path class="area" d="${area}" />
     <path class="line" d="${line}" />
-    ${dots}${xLabels}
-  </svg>`;
+    ${nowMark}${dots}${bands}
+    <g class="hover hidden"><line class="cursor" x1="0" y1="${padT}" x2="0" y2="${padT + ih}" /><circle class="focus" r="4.5" /></g>
+  </svg><div class="tip hidden"></div>`;
+
+  const svg = el.querySelector("svg"), tip = el.querySelector(".tip"), hover = el.querySelector(".hover");
+  const total = data.reduce((a, x) => a + x.count, 0);
+  const show = (i, ev) => {
+    const x = pts[i][0], y = pts[i][1];
+    hover.classList.remove("hidden");
+    hover.querySelector(".cursor").setAttribute("x1", x); hover.querySelector(".cursor").setAttribute("x2", x);
+    const f = hover.querySelector(".focus"); f.setAttribute("cx", x); f.setAttribute("cy", y);
+    tip.innerHTML = `<b>${nf(data[i].count)}</b> keşif<br><span class="muted">${fmtFull(data[i].t)}</span>`;
+    tip.classList.remove("hidden");
+    const r = el.getBoundingClientRect(); const px = ev.clientX - r.left;
+    tip.style.left = Math.min(Math.max(px + 12, 0), r.width - 150) + "px";
+  };
+  svg.addEventListener("mousemove", (ev) => { const b = ev.target.closest(".band, .pt"); if (b) show(Number(b.dataset.i), ev); });
+  svg.addEventListener("mouseleave", () => { hover.classList.add("hidden"); tip.classList.add("hidden"); });
+  const cap = $("chart-caption"); if (cap) cap.textContent = isDay ? `Son ${n} gün · toplam ${nf(total)} keşif` : `Son ${n} saat · toplam ${nf(total)} keşif`;
 }
 window.addEventListener("resize", () => { if (!$("view-dashboard").classList.contains("hidden")) drawChart(); });
 
