@@ -325,9 +325,14 @@ async function loadMore() {
     browse.offset += rows.length;
     browse.hasMore = rows.length === browse.PAGE;
     $("results-empty").classList.toggle("hidden", browse.offset > 0);
-    $("result-count").textContent = browse.offset > 0
-      ? `${nf(browse.offset)} sonuç${browse.hasMore ? "+" : ""}${browse.q ? "" : " (gözat)"}`
+    $("result-count").innerHTML = browse.offset > 0
+      ? `${nf(browse.offset)} sonuç${browse.hasMore ? "+" : ""}${browse.q ? "" : " (gözat)"}` +
+        // Sorgu varken alaka dışı sıralama seçiliyse hatırlat: alakalılar listenin
+        // ortasına düşebilir (Faz E kullanıcı geri bildirimi).
+        (browse.q && browse.sort ? ` · <a href="#" id="sort-reset" title="Sıralamayı kaldır, alaka sırasına dön">alaka sırasına dön</a>` : "")
       : "";
+    const sr = $("sort-reset");
+    if (sr) sr.addEventListener("click", (ev) => { ev.preventDefault(); browse.sort = ""; browse.desc = true; updateSortUI(); resetAndLoad(); });
   } catch (e) { toast("Yükleme hatası"); }
   finally { browse.loading = false; $("results-loading").classList.add("hidden"); }
   // İlk sayfa görünümü doldurmadıysa (scroll oluşmadıysa) bir sonrakini çek.
