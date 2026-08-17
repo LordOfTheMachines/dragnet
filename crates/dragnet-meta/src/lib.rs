@@ -154,6 +154,17 @@ impl MetadataFetcher {
         self.dht.bootstrapped().await
     }
 
+    /// DHT istemcisi: (güvenlik duvarı arkasında mı, dış adres, yerel port). Erişilebilirlik
+    /// göstergesi için; `firewalled` mainline'ın gelen sorgu gözlemine dayanır.
+    pub async fn dht_reachability(&self) -> (bool, Option<String>, u16) {
+        let i = self.dht.info().await;
+        (
+            i.firewalled(),
+            i.public_address().map(|a| a.to_string()),
+            i.local_addr().port(),
+        )
+    }
+
     /// DHT istemci durumu (teşhis): yerel adres, güvenlik duvarı, tahmini ağ boyutu.
     pub async fn dht_info(&self) -> String {
         let i = self.dht.info().await;

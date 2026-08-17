@@ -79,7 +79,8 @@ impl Default for HarvesterConfig {
     fn default() -> Self {
         Self {
             bind_address: Ipv4Addr::UNSPECIFIED,
-            port: 0,
+            // Varsayılan 6881: modemde yönlendirilmesi en olası port; doluysa efemer porta düşer.
+            port: 6881,
             channel_capacity: 1024,
             // Nazik varsayılan: ev router'larının bağlantı-izleme (conntrack)
             // tablosunu doldurup interneti kilitlememek için düşük tutuldu.
@@ -182,6 +183,9 @@ pub struct Sighting {
     pub source: SightingSource,
     /// Doğrudan bilinen peer adresleri (fetcher önce bunları dener; DHT aramasını atlar).
     pub peers: Vec<SocketAddrV4>,
+    /// Bu infohash'in dedup penceresinde kaç kez DAHA görüldüğü (toplu popülerlik
+    /// sayacı; periyodik flush'ta gelir, `source = Sample`). 0 = normal sighting.
+    pub repeats: u32,
 }
 
 /// Çalışan hasatçı. `infohashes` alanından benzersiz infohash akışı okunur.
@@ -223,6 +227,10 @@ struct Shared {
     dedup: Mutex<RecentSet>,
     /// Pasif (sıcak) sighting'ler ana dedup'ı atlar ama kısa pencerede tekrarları bastırır.
     hot_dedup: Mutex<RecentSet>,
+    /// Dedup'un yuttuğu tekrarların sayacı (popülerlik): periyodik olarak `repeats`
+    /// sighting'leri olarak akıtılır — BEP-51'de popüler torrent'ler çok düğümde saklandığı
+    /// için örneklerde defalarca görünür; bu sinyal çekim önceliğine gider.
+    dup_counts: Mutex<HashMap<[u8; ID_LEN], u32>>,
     stats: Arc<Stats>,
     sink: mpsc::Sender<Sighting>,
     /// Giden yanıtlar (ping/find_node/get_peers ack) — ayrı gönderici task drenajlar,
@@ -302,6 +310,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         limiter: Mutex::new(TokenBucket::new(config.max_queries_per_sec)),
         dedup: Mutex::new(RecentSet::new(config.dedup_capacity)),
         hot_dedup: Mutex::new(RecentSet::new(4096)),
+        dup_counts: Mutex::new(HashMap::new()),
         stats: Arc::clone(&stats),
         sink: tx,
         reply_tx,
@@ -319,6 +328,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         tokio::spawn(reply_loop(Arc::clone(&shared), reply_rx)),
         tokio::spawn(crawl_loop(Arc::clone(&shared), config.clone())),
         tokio::spawn(rotate_loop(Arc::clone(&shared), config.id_rotation)),
+        tokio::spawn(flush_repeats_loop(Arc::clone(&shared))),
     ];
 
     Ok(Harvester {
@@ -439,7 +449,7 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 if let Some((ih, _)) = hit {
                     if !r.values.is_empty() {
                         shared.stats.peer_hints.fetch_add(1, Ordering::Relaxed);
-                        emit(shared, ih, SightingSource::SamplePeers, r.values.clone());
+                        emit(shared, ih, SightingSource::SamplePeers, r.values.clone(), 0);
                     }
                 }
             }
@@ -493,18 +503,50 @@ fn harvest(shared: &Shared, ih: [u8; ID_LEN], source: SightingSource) -> bool {
     };
     if !is_new {
         shared.stats.duplicates.fetch_add(1, Ordering::Relaxed);
+        if !source.is_hot() {
+            let mut m = shared.dup_counts.lock().unwrap();
+            if m.len() < 200_000 {
+                *m.entry(ih).or_insert(0) += 1;
+            }
+        }
         return false;
     }
-    emit(shared, ih, source, Vec::new());
+    emit(shared, ih, source, Vec::new(), 0);
     true
 }
 
+/// Tekrar sayaçlarını `repeats` sighting'leri olarak akıtır (periyodik görev).
+async fn flush_repeats_loop(shared: Arc<Shared>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        ticker.tick().await;
+        let drained: Vec<([u8; ID_LEN], u32)> = {
+            let mut m = shared.dup_counts.lock().unwrap();
+            m.drain().collect()
+        };
+        for (ih, n) in drained {
+            emit(&shared, ih, SightingSource::Sample, Vec::new(), n);
+            // Kanal dolarsa emit düşürür (backpressure); tokio'ya nefes ver.
+            if shared.sink.capacity() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    }
+}
+
 /// Sighting'i kanala yazar (dedup'suz).
-fn emit(shared: &Shared, ih: [u8; ID_LEN], source: SightingSource, peers: Vec<SocketAddrV4>) {
+fn emit(
+    shared: &Shared,
+    ih: [u8; ID_LEN],
+    source: SightingSource,
+    peers: Vec<SocketAddrV4>,
+    repeats: u32,
+) {
     match shared.sink.try_send(Sighting {
         infohash: InfoHash::from_bytes(ih),
         source,
         peers,
+        repeats,
     }) {
         Ok(()) => {
             shared

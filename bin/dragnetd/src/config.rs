@@ -46,7 +46,7 @@ impl Default for Config {
             db_path: "dragnet.db".to_string(),
             api_bind: "127.0.0.1:8080".to_string(),
             api_token: None,
-            harvester_port: 0,
+            harvester_port: 6881,
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 12,
             fetch_peer_concurrency: 12,

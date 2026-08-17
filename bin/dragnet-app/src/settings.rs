@@ -52,7 +52,7 @@ impl Default for Settings {
         Self {
             db_path: "dragnet.db".to_string(),
             api_bind: "127.0.0.1:8080".to_string(),
-            harvester_port: 0,
+            harvester_port: 6881,
             // Nazik varsayılan (router/internet dostu).
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 12,

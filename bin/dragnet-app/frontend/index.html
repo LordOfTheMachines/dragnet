@@ -36,6 +36,22 @@
 
       <div class="card">
         <div class="card-head">
+          <h3>DHT erişilebilirliği</h3>
+          <span id="reach-pill" class="pill off"><span class="dot"></span><span id="reach-text">Ölçülüyor…</span></span>
+        </div>
+        <div class="tiles tiles-6">
+          <div class="tile sm"><div class="tval" id="r-port">–</div><div class="tlabel">Harvester UDP portu</div></div>
+          <div class="tile sm"><div class="tval" id="r-inrate">–</div><div class="tlabel">Gelen sorgu / dk</div></div>
+          <div class="tile sm"><div class="tval" id="r-getpeers">–</div><div class="tlabel">Gelen get_peers</div></div>
+          <div class="tile sm"><div class="tval" id="r-announce">–</div><div class="tlabel">Gelen announce</div></div>
+          <div class="tile sm"><div class="tval" id="r-hints">–</div><div class="tlabel">Peer ipucu (BEP-51)</div></div>
+          <div class="tile sm"><div class="tval" id="r-public">–</div><div class="tlabel">Dış adres (istemci)</div></div>
+        </div>
+        <div id="reach-detail" class="muted small" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <h3>Metadata çekimi</h3>
           <span id="fetch-summary" class="muted small"></span>
         </div>
@@ -98,6 +114,7 @@
           <div class="filters">
             <label class="chk"><input id="sf-adult" type="checkbox" checked /> Yetişkin gizle</label>
             <label class="chk"><input id="sf-alive" type="checkbox" /> Sadece canlı</label>
+            <label class="chk" title="Kodlaması çözülemeyen (� içeren) adları gizle"><input id="sf-garbled" type="checkbox" checked /> Bozuk adları gizle</label>
           </div>
           <div class="result-meta"><span id="sem-badge" class="pill off hidden" title="Semantik arama"><span class="dot"></span><span id="sem-badge-text">Semantik</span></span> <span id="result-count" class="muted"></span></div>
         </div>
@@ -169,7 +186,7 @@
           </label>
           <label>Harvester UDP portu (0 = otomatik)
             <input id="set-port" type="number" min="0" max="65535" />
-            <small>qBittorrent 6881'i kullanır; farklı bir port seç (ör. 6882) ve modemde onu yönlendir.</small>
+            <small>Varsayılan 6881. Modemde bu portu (UDP) bu bilgisayara yönlendirin — pasif hasat için şart. qBittorrent aynı portu kullanıyorsa birini değiştirin; port doluysa Dragnet efemer porta düşer (pano "DHT erişilebilirliği" kartına bakın).</small>
           </label>
           <label class="chk"><input id="set-autostart" type="checkbox" /> Windows'ta başlangıçta başlat</label>
           <label class="chk"><input id="set-autoscan" type="checkbox" /> Açılışta taramayı otomatik başlat</label>

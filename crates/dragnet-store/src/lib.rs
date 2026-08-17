@@ -57,6 +57,8 @@ pub struct Filter {
     /// duyarsız, alt-dize) içeren torrent'ler sonuçlardan gizlenir. Sorgu-anı
     /// (yıkıcı olmayan) filtre — liste değişince eski sonuçlar geri gelir.
     pub block_keywords: Vec<String>,
+    /// Bozuk (çözülemeyen kodlama, `�` içeren) adları gizle.
+    pub hide_garbled: bool,
 }
 
 impl Filter {
@@ -71,6 +73,9 @@ impl Filter {
         }
         if self.hide_adult {
             sql.push_str(&format!(" AND {prefix}category != 'adult'"));
+        }
+        if self.hide_garbled {
+            sql.push_str(&format!(" AND {prefix}garbled = 0"));
         }
         if let Some(c) = &self.category {
             sql.push_str(&format!(" AND {prefix}category = ?"));
@@ -241,11 +246,12 @@ impl Store {
             "ALTER TABLE torrents ADD COLUMN hot_seen INTEGER DEFAULT NULL",
             "ALTER TABLE torrents ADD COLUMN hot_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE torrents ADD COLUMN fetched_at INTEGER DEFAULT NULL",
+            "ALTER TABLE torrents ADD COLUMN hint_peers INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = sqlx::query(col).execute(&self.pool).await;
         }
         let _ = sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_fetch_queue ON torrents(seen_count DESC, hot_count DESC, last_seen DESC) WHERE metadata_status='pending';",
+            "CREATE INDEX IF NOT EXISTS idx_fetch_queue2 ON torrents(hint_peers DESC, seen_count DESC, last_seen DESC) WHERE metadata_status='pending';",
         )
         .execute(&self.pool)
         .await;
@@ -269,6 +275,29 @@ impl Store {
                 );
             }
             sqlx::query("PRAGMA user_version = 1")
+                .execute(&self.pool)
+                .await?;
+        }
+        // Şema sürümü 2: bozuk adlı (`�`) kayıtlar `garbled=1` işaretlenir — hem UI'da
+        // gizlenebilir hem de yeniden çekim kuyruğuna girer (ad kodlaması artık
+        // GBK/SJIS/CP1251 tanıyor). Kayıt `fetched` kalır (aranabilir).
+        let _ = sqlx::query("ALTER TABLE torrents ADD COLUMN garbled INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        if ver < 2 {
+            let r = sqlx::query(
+                "UPDATE torrents SET garbled = 1, fetch_attempts = 0
+                  WHERE metadata_status = 'fetched' AND instr(name, char(65533)) > 0",
+            )
+            .execute(&self.pool)
+            .await?;
+            if r.rows_affected() > 0 {
+                debug!(
+                    garbled = r.rows_affected(),
+                    "bozuk adlı kayıtlar işaretlendi (yeniden çekim)"
+                );
+            }
+            sqlx::query("PRAGMA user_version = 2")
                 .execute(&self.pool)
                 .await?;
         }
@@ -330,30 +359,48 @@ impl Store {
         self.record_sighting_ext(infohash, ts, false).await
     }
 
-    /// [`Store::record_sighting`] — kaynak bilgisiyle.
+    /// [`Store::record_sighting`] — kaynak bilgisiyle. `hint_peers`: bu sighting'le gelen
+    /// doğrudan peer sayısı (BEP-51 takip get_peers `values`) — seeder vekili, çekim önceliği.
     pub async fn record_sighting_ext(
         &self,
         infohash: InfoHash,
         ts: i64,
         hot: bool,
     ) -> Result<String, StoreError> {
+        self.record_sighting_full(infohash, ts, hot, 0, 1).await
+    }
+
+    /// Tam sürüm: `hint_peers` (0 = bilgi yok; MAX ile birleşir) ve `repeats` (kaç görülme
+    /// sayılacak; harvester tekrar sayacı flush'ında >1).
+    pub async fn record_sighting_full(
+        &self,
+        infohash: InfoHash,
+        ts: i64,
+        hot: bool,
+        hint_peers: i64,
+        repeats: i64,
+    ) -> Result<String, StoreError> {
         let hex = infohash.to_hex();
         let hot_i = if hot { 1i64 } else { 0 };
+        let repeats = repeats.max(1);
         let row = sqlx::query(
             r#"INSERT INTO torrents
                  (infohash, name, total_size, file_count, first_seen, last_seen, seen_count, metadata_status,
-                  hot_seen, hot_count)
-               VALUES (?1, '', 0, 0, ?2, ?2, 1, 'pending', CASE WHEN ?3 = 1 THEN ?2 ELSE NULL END, ?3)
+                  hot_seen, hot_count, hint_peers)
+               VALUES (?1, '', 0, 0, ?2, ?2, ?5, 'pending', CASE WHEN ?3 = 1 THEN ?2 ELSE NULL END, ?3, ?4)
                ON CONFLICT(infohash) DO UPDATE SET
                  last_seen  = MAX(last_seen, excluded.last_seen),
-                 seen_count = seen_count + 1,
+                 seen_count = seen_count + ?5,
                  hot_seen   = CASE WHEN ?3 = 1 THEN excluded.last_seen ELSE hot_seen END,
-                 hot_count  = hot_count + ?3
+                 hot_count  = hot_count + ?3,
+                 hint_peers = MAX(hint_peers, ?4)
                RETURNING metadata_status;"#,
         )
         .bind(&hex)
         .bind(ts)
         .bind(hot_i)
+        .bind(hint_peers.max(0))
+        .bind(repeats)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<String, _>("metadata_status"))
@@ -369,9 +416,11 @@ impl Store {
         let hot_window = now - HOT_WINDOW_SECS;
         let rows = sqlx::query(
             "SELECT infohash FROM torrents
-              WHERE metadata_status = 'pending'
-                AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
-              ORDER BY (hot_seen IS NOT NULL AND hot_seen > ?3) DESC,
+              WHERE (metadata_status = 'pending'
+                     AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2)))
+                 OR (metadata_status = 'fetched' AND garbled = 1 AND fetch_attempts = 0)
+              ORDER BY hint_peers DESC,
+                       (hot_seen IS NOT NULL AND hot_seen > ?3) DESC,
                        seen_count DESC, hot_count DESC, last_seen DESC
               LIMIT ?4",
         )
@@ -461,7 +510,8 @@ impl Store {
                  last_seen       = MAX(last_seen, excluded.last_seen),
                  seen_count      = seen_count + 1,
                  metadata_status = 'fetched',
-                 category        = excluded.category;"#,
+                 category        = excluded.category,
+                 garbled         = (instr(excluded.name, char(65533)) > 0);"#,
         )
         .bind(&hex)
         .bind(&rec.name)

@@ -81,6 +81,9 @@ struct SearchParams {
     /// Yetişkin içeriği gizle.
     #[serde(default)]
     hide_adult: Option<bool>,
+    /// Bozuk (çözülemeyen kodlama) adları gizle (varsayılan true).
+    #[serde(default)]
+    hide_garbled: Option<bool>,
     /// Arama modu: `fts` | `semantic` | `hybrid` (boş/bilinmeyen = otomatik: semantik
     /// hazırsa hibrit, değilse FTS). Plugin göndermez → eski davranış korunur.
     #[serde(default)]
@@ -210,6 +213,7 @@ async fn search(
         hide_adult: params.hide_adult.unwrap_or(false),
         category: map_category(params.cat),
         block_keywords: Vec::new(),
+        hide_garbled: params.hide_garbled.unwrap_or(true),
     };
     let mode = SearchMode::parse(params.mode.as_deref().unwrap_or(""));
     match search::search(

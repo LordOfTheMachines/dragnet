@@ -76,7 +76,50 @@ async function pollStats() {
     renderSemantic(s.semantic);
     renderFetch._hints = s.peer_hints;
     renderFetch(s.fetch, s.queue, scanning);
+    renderReach(s, scanning);
   } catch (e) {}
+}
+
+// --- DHT erişilebilirliği (port yönlendirme kontrolü) ---
+const reach = { prev: null, prevT: 0, ema: null, since: 0 };
+function renderReach(s, on) {
+  const set = (id, v) => { $(id).textContent = v; };
+  const pill = $("reach-pill"), txt = $("reach-text");
+  if (!on) {
+    ["r-port","r-inrate","r-getpeers","r-announce","r-hints","r-public"].forEach((id) => set(id, "–"));
+    pill.className = "pill off"; txt.textContent = "Tarama durdu"; $("reach-detail").textContent = "";
+    reach.prev = null; reach.ema = null; reach.since = 0;
+    return;
+  }
+  const now = Date.now();
+  const q = Number(s.queries_seen || 0);
+  if (reach.prev != null && now > reach.prevT) {
+    const perMin = (q - reach.prev) / ((now - reach.prevT) / 60000);
+    reach.ema = reach.ema == null ? perMin : 0.6 * reach.ema + 0.4 * perMin;
+  } else if (reach.prev == null) { reach.since = now; }
+  reach.prev = q; reach.prevT = now;
+  const port = (s.harvester_addr || "").split(":").pop() || "–";
+  set("r-port", port);
+  set("r-inrate", reach.ema == null ? "…" : nf(Math.round(reach.ema)));
+  set("r-getpeers", nf(s.get_peers_seen || 0));
+  set("r-announce", nf(s.announce_seen || 0));
+  set("r-hints", nf(s.peer_hints || 0));
+  const dc = s.dht_client || {};
+  set("r-public", dc.public ? String(dc.public).split(":")[0] : "–");
+  const uptimeMin = (now - reach.since) / 60000;
+  const rate = reach.ema == null ? 0 : reach.ema;
+  let cls = "off", label = "Ölçülüyor…", detail = "";
+  if (rate >= 20 || (s.announce_seen || 0) > 5) {
+    cls = "on"; label = "Erişilebilir — pasif hasat aktif";
+    detail = `Dışarıdan gelen DHT sorguları alınıyor (${nf(Math.round(rate))}/dk). Port yönlendirmesi çalışıyor; announce/get_peers sinyalleri sıcak kuyruğu besler.`;
+  } else if (uptimeMin >= 3) {
+    cls = "off"; label = "NAT arkasında görünüyor";
+    detail = `${uptimeMin.toFixed(0)} dakikadır neredeyse hiç gelen sorgu yok (${nf(Math.round(rate))}/dk). Modemde harvester UDP portunu (${port}) bu bilgisayara yönlendirin ve Ayarlar'da aynı portu seçin; qBittorrent aynı portu kullanıyorsa birini değiştirin. Aktif hasat (BEP-51) ve peer ipuçları yine çalışır, ama popüler torrent'lerin en güçlü sinyali (announce) gelmez.`;
+  } else {
+    detail = "İlk 3 dakika bekleniyor: port dışarıdan açıksa gelen sorgu sayısı hızla artmalı.";
+  }
+  if (dc.firewalled === false && dc.public) detail += ` mainline istemcisi (port ${dc.port}) dış adresi ${dc.public} olarak görüyor ve NAT arkasında değil.`;
+  pill.className = "pill " + cls; txt.textContent = label; $("reach-detail").textContent = detail;
 }
 
 // --- Metadata çekim kartı (Faz E) ---
@@ -308,7 +351,7 @@ async function loadMore() {
       query: browse.q, limit: browse.PAGE, offset: browse.offset,
       sort: browse.sort, desc: browse.desc,
       category: browse.cat, hideAdult: $("sf-adult").checked, onlyAlive: $("sf-alive").checked,
-      mode: browse.mode,
+      mode: browse.mode, hideGarbled: $("sf-garbled").checked,
     });
     const rows = r.results || [];
     if (browse.q && r.mode) {
@@ -351,6 +394,7 @@ $("search-form").addEventListener("submit", (e) => { e.preventDefault(); browse.
 $("btn-clear").addEventListener("click", () => { $("q").value = ""; browse.q = ""; resetAndLoad(); });
 $("sf-adult").addEventListener("change", resetAndLoad);
 $("sf-alive").addEventListener("change", resetAndLoad);
+$("sf-garbled").addEventListener("change", resetAndLoad);
 
 // kategori sekmeleri
 $("cattabs").addEventListener("click", (e) => {

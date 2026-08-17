@@ -50,12 +50,14 @@ fn make_filter(
     only_alive: bool,
     category: Option<String>,
     block_keywords: Vec<String>,
+    hide_garbled: bool,
 ) -> Filter {
     Filter {
         only_alive,
         hide_adult,
         category: category.filter(|c| !c.is_empty() && c != "all"),
         block_keywords,
+        hide_garbled,
     }
 }
 
@@ -82,7 +84,7 @@ pub fn app_info() -> Value {
 /// Canlı durum: tarama açık mı, indeks sayaçları, harvester metrikleri, hız.
 #[tauri::command]
 pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
-    let (scanning, harvester, addr, fetch, queue) = {
+    let (scanning, harvester, addr, fetch, queue, dht_client) = {
         let guard = state.engine.lock().await;
         match guard.as_ref() {
             Some(e) => {
@@ -93,9 +95,10 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
                     Some(e.harvester_addr().to_string()),
                     Some(snap.fetch),
                     Some(snap.queue),
+                    Some(snap.dht_client),
                 )
             }
-            None => (false, None, None, None, None),
+            None => (false, None, None, None, None, None),
         }
     };
 
@@ -126,6 +129,12 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         "samples": samples,
         "unique": harvester.as_ref().map(|h| h.unique_infohashes).unwrap_or(0),
         "peer_hints": harvester.as_ref().map(|h| h.peer_hints).unwrap_or(0),
+        // Erişilebilirlik: gelen (pasif) sorgular — port dışarıdan açıksa dakikalar içinde
+        // yüzlerce gelir; NAT arkasında ~0 kalır.
+        "queries_seen": harvester.as_ref().map(|h| h.queries_seen).unwrap_or(0),
+        "get_peers_seen": harvester.as_ref().map(|h| h.get_peers_seen).unwrap_or(0),
+        "announce_seen": harvester.as_ref().map(|h| h.announce_seen).unwrap_or(0),
+        "dht_client": dht_client.map(|(fw, pub_addr, port)| json!({ "firewalled": fw, "public": pub_addr, "port": port })),
         "sample_rate": sample_rate,
         // Faz E: çekim boru hattı sayaçları + kuyruk (pano "Metadata çekimi" kartı).
         "fetch": fetch.map(|f| json!({
@@ -161,6 +170,7 @@ pub async fn search(
     only_alive: Option<bool>,
     category: Option<String>,
     mode: Option<String>,
+    hide_garbled: Option<bool>,
 ) -> Result<Value, String> {
     let blocks = block_keywords(&state);
     let filter = make_filter(
@@ -168,6 +178,7 @@ pub async fn search(
         only_alive.unwrap_or(false),
         category,
         blocks,
+        hide_garbled.unwrap_or(true),
     );
     let q = query.trim();
     let limit = limit.unwrap_or(60);

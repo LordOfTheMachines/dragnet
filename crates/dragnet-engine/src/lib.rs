@@ -42,7 +42,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             db_path: "dragnet.db".to_string(),
-            harvester_port: 0,
+            harvester_port: 6881,
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 12,
             fetch_peer_concurrency: 12,
@@ -68,6 +68,8 @@ pub struct EngineSnapshot {
     pub fetch: dragnet_meta::FetchStatsSnapshot,
     /// Çekim kuyruğu: (pending, sıcak-pending, unreachable, son 1 saatte fetched).
     pub queue: (i64, i64, i64, i64),
+    /// Fetcher DHT istemcisi: (firewalled, dış adres, port) — erişilebilirlik göstergesi.
+    pub dht_client: (bool, Option<String>, u16),
     pub fetched_torrents: i64,
     pub total_infohashes: i64,
     pub harvester_addr: SocketAddr,
@@ -79,6 +81,7 @@ pub struct Engine {
     harvester_stats: Arc<dragnet_dht::Stats>,
     fetch_stats: Arc<dragnet_meta::FetchStats>,
     harvester_addr: SocketAddr,
+    fetcher: Arc<MetadataFetcher>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -87,17 +90,19 @@ impl Engine {
     pub async fn start(config: EngineConfig) -> Result<Engine, EngineError> {
         let store = Store::open(&config.db_path).await?;
 
-        let fetcher = Arc::new(MetadataFetcher::new(FetchConfig {
-            concurrency: config.fetch_peer_concurrency,
-            ..Default::default()
-        })?);
-
+        // ÖNCE harvester (yönlendirilmiş sabit portu — varsayılan 6881 — o almalı: pasif hasat
+        // gelen trafiğe bağlıdır); mainline istemcisi 6881 doluysa kendiliğinden efemer porta düşer.
         let mut harvester = dragnet_dht::spawn(HarvesterConfig {
             port: config.harvester_port,
             max_queries_per_sec: config.harvester_max_queries_per_sec,
             ..Default::default()
         })
         .await?;
+
+        let fetcher = Arc::new(MetadataFetcher::new(FetchConfig {
+            concurrency: config.fetch_peer_concurrency,
+            ..Default::default()
+        })?);
         let harvester_stats = harvester.stats();
         let fetch_stats = fetcher.stats();
         let harvester_addr = harvester.local_addr();
@@ -188,7 +193,13 @@ impl Engine {
                             .insert(s.infohash, s.peers.clone());
                     }
                     if let Err(e) = store
-                        .record_sighting_ext(s.infohash, now_unix(), s.source.is_hot())
+                        .record_sighting_full(
+                            s.infohash,
+                            now_unix(),
+                            s.source.is_hot(),
+                            s.peers.len() as i64,
+                            s.repeats.max(1) as i64,
+                        )
                         .await
                     {
                         debug!(error = %e, "record_sighting hatası");
@@ -255,6 +266,7 @@ impl Engine {
             harvester_stats,
             fetch_stats,
             harvester_addr,
+            fetcher,
             tasks,
         })
     }
@@ -279,6 +291,7 @@ impl Engine {
                 .fetch_queue_stats(now_unix())
                 .await
                 .unwrap_or((0, 0, 0, 0)),
+            dht_client: self.fetcher.dht_reachability().await,
             fetched_torrents: self.store.count_fetched().await.unwrap_or(0),
             total_infohashes: self.store.count_total().await.unwrap_or(0),
             harvester_addr: self.harvester_addr,

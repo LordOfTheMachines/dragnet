@@ -12,9 +12,9 @@ api_bind = "127.0.0.1:8080"
 # "Authorization: Bearer <token>" başlığı ister. Yorumda bırakılırsa auth kapalı.
 # api_token = "degistir-beni"
 
-# DHT harvester UDP portu (0 = işletim sisteminin atadığı efemer port).
+# DHT harvester UDP portu (varsayılan 6881; doluysa efemer porta düşer; 0 = doğrudan efemer).
 # Sabit + yönlendirilmiş (port-forward) bir port pasif hasadı artırır.
-harvester_port = 0
+harvester_port = 6881
 
 # Harvester'ın saniyedeki azami giden DHT sorgusu.
 # !!! İnternetin yavaşlıyor/kilitleniyorsa bu değeri DÜŞÜR (örn. 20-30). !!!
