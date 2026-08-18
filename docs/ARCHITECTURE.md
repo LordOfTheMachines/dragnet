@@ -271,20 +271,20 @@ başarısız çekim ~70 s sürüyordu (50 peer × 8 s, önce topla sonra dene). 
 7. **Keşif grafiği**: `discovery` artık şimdiden geriye tam N kova (boş=0) döner; eksen'
    işaretleri, "şimdi" çizgisi, hover ipucu. `FetchStats` (peer hata türleriyle) → `/stats`,'
    daemon log ve pano "Metadata çekimi" kartı.'
-8. **Sorgu anlama + kategori-farkındalı doküman** (Faz E-b): `dragnet_core::parse`'
-   (scene adı → başlık/yıl/sezon/çözünürlük/etiket/grup, regex\'siz), `dragnet_semantic::query`'
-   (TR/EN dolgu temizliği; kategori niyeti — kelime son konumdaysa ya da İngilizce çoğul ilk'
-   kelimeyse; "2000\'lerin"/"90\'ların"/"2010s" yıl aralığı) ve `text::doc_text` (temiz başlık +'
-   yıl + sezon + kategori sözcüğü; teknik etiketler atılır). Kategori/yıl niyeti **yumuşak'
-   artırma** (`store::Boost`, RRF skoru ×1.5 / ×1.3) — filtre değil. Kategori kelimesi'
-   semantik metinde KALIR (dokümanla hizalanır: "harry potter filmi" > "harry potter"), FTS'
-   metninden çıkar. Model kimlikleri `:v2` şema soneki (indeks otomatik yeniden kurulur).'
-   **Gürültü tabanı mutlak eşik olmaktan çıkarıldı**: 3.5k gerçek adla taban 0.42\'ye çıkıp'
-   meşru TR→EN eşleşmeleri (0.30–0.40) siliyordu; yalnız göreli kesim (en iyi × 0.80) +'
-   modelin sanity tabanı kaldı. Değerlendirme seti (`examples/eval.rs`, 19 sorgu, gerçek DB'
-   adları): hit@5 kalite %47→**%74**, hafif %53→%68, dengeli %63; kalanlar yazım hatası'
-   ("hery poter"), soyut ("büyücü çocuk"), TR başlık çevirisi ("taht oyunları"), dönem.'
-'
+8. **Sorgu anlama + kategori-farkındalı doküman** (Faz E-b): `dragnet_core::parse`
+   (scene adı → başlık/yıl/sezon/çözünürlük/etiket/grup, regex\'siz), `dragnet_semantic::query`
+   (TR/EN dolgu temizliği; kategori niyeti — kelime son konumdaysa ya da İngilizce çoğul ilk
+   kelimeyse; "2000\'lerin"/"90\'ların"/"2010s" yıl aralığı) ve `text::doc_text` (temiz başlık +
+   yıl + sezon + kategori sözcüğü; teknik etiketler atılır). Kategori/yıl niyeti **yumuşak
+   artırma** (`store::Boost`, RRF skoru ×1.5 / ×1.3) — filtre değil. Kategori kelimesi
+   semantik metinde KALIR (dokümanla hizalanır: "harry potter filmi" > "harry potter"), FTS
+   metninden çıkar. Model kimlikleri `:v2` şema soneki (indeks otomatik yeniden kurulur).
+   **Gürültü tabanı mutlak eşik olmaktan çıkarıldı**: 3.5k gerçek adla taban 0.42\'ye çıkıp
+   meşru TR→EN eşleşmeleri (0.30–0.40) siliyordu; yalnız göreli kesim (en iyi × 0.80) +
+   modelin sanity tabanı kaldı. Değerlendirme seti (`examples/eval.rs`, 19 sorgu, gerçek DB
+   adları): hit@5 kalite %47→**%74**, hafif %53→%68, dengeli %63; kalanlar yazım hatası
+   ("hery poter"), soyut ("büyücü çocuk"), TR başlık çevirisi ("taht oyunları"), dönem.
+
 **Açık:** NAT'lı peer'lere uTP/holepunch (BEP-55) ile ulaşmak; sıcak kuyruk büyüdükçe'
 öncelik ağırlıklarını yeniden ayarlamak; peer ipuçlarını kalıcılaştırmak.'
 '
