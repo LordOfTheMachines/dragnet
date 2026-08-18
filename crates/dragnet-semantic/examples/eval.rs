@@ -57,6 +57,10 @@ const QUERIES: &[(&str, &[&str])] = &[
         ],
     ),
     ("asdkjhqwe zxcv", &[]),
+    ("qwrtyzx plmokn", &[]),
+    ("sdfgh jklş", &[]),
+    ("zeplin belgeseli", &[]),
+    ("kuantum fiziği ders notları", &[]),
 ];
 
 fn main() {
@@ -126,6 +130,14 @@ fn main() {
             (q.to_string(), None)
         };
         let mut hits = sem.search(&qtext, 30).unwrap();
+        // Güven sinyalleri (F4): (1) embedding top1, (2) top1 / kuyruk(6-20) oranı,
+        // (3) reranker'ın en iyi skoru. Amaç: "bu sorgunun korpusta karşılığı var mı?"
+        let mut rr_top = f32::NAN;
+        let raw30 = sem.search_raw(&qtext, 20).unwrap();
+        let emb_top = raw30.first().map(|h| h.score).unwrap_or(0.0);
+        let tail: f32 = raw30.iter().skip(5).map(|h| h.score).sum::<f32>()
+            / raw30.len().saturating_sub(5).max(1) as f32;
+        let sig_ratio = if tail > 0.0 { emb_top / tail } else { 0.0 };
         if std::env::var("DEBUG").is_ok() {
             let raw = sem.search_raw(&qtext, 5).unwrap();
             eprintln!(
@@ -158,6 +170,7 @@ fn main() {
             let t = std::time::Instant::now();
             let scores = rr.score(&qtext, &docs).unwrap();
             rr_ms += t.elapsed().as_millis();
+            rr_top = scores.iter().copied().fold(f32::MIN, f32::max);
             let mut order: Vec<usize> = (0..hits.len()).collect();
             order.sort_by(|&x, &y| scores[y].total_cmp(&scores[x]));
             if std::env::var("FUSE").is_ok() {
@@ -172,6 +185,11 @@ fn main() {
             }
             hits = order.into_iter().map(|i| hits[i]).collect();
         }
+        // Üretimdeki güven kapısı (bkz. dragnet_semantic::WEAK_MATCH_SCORE): cross-encoder
+        // hiçbir adayı alakalı bulmadıysa sonuç listesi boşalır.
+        if rr_top.is_finite() && rr_top < dragnet_semantic::WEAK_MATCH_SCORE {
+            hits.clear();
+        }
         let top: Vec<&str> = hits
             .iter()
             .take(5)
@@ -180,7 +198,7 @@ fn main() {
         if expected.is_empty() {
             noise_ok = hits.is_empty();
             println!(
-                "{:>5}  {q}  → {} sonuç (boş beklenir)",
+                "{:>5}  {q}  → {} sonuç (boş beklenir) | emb={emb_top:.3} oran={sig_ratio:.2} rr={rr_top:.2}",
                 if hits.is_empty() { "OK" } else { "MISS" },
                 hits.len()
             );
@@ -198,7 +216,7 @@ fn main() {
             mrr += 1.0 / (r as f64 + 1.0);
         }
         println!(
-            "{:>5} r={:<3} {q}  → {}",
+            "{:>5} r={:<3} {q}  → {}  | emb={emb_top:.3} oran={sig_ratio:.2} rr={rr_top:.2}",
             if hit { "OK" } else { "MISS" },
             rank.map(|r| (r + 1).to_string()).unwrap_or("-".into()),
             top.first()

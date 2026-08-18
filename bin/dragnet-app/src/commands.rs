@@ -171,6 +171,7 @@ pub async fn search(
     category: Option<String>,
     mode: Option<String>,
     hide_garbled: Option<bool>,
+    show_weak: Option<bool>,
 ) -> Result<Value, String> {
     let blocks = block_keywords(&state);
     let filter = make_filter(
@@ -197,11 +198,12 @@ pub async fn search(
         sort_key,
         desc,
         &filter,
+        show_weak.unwrap_or(false),
     )
     .await
     .map_err(|e| e.to_string())?;
     Ok(
-        json!({ "results": summaries_json(&outcome.rows), "count": outcome.rows.len(), "mode": outcome.used.as_str() }),
+        json!({ "results": summaries_json(&outcome.rows), "count": outcome.rows.len(), "mode": outcome.used.as_str(), "weak": outcome.weak }),
     )
 }
 

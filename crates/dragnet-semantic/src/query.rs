@@ -91,6 +91,88 @@ const FILLER_PHRASES: &[&str] = &[
     "any",
 ];
 
+/// TR→EN karşılıklar (F4). Torrent adları neredeyse tamamen İngilizce/orijinal dilde
+/// olduğu için Türkçe sorgu ile ad arasında sözcüksel köprü yoktur; embedding bu boşluğu
+/// kısmen kapatır ama ölçümde en zayıf sınıf buydu ("taht oyunları dizisi" → MISS).
+/// Burada **çok kelimeli ifadeler** (çeviri başlıklar) önce, sonra tek kelimeler
+/// (tür/tema) uygulanır. Türkçe metin İngilizce karşılığıyla **değiştirilir** — hem
+/// FTS hem embedding korpusun diline yaklaşır.
+const ALIAS_PHRASES: &[(&str, &str)] = &[
+    // Çeviri başlıklar (Türkiye'de yaygın kullanılan adlar)
+    ("taht oyunları", "game of thrones"),
+    ("taht oyunlari", "game of thrones"),
+    ("yüzüklerin efendisi", "lord of the rings"),
+    ("yuzuklerin efendisi", "lord of the rings"),
+    ("yıldız savaşları", "star wars"),
+    ("yildiz savaslari", "star wars"),
+    ("açlık oyunları", "hunger games"),
+    ("aclik oyunlari", "hunger games"),
+    ("karayip korsanları", "pirates of the caribbean"),
+    ("yürüyen ölüler", "the walking dead"),
+    ("yuruyen oluler", "the walking dead"),
+    ("uzay yolu", "star trek"),
+    ("yıldız geçidi", "stargate"),
+    ("kara şövalye", "the dark knight"),
+    ("kara sovalye", "the dark knight"),
+    ("örümcek adam", "spider-man"),
+    ("orumcek adam", "spider-man"),
+    ("demir adam", "iron man"),
+    ("buz devri", "ice age"),
+    ("narnia günlükleri", "chronicles of narnia"),
+    ("esaretin bedeli", "the shawshank redemption"),
+    ("canavarlar şirketi", "monsters inc"),
+    // Tür/tema
+    ("bilim kurgu", "sci-fi science fiction"),
+    ("çizgi film", "cartoon animation"),
+    ("cizgi film", "cartoon animation"),
+    ("süper kahraman", "superhero"),
+    ("super kahraman", "superhero"),
+    ("hayatta kalma", "survival"),
+    ("araba yarışı", "racing"),
+    ("araba yarisi", "racing"),
+    ("ikinci dünya savaşı", "world war ii"),
+];
+
+/// Tek kelimelik TR→EN karşılıklar (tam kelime eşleşmesi; ek almış biçimler için
+/// `starts_with` + kısa ek toleransı `alias_of` içinde).
+const ALIAS_WORDS: &[(&str, &str)] = &[
+    ("büyücü", "wizard"),
+    ("buyucu", "wizard"),
+    ("sihirbaz", "wizard magician"),
+    ("büyü", "magic"),
+    ("zombi", "zombie"),
+    ("vampir", "vampire"),
+    ("korsan", "pirate"),
+    ("uzay", "space"),
+    ("casus", "spy"),
+    ("kahraman", "hero"),
+    ("kahramanlar", "heroes"),
+    ("ejderha", "dragon"),
+    ("korku", "horror"),
+    ("gerilim", "thriller"),
+    ("komedi", "comedy"),
+    ("aksiyon", "action"),
+    ("macera", "adventure"),
+    ("romantik", "romance"),
+    ("polisiye", "crime detective"),
+    ("savaş", "war"),
+    ("tarihi", "historical"),
+    ("gizem", "mystery"),
+    ("efsane", "legend"),
+    ("strateji", "strategy"),
+    ("futbol", "football soccer"),
+    ("matriks", "matrix"),
+    ("çocuk", "kids children"),
+    ("cocuk", "kids children"),
+    ("şövalye", "knight"),
+    ("prenses", "princess"),
+    ("hırsız", "thief"),
+    ("katil", "killer"),
+    ("dedektif", "detective"),
+    ("uzaylı", "alien"),
+    ("uzayli", "alien"),
+];
+
 /// Kategori niyeti: kelime → kategori. Kelime kökleri Türkçe ekleriyle (oyun, oyunlar,
 /// oyunları, oyunu…) `starts_with` ile eşlenir; İngilizce tam kelime.
 const CATEGORY_HINTS: &[(&str, &str)] = &[
@@ -135,6 +217,28 @@ const CATEGORY_HINTS: &[(&str, &str)] = &[
     ("app", "software"),
     ("apps", "software"),
 ];
+
+/// Bir kelimenin TR→EN karşılığı. Türkçe ekleri tolere eder: kök eşleşirse ve kelime
+/// kökten en çok 4 karakter uzunsa ("zombi" ↔ "zombiler", "korku" ↔ "korkulu") karşılık
+/// döner. Kısa kökler (< 4 harf) yalnız tam eşleşir ("büyü" ↔ "büyücü" karışmasın).
+fn alias_of(word: &str) -> Option<&'static str> {
+    ALIAS_WORDS
+        .iter()
+        .find(|(tr, en)| {
+            // Kelime zaten İngilizce biçimse dokunma: "zombies" → "zombie" yapmak FTS
+            // eşleşmesini bozar (korpusta "Zombies" geçer). Aynısı vampires/pirates için.
+            if word.starts_with(en.split(' ').next().unwrap_or(en)) {
+                return false;
+            }
+            let n = tr.chars().count();
+            if n >= 5 {
+                word.starts_with(tr) && word.chars().count() <= n + 4
+            } else {
+                word == *tr
+            }
+        })
+        .map(|(_, en)| *en)
+}
 
 /// Kategori kelimesi anlam taşıyan (silinmemesi gereken) durumlar: örn. "game" başlıkta
 /// olabilir ("Game of Thrones", "The Art of Game Design"). Kural: kategori kelimesi
@@ -211,6 +315,20 @@ pub fn understand(query: &str) -> QueryPlan {
     }
     let mut text = kept.join(" ");
 
+    // TR→EN karşılıklar: önce çok kelimeli başlıklar/temalar, sonra tek kelimeler.
+    for (tr, en) in ALIAS_PHRASES {
+        if text.contains(tr) {
+            text = text.replace(tr, en);
+        }
+    }
+    if ALIAS_WORDS.iter().any(|(tr, _)| text.contains(tr)) {
+        text = text
+            .split_whitespace()
+            .map(|w| alias_of(w).unwrap_or(w).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
     // Çok kelimeli dolgu ifadeleri.
     for ph in FILLER_PHRASES.iter().filter(|p| p.contains(' ')) {
         if text.contains(ph) {
@@ -282,9 +400,10 @@ mod tests {
 
     #[test]
     fn extracts_intent_and_strips_filler() {
+        // F4: TR→EN karşılık — "zombi" korpusun dili olan İngilizceye çevrilir.
         let p = understand("zombi konulu oyunları listeler misin");
-        assert_eq!(p.semantic_text, "zombi oyunları");
-        assert_eq!(p.fts_text, "zombi");
+        assert_eq!(p.semantic_text, "zombie oyunları");
+        assert_eq!(p.fts_text, "zombie");
         assert_eq!(p.category, Some("game"));
 
         let p = understand("İçinde heroes geçen oyunları listeler misin");
@@ -293,8 +412,8 @@ mod tests {
         assert_eq!(p.category, Some("game"));
 
         let p = understand("2000'lerin bilim kurgu filmleri");
-        assert_eq!(p.semantic_text, "bilim kurgu filmleri");
-        assert_eq!(p.fts_text, "bilim kurgu");
+        assert_eq!(p.semantic_text, "sci-fi science fiction filmleri");
+        assert_eq!(p.fts_text, "sci-fi science fiction");
         assert_eq!(p.category, Some("video"));
         assert_eq!(p.year_range, Some((2000, 2009)));
 

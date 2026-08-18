@@ -88,6 +88,9 @@ struct SearchParams {
     /// hazırsa hibrit, değilse FTS). Plugin göndermez → eski davranış korunur.
     #[serde(default)]
     mode: Option<String>,
+    /// Güven kapısını atla: karşılığı zayıf sorguda da en yakın sonuçları döndür.
+    #[serde(default)]
+    weak: Option<bool>,
 }
 
 /// qBittorrent kategorisini (ya da bizim adımızı) iç kategoriye eşler. `all`/boş → None.
@@ -128,6 +131,8 @@ struct SearchResponse {
     results: Vec<SearchItem>,
     /// Gerçekte kullanılan mod (`fts`/`semantic`/`hybrid`).
     mode: &'static str,
+    /// Sorgunun korpusta karşılığı yok (sonuç listesi bilerek boş).
+    weak: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,11 +231,13 @@ async fn search(
         sort,
         desc,
         &filter,
+        params.weak.unwrap_or(false),
     )
     .await
     {
         Ok(outcome) => {
             let used = outcome.used.as_str();
+            let weak = outcome.weak;
             let results = outcome
                 .rows
                 .into_iter()
@@ -248,6 +255,7 @@ async fn search(
             Json(SearchResponse {
                 results,
                 mode: used,
+                weak,
             })
             .into_response()
         }
