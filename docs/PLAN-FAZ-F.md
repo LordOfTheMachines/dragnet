@@ -76,6 +76,20 @@ Qwen3-Embedding kademesi elendi (torrent adlarında Gemma'nın altında, CPU'da 
 - Sorgu embed önbelleği (LRU 256): aynı sorgu tekrarında 0 ms.
 - İndeks: 768d int8 500k = 366 MB RAM; MRL-256 seçeneği (0.93→0.86 hits@5) düşük RAM modu.
 
+### F0 — Yapılacaklar (kullanıcı geri bildirimi, 2026-08-18; bir sonraki oturumda ilk iş)
+- **Semantik durum satırı görsel/anlaşılır olsun**: tek satır düz metin yerine kart içinde
+  ayrı rozetler/çubuklar: Model (kademe + otomatik seçim gerekçesi), Cihaz (GPU/CPU rozeti),
+  İndeks (kayıt sayısı + ilerleme çubuğu: indekslenen/toplam), RAM (indeks MB), **VRAM**
+  (kullanım / bütçe / toplam — yatay çubuk), Reranker (aktif/kapalı, cihaz). Donanım
+  bilgisi ("RTX 4070 Laptop, 7948 MB VRAM, N çekirdek") ayrı bir küçük "Donanım" satırı.
+- **VRAM "kullanım 0 MB" hatası**: değer model yüklenir yüklenmez, ilk çıkarım (embedding)
+  çalışmadan önce okunuyor; DirectML ağırlıkları ve tamponları ilk çalıştırmada tahsis eder.
+  Çözüm: `hw::gpu_memory()` okumasını `pollStats` ile periyodik yenile (2,5 s'de bir; ucuz)
+  ve durum JSON'unda canlı göster; kapatmada "serbest bırakıldı" notu için de son ölçüm
+  kullanılsın. Ayrıca DXGI okuması, GPU'da hiç kaynak yoksa 0 döner — bu normal; ORT'un
+  DML tahsis sayacı (ort allocator stats) ile çapraz doğrulama düşünülebilir.
+- Aynı görsel dili Pano "Metadata çekimi" ve "DHT erişilebilirliği" kartlarıyla hizala.
+
 ## Kaynaklar
 - Fine-tune EmbeddingGemma (Google AI): https://ai.google.dev/gemma/docs/embeddinggemma/fine-tuning-embeddinggemma-with-sentence-transformers
 - HF blog EmbeddingGemma: https://github.com/huggingface/blog/blob/main/embeddinggemma.md

@@ -97,7 +97,8 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       sorgu anlama + kategori-farkındalı embedding (hit@5 %47→%74); bge-reranker-v2-m3 yeniden sıralayıcı (%79).
 - [x] Faz E (6): DXGI VRAM ölçümü + kapatmada serbest bırakma notu, donanıma göre otomatik kademe,
       Qwen3 kademesi elendi.
-- [ ] **Faz F — model iyileştirme** (plan: `docs/PLAN-FAZ-F.md`): eval seti 100+, sentetik sorgu
+- [ ] **Faz F — model iyileştirme** (plan: `docs/PLAN-FAZ-F.md`; **önce F0**: semantik durum kartı
+      görselleştirme + VRAM canlı ölçüm düzeltmesi): eval seti 100+, sentetik sorgu
       üretimi, Gemma/MiniLM ince ayar + ONNX, Model2Vec damıtma (light), yazım düzeltme,
       tema sözlüğü, fp16 GPU seçeneği, sorgu önbelleği.
 - [ ] Semantik: özel damıtılmış model (Model2Vec ile Gemma'dan torrent-adı korpusuna
