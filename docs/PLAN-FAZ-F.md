@@ -76,19 +76,22 @@ Qwen3-Embedding kademesi elendi (torrent adlarında Gemma'nın altında, CPU'da 
 - Sorgu embed önbelleği (LRU 256): aynı sorgu tekrarında 0 ms.
 - İndeks: 768d int8 500k = 366 MB RAM; MRL-256 seçeneği (0.93→0.86 hits@5) düşük RAM modu.
 
-### F0 — Yapılacaklar (kullanıcı geri bildirimi, 2026-08-18; bir sonraki oturumda ilk iş)
-- **Semantik durum satırı görsel/anlaşılır olsun**: tek satır düz metin yerine kart içinde
-  ayrı rozetler/çubuklar: Model (kademe + otomatik seçim gerekçesi), Cihaz (GPU/CPU rozeti),
-  İndeks (kayıt sayısı + ilerleme çubuğu: indekslenen/toplam), RAM (indeks MB), **VRAM**
-  (kullanım / bütçe / toplam — yatay çubuk), Reranker (aktif/kapalı, cihaz). Donanım
-  bilgisi ("RTX 4070 Laptop, 7948 MB VRAM, N çekirdek") ayrı bir küçük "Donanım" satırı.
-- **VRAM "kullanım 0 MB" hatası**: değer model yüklenir yüklenmez, ilk çıkarım (embedding)
-  çalışmadan önce okunuyor; DirectML ağırlıkları ve tamponları ilk çalıştırmada tahsis eder.
-  Çözüm: `hw::gpu_memory()` okumasını `pollStats` ile periyodik yenile (2,5 s'de bir; ucuz)
-  ve durum JSON'unda canlı göster; kapatmada "serbest bırakıldı" notu için de son ölçüm
-  kullanılsın. Ayrıca DXGI okuması, GPU'da hiç kaynak yoksa 0 döner — bu normal; ORT'un
-  DML tahsis sayacı (ort allocator stats) ile çapraz doğrulama düşünülebilir.
-- Aynı görsel dili Pano "Metadata çekimi" ve "DHT erişilebilirliği" kartlarıyla hizala.
+### F0 — Durum kartı + canlı VRAM (TAMAM, 2026-08-18)
+- **Semantik durum kartı** (Ayarlar → Semantik): kart başlığında aşama rozeti (Kapalı /
+  İndiriliyor / Yükleniyor / Hazır / Hata — pano kartlarıyla aynı `pill` dili), altında
+  rozetler (Model + kademe, Cihaz, Yeniden sıralayıcı, indeks RAM'i) ve ölçüm çubukları:
+  İndirme (dosya + %), İndeks (embed edilen / adı bilinen kayıt), VRAM (kullanım / toplam,
+  çubukta bütçe işareti, ipucunda bütçe + oturum tepesi). En altta "Donanım: <GPU> · <VRAM>
+  · N çekirdek" ve otomatik kademe gerekçesi; kapalıyken son "VRAM serbest bırakıldı" notu.
+- **VRAM "kullanım 0 MB" hatası düzeltildi**: ölçüm artık `status_json()` içinde her
+  yoklamada (2,5 s) canlı alınıyor — eskiden `apply()` sırasında, yani model daha
+  indirilmeden bir kez okunuyordu. Ölçülen doğrulama (`--example vram quality`, RTX 4070
+  Laptop): yükleme öncesi 0 MB → yüklendi (çıkarımsız) **89 MB** → ilk çıkarımdan sonra
+  **145 MB** → düşürülünce 0 MB (sızıntı yok, ikinci yüklemede de aynı). Yani DirectML
+  tahsisin bir kısmını yüklemede, kalanını ilk çıkarımda yapıyor; tek seferlik ölçüm bu
+  yüzden 0/eksik gösteriyordu. Oturum tepe değeri ayrıca tutulur (kapatma notunda "önce"
+  olarak kullanılır). ORT DML tahsis sayacıyla çapraz doğrulama gerekmedi.
+- Görsel dil pano kartlarıyla hizalı (card-head + rozet + `muted small` açıklama satırı).
 
 ## Kaynaklar
 - Fine-tune EmbeddingGemma (Google AI): https://ai.google.dev/gemma/docs/embeddinggemma/fine-tuning-embeddinggemma-with-sentence-transformers

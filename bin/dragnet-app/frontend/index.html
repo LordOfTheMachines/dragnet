@@ -193,7 +193,10 @@
         </div>
 
         <div class="card settings">
-          <h3>Semantik (anlamsal) arama</h3>
+          <div class="card-head">
+            <h3>Semantik (anlamsal) arama</h3>
+            <span id="sem-phase" class="pill off"><span class="dot"></span><span id="sem-phase-text">Kapalı</span></span>
+          </div>
           <p class="muted small" style="margin-top:0">
             Doğal dil ve eşanlamlı sorgular ("2000'lerin bilim kurgu filmleri", "matriks filmi") için yerel
             embedding modeli. Tamamen <b>çevrimdışı</b> çalışır; model bir kez indirilir. Açılınca indeks arka planda kurulur.
@@ -216,8 +219,17 @@
               <option value="cpu">CPU</option>
             </select>
           </label>
-          <div id="sem-status" class="muted small">Kapalı</div>
-          <div class="progress hidden" id="sem-progress"><div class="bar" id="sem-bar"></div></div>
+          <!-- Durum kartı (Faz F0): rozetler + çubuklar; pano kartlarıyla aynı görsel dil -->
+          <div id="sem-card" class="statcard">
+            <div class="badges" id="sem-badges"></div>
+            <div class="meters">
+              <div class="meter hidden" id="sm-dl"><span class="mlabel">İndirme</span><span class="mtrack"><i class="mfill"></i></span><span class="mval">–</span></div>
+              <div class="meter hidden" id="sm-idx"><span class="mlabel">İndeks</span><span class="mtrack"><i class="mfill"></i></span><span class="mval">–</span></div>
+              <div class="meter hidden" id="sm-vram"><span class="mlabel">VRAM</span><span class="mtrack"><i class="mfill"></i><i class="mmark hidden"></i></span><span class="mval">–</span></div>
+            </div>
+            <div class="muted small" id="sem-hw"></div>
+            <div class="small err hidden" id="sem-err"></div>
+          </div>
         </div>
 
         <div class="card settings">

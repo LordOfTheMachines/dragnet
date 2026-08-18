@@ -73,7 +73,7 @@ async function pollStats() {
     $("status-text").textContent = scanning ? "Tarıyor" : "Durdu";
     $("status-pill").className = "pill " + (scanning ? "on" : "off");
     $("btn-toggle").textContent = scanning ? "Taramayı Durdur" : "Taramayı Başlat";
-    renderSemantic(s.semantic);
+    renderSemantic(s.semantic, s.fetched);
     renderFetch._hints = s.peer_hints;
     renderFetch(s.fetch, s.queue, scanning);
     renderReach(s, scanning);
@@ -146,25 +146,93 @@ function renderFetch(f, q, on) {
     : "Çekim istatistikleri tarama sürdükçe dolar.";
 }
 
-// --- Semantik arama durumu (ayarlar kartı + arama rozeti) ---
+// --- Semantik arama durum kartı (Faz F0): rozetler + çubuklar + canlı VRAM ---
 let semReady = false;
-function renderSemantic(st) {
+const SEM_PHASE = { off: "Kapalı", downloading: "İndiriliyor", loading: "Yükleniyor", ready: "Hazır", error: "Hata" };
+const SEM_TIER = { light: "hafif", balanced: "dengeli", quality: "yüksek kalite" };
+const semDev = (d) => (d === "directml" ? "GPU (DirectML)" : d === "cpu" ? "CPU" : d || "–");
+// MB → okunur ("145 MB", "7,8 GB"); binlik ayırıcı MB'de yanıltıcı olduğu için GB'a geçilir.
+const mbTxt = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(1).replace(".", ",") + " GB" : nf(mb) + " MB");
+
+// Tek bir ölçüm çubuğunu günceller. `mark` (0–100) varsa çubuğa ince bir işaret koyar
+// (VRAM'de işletim sisteminin verdiği bütçe konumu).
+function setMeter(id, pct, val, title, cls, mark) {
+  const el = $(id);
+  el.classList.remove("hidden");
+  const fill = el.querySelector(".mfill");
+  // Küçük ama sıfır olmayan değerler görünür kalsın (VRAM kullanımı toplamın %2'si olabilir).
+  fill.style.width = (pct > 0 ? Math.max(1.5, Math.min(100, pct)) : 0) + "%";
+  fill.className = "mfill" + (cls ? " " + cls : "");
+  el.querySelector(".mval").textContent = val;
+  el.title = title || "";
+  const m = el.querySelector(".mmark");
+  if (m) {
+    const ok = mark != null && mark > 0 && mark < 100;
+    m.classList.toggle("hidden", !ok);
+    if (ok) m.style.left = mark + "%";
+  }
+}
+
+function renderSemantic(st, fetched) {
   if (!st) return;
-  const el = $("sem-status"), prog = $("sem-progress"), bar = $("sem-bar");
   semReady = st.phase === "ready";
-  let txt = "Kapalı"; let pct = 0; let showBar = false;
+  const busy = st.phase === "downloading" || st.phase === "loading";
+  $("sem-phase").className = "pill " + (st.phase === "ready" ? "on" : st.phase === "error" ? "bad" : busy ? "busy" : "off");
+  $("sem-phase-text").textContent = SEM_PHASE[st.phase] || "Kapalı";
+
+  // Rozetler: model/kademe, cihaz, yeniden sıralayıcı, indeks RAM'i.
+  const bg = [];
+  if (st.model) {
+    bg.push(`<span class="badge accent">Model <b>${esc(st.model)}</b>${st.tier ? " · " + esc(SEM_TIER[st.tier] || st.tier) : ""}</span>`);
+    bg.push(`<span class="badge ${st.device === "directml" ? "good" : ""}">Cihaz <b>${esc(semDev(st.device))}</b></span>`);
+    bg.push(`<span class="badge ${st.rerank ? "good" : "dim"}">Yeniden sıralayıcı <b>${st.rerank ? esc(semDev(st.rerank)) : "kapalı"}</b></span>`);
+    bg.push(`<span class="badge" title="Bellek-içi vektör indeksi (int8, ${st.dim || "?"} boyut)">RAM <b>${mbTxt(st.index_mb)}</b></span>`);
+  }
+  $("sem-badges").innerHTML = bg.join("");
+
+  // İndirme çubuğu (model + reranker dosyaları).
   if (st.phase === "downloading") {
-    showBar = true;
-    pct = st.total > 0 ? Math.round(100 * st.done / st.total) : 0;
-    txt = `Model indiriliyor… ${st.file || ""} ${st.total > 0 ? pct + "%" : humanSize(st.done)}`;
-  } else if (st.phase === "loading") { txt = "Model yükleniyor…"; }
-  else if (st.phase === "ready") {
-    txt = `Hazır — ${st.model} · ${st.device === "directml" ? "GPU (DirectML)" : "CPU"} · ${nf(st.indexed)} kayıt indekslendi (${st.index_mb} MB RAM)` + (st.rerank ? ` · yeniden sıralayıcı aktif (${st.rerank})` : "") + (st.tier_reason ? ` · otomatik: ${st.tier_reason}` : "") + (st.gpu ? ` · GPU: ${st.gpu}` : "");
-  } else if (st.phase === "error") { txt = "Hata: " + (st.error || ""); }
-  el.textContent = txt;
-  el.className = "muted small" + (st.phase === "error" ? " err" : "");
-  prog.classList.toggle("hidden", !showBar);
-  bar.style.width = pct + "%";
+    const pct = st.total > 0 ? Math.round(100 * st.done / st.total) : 0;
+    setMeter("sm-dl", pct, st.total > 0 ? `%${pct} · ${humanSize(st.done)} / ${humanSize(st.total)}` : humanSize(st.done),
+      st.file || "model dosyası", "");
+    $("sm-dl").querySelector(".mlabel").textContent = (st.file || "").startsWith("reranker/") ? "Sıralayıcı" : "İndirme";
+  } else { $("sm-dl").classList.add("hidden"); }
+
+  // İndeks ilerlemesi: embed edilmiş kayıt / adı bilinen torrent (pano "İndekslenen").
+  if (st.phase === "ready") {
+    const tot = Math.max(Number(fetched) || 0, st.indexed);
+    const pct = tot > 0 ? Math.round(100 * st.indexed / tot) : 0;
+    const done = tot > 0 && st.indexed >= tot;
+    setMeter("sm-idx", tot > 0 ? pct : 0, `${nf(st.indexed)} / ${nf(tot)}${done ? " · tamam" : ` · %${pct}`}`,
+      done ? "Adı bilinen tüm kayıtlar indekslendi" : "Arka planda indeksleniyor (kalanlar sırayla embed edilir)",
+      done ? "good" : "");
+  } else { $("sm-idx").classList.add("hidden"); }
+
+  // VRAM: her yoklamada canlı okunur (DirectML ilk çıkarımda tahsis eder → tek seferlik
+  // ölçüm 0 MB gösteriyordu). Model henüz yokken (indirme) ya da CPU'da çalışırken anlamsız.
+  const v = st.vram;
+  if (v && (st.phase === "loading" || (st.phase === "ready" && st.device !== "cpu"))) {
+    const base = v.total_mb || v.budget_mb || 0;
+    const pct = base > 0 ? 100 * v.usage_mb / base : 0;
+    const share = v.budget_mb > 0 ? v.usage_mb / v.budget_mb : 0;
+    setMeter("sm-vram", pct, `${mbTxt(v.usage_mb)} / ${mbTxt(base)}`,
+      `${v.adapter} · bütçe ${mbTxt(v.budget_mb)} · oturum tepesi ${mbTxt(v.peak_mb)} · işaret: bütçe sınırı`,
+      share > 0.9 ? "hot" : share > 0.7 ? "warn" : "",
+      base > 0 ? Math.round(100 * v.budget_mb / base) : null);
+  } else { $("sm-vram").classList.add("hidden"); }
+
+  // Donanım + otomatik kademe gerekçesi (kapalıyken son VRAM notu).
+  const hw = [];
+  if (v) hw.push(`${v.adapter} · ${mbTxt(v.total_mb)} VRAM`);
+  if (st.cores) hw.push(`${st.cores} çekirdek`);
+  let foot = hw.length ? "Donanım: " + hw.join(" · ") : "";
+  if (st.tier_reason) foot += (foot ? " · " : "") + "Otomatik kademe: " + st.tier_reason;
+  if (st.phase === "off" && st.gpu_note) foot += (foot ? " · " : "") + st.gpu_note;
+  $("sem-hw").textContent = foot;
+  const err = $("sem-err");
+  err.textContent = st.phase === "error" ? st.error || "Bilinmeyen hata" : "";
+  err.classList.toggle("hidden", st.phase !== "error");
+
   // Arama rozeti: semantik hazırsa göster (son aramanın modu ile).
   const badge = $("sem-badge");
   badge.classList.toggle("hidden", !semReady && st.phase !== "downloading" && st.phase !== "loading");
