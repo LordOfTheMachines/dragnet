@@ -26,6 +26,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # ONNX Runtime — Windows'ta DirectML EP (GPU) derlenir; diğer platformlarda yalnız CPU.
 [target.'cfg(windows)'.dependencies]
 ort = { version = "=2.0.0-rc.13", features = ["ndarray", "half", "directml"] }
+# DXGI ile VRAM bütçe/kullanım sorgusu (okuma-yalnız).
+windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
 [target.'cfg(not(windows))'.dependencies]
 ort = { version = "=2.0.0-rc.13", features = ["ndarray", "half"] }
 

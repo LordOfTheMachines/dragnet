@@ -32,7 +32,7 @@ pub struct Config {
     /// Semantik (anlamsal) arama — opt-in (Faz D). Açıksa model bir kez indirilir,
     /// indeks arka planda kurulur, `/search` varsayılan olarak hibrit çalışır.
     pub semantic_enabled: bool,
-    /// Kademe: `light` | `balanced` | `quality`.
+    /// Kademe: `auto` (donanıma göre) | `light` | `balanced` | `quality`.
     pub semantic_tier: String,
     /// Cihaz: `auto` | `gpu` | `cpu`.
     pub semantic_device: String,
@@ -54,7 +54,7 @@ impl Default for Config {
             fetch_peer_concurrency: 12,
             seed_infohashes: Vec::new(),
             semantic_enabled: false,
-            semantic_tier: "quality".to_string(),
+            semantic_tier: "auto".to_string(),
             semantic_device: "auto".to_string(),
             semantic_models_dir: "models".to_string(),
             semantic_rerank: true,

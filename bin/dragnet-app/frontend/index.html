@@ -201,10 +201,10 @@
           <label class="chk"><input id="set-sem" type="checkbox" /> Semantik aramayı etkinleştir (FTS ile hibrit)</label>
           <label>Kademe (hız ↔ kalite)
             <select id="set-sem-tier">
+              <option value="auto">Otomatik — donanıma göre (GPU/çekirdek sayısı)</option>
               <option value="light">Hafif — potion-multilingual (statik; anında indeksleme, ~500 MB)</option>
               <option value="balanced">Dengeli — MiniLM-L12 multilingual (int8; ~250 MB)</option>
               <option value="quality">Yüksek kalite — EmbeddingGemma-300m Q4 (~230 MB; GPU önerilir)</option>
-              <option value="experimental">Deneysel — Qwen3-Embedding-0.6B (~570 MB; yalnız CPU, yavaş)</option>
             </select>
             <small>Kademe değişince indeks yeniden kurulur.</small>
           </label>

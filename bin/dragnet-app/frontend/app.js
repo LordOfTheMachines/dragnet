@@ -159,7 +159,7 @@ function renderSemantic(st) {
     txt = `Model indiriliyor… ${st.file || ""} ${st.total > 0 ? pct + "%" : humanSize(st.done)}`;
   } else if (st.phase === "loading") { txt = "Model yükleniyor…"; }
   else if (st.phase === "ready") {
-    txt = `Hazır — ${st.model} · ${st.device === "directml" ? "GPU (DirectML)" : "CPU"} · ${nf(st.indexed)} kayıt indekslendi (${st.index_mb} MB RAM)` + (st.rerank ? ` · yeniden sıralayıcı aktif (${st.rerank})` : "");
+    txt = `Hazır — ${st.model} · ${st.device === "directml" ? "GPU (DirectML)" : "CPU"} · ${nf(st.indexed)} kayıt indekslendi (${st.index_mb} MB RAM)` + (st.rerank ? ` · yeniden sıralayıcı aktif (${st.rerank})` : "") + (st.tier_reason ? ` · otomatik: ${st.tier_reason}` : "") + (st.gpu ? ` · GPU: ${st.gpu}` : "");
   } else if (st.phase === "error") { txt = "Hata: " + (st.error || ""); }
   el.textContent = txt;
   el.className = "muted small" + (st.phase === "error" ? " err" : "");
@@ -473,7 +473,7 @@ async function loadSettings() {
     $("set-autostart").checked = s.autostart;
     $("set-autoscan").checked = s.auto_scan;
     $("set-sem").checked = !!s.semantic_enabled;
-    $("set-sem-tier").value = s.semantic_tier || "quality";
+    $("set-sem-tier").value = s.semantic_tier || "auto";
     $("set-sem-device").value = s.semantic_device || "auto";
     $("set-sem-rerank").checked = s.semantic_rerank !== false;
     blockKw = Array.isArray(s.block_keywords) ? s.block_keywords.slice() : [];

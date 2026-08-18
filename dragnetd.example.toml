@@ -37,8 +37,8 @@ fetch_peer_concurrency = 12
 # çevrimdışıdır; /search varsayılan olarak hibrit (FTS + semantik) çalışır.
 # `mode=fts|semantic|hybrid` sorgu parametresiyle istemci modu zorlayabilir.
 semantic_enabled = false
-# Kademe: "light" (potion, statik, çok hızlı) | "balanced" (MiniLM int8) | "quality" (EmbeddingGemma Q4)
-semantic_tier = "quality"
+# Kademe: "auto" (donanıma göre) | "light" (potion, statik) | "balanced" (MiniLM int8) | "quality" (EmbeddingGemma Q4)
+semantic_tier = "auto"
 # Cihaz: "auto" (Windows'ta DirectML varsa GPU) | "gpu" | "cpu"
 semantic_device = "auto"
 # Model dizini — KISA/düz bir yol tut (ORT çok uzun yolları reddedebiliyor).

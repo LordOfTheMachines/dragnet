@@ -14,6 +14,7 @@
 //! `dragnet-core`'a bağımlıdır. Karar gerekçeleri: `docs/ARCHITECTURE.md` §7.3.
 
 pub mod embedder;
+pub mod hw;
 pub mod hybrid;
 pub mod index;
 pub mod models;

@@ -35,6 +35,11 @@ pub struct UiState {
     pub done: u64,
     pub total: u64,
     pub error: String,
+    /// GPU belleği notu (DXGI): "RTX 4070 · kullanım 165 MB / bütçe 6.9 GB" ya da son
+    /// kapatmada "VRAM serbest bırakıldı: 180 → 15 MB".
+    pub gpu: String,
+    /// Otomatik kademe seçildiyse gerekçe ("GPU: … → yüksek kalite").
+    pub tier_reason: String,
     /// Yüklenen yapılandırmanın anahtarı (kademe+cihaz+dizin) — değişim tespiti.
     #[serde(skip)]
     pub key: String,
@@ -48,6 +53,8 @@ impl Default for UiState {
             done: 0,
             total: 0,
             error: String::new(),
+            gpu: String::new(),
+            tier_reason: String::new(),
             key: String::new(),
         }
     }
@@ -110,12 +117,32 @@ impl SemanticManager {
         }
         // Farklı yapılandırma → eskisini sök, yenisini kur.
         self.teardown().await;
-        let cfg = settings.semantic_config();
+        let mut cfg = settings.semantic_config();
         let want_rerank = settings.semantic_rerank;
+        // "auto" kademe: donanıma göre çöz (bkz. dragnet_semantic::hw).
+        let mut tier_reason = String::new();
+        if settings.semantic_tier.trim().eq_ignore_ascii_case("auto") {
+            let (t, why) = dragnet_semantic::hw::recommend_tier();
+            cfg.tier = t;
+            tier_reason = why;
+        }
+        let gpu_before = dragnet_semantic::hw::gpu_memory();
         self.set_ui(|u| {
             *u = UiState {
                 phase: Phase::Downloading,
                 key: key.clone(),
+                tier_reason: tier_reason.clone(),
+                gpu: gpu_before
+                    .as_ref()
+                    .map(|g| {
+                        format!(
+                            "{} · kullanım {} MB / bütçe {} MB",
+                            g.adapter,
+                            g.current_usage / 1_048_576,
+                            g.budget / 1_048_576
+                        )
+                    })
+                    .unwrap_or_default(),
                 ..Default::default()
             };
         });
@@ -228,11 +255,35 @@ impl SemanticManager {
 
     /// Her şeyi söker (indeksleyiciyi durdur, yuvayı boşalt → RAM/VRAM iade).
     pub async fn teardown(&self) {
+        let before = dragnet_semantic::hw::gpu_memory().map(|g| g.current_usage / 1_048_576);
         if let Some(h) = self.indexer.lock().await.take() {
             h.abort();
         }
+        let had = self.slot.read().await.is_some();
         *self.slot.write().await = None;
-        self.set_ui(|u| *u = UiState::default());
+        // Oturum düşürüldükten sonra VRAM'in geri alındığını göster (kısa gecikme: DirectML
+        // tahsisleri asenkron serbest kalır).
+        let mut note = String::new();
+        if had {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            if let (Some(b), Some(a)) = (
+                before,
+                dragnet_semantic::hw::gpu_memory().map(|g| g.current_usage / 1_048_576),
+            ) {
+                note = format!("VRAM serbest bırakıldı: {b} → {a} MB");
+                info!(
+                    before_mb = b,
+                    after_mb = a,
+                    "semantik kapatıldı; GPU belleği serbest bırakıldı"
+                );
+            }
+        }
+        self.set_ui(|u| {
+            *u = UiState {
+                gpu: note,
+                ..UiState::default()
+            };
+        });
     }
 
     /// UI için birleşik durum JSON'u.
@@ -253,6 +304,8 @@ impl SemanticManager {
             "dim": st.as_ref().map(|s| s.dim),
             "indexed": st.as_ref().map(|s| s.indexed).unwrap_or(0),
             "index_mb": st.as_ref().map(|s| s.index_bytes / 1_048_576).unwrap_or(0),
+            "gpu": ui.gpu,
+            "tier_reason": ui.tier_reason,
         })
     }
 }

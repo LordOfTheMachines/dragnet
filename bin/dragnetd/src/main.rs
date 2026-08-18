@@ -51,8 +51,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // indeksleyici. Yuva API ile paylaşılır; başarısızlıkta arama saf FTS olarak sürer.
     let semantic_slot = dragnet_api::search::empty_slot();
     if cfg.semantic_enabled {
+        let tier = if cfg.semantic_tier.trim().eq_ignore_ascii_case("auto") {
+            let (t, why) = dragnet_semantic::hw::recommend_tier();
+            info!(tier = t.as_str(), %why, "semantik kademe otomatik seçildi");
+            t
+        } else {
+            dragnet_semantic::Tier::parse(&cfg.semantic_tier)
+        };
         let scfg = dragnet_semantic::SemanticConfig {
-            tier: dragnet_semantic::Tier::parse(&cfg.semantic_tier),
+            tier,
             device: dragnet_semantic::Device::parse(&cfg.semantic_device),
             models_dir: std::path::PathBuf::from(&cfg.semantic_models_dir),
         };

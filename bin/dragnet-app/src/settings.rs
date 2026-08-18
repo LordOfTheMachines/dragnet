@@ -29,7 +29,7 @@ pub struct Settings {
     /// arka planda kurulur; kapalıyken davranış birebir eski FTS.
     #[serde(default)]
     pub semantic_enabled: bool,
-    /// Kademe: `light` | `balanced` | `quality` (bkz. ARCHITECTURE §7.3).
+    /// Kademe: `auto` (donanıma göre) | `light` | `balanced` | `quality` (bkz. ARCHITECTURE §7.3).
     #[serde(default = "default_tier")]
     pub semantic_tier: String,
     /// Cihaz: `auto` | `gpu` | `cpu`.
@@ -45,7 +45,7 @@ pub struct Settings {
 }
 
 fn default_tier() -> String {
-    "quality".to_string()
+    "auto".to_string()
 }
 fn default_device() -> String {
     "auto".to_string()
