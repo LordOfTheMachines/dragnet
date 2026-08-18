@@ -38,6 +38,8 @@ pub struct Config {
     pub semantic_device: String,
     /// Model dizini (kısa/düz bir yol; varsayılan `models`).
     pub semantic_models_dir: String,
+    /// Cross-encoder yeniden sıralayıcı (bge-reranker-v2-m3, ~570 MB, CPU).
+    pub semantic_rerank: bool,
 }
 
 impl Default for Config {
@@ -55,6 +57,7 @@ impl Default for Config {
             semantic_tier: "quality".to_string(),
             semantic_device: "auto".to_string(),
             semantic_models_dir: "models".to_string(),
+            semantic_rerank: true,
         }
     }
 }

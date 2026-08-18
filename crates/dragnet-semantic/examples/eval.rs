@@ -62,6 +62,24 @@ const QUERIES: &[(&str, &[&str])] = &[
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let use_plan = a.iter().any(|x| x == "--plan");
+    let use_rerank = a.iter().any(|x| x == "--rerank");
+    let rr_dev = if a.iter().any(|x| x == "--cpu") {
+        Device::Cpu
+    } else {
+        Device::Auto
+    };
+    let reranker = if use_rerank {
+        Some(
+            dragnet_semantic::rerank::Reranker::load(
+                std::path::Path::new("C:/dgcache/dragnet-models"),
+                rr_dev,
+            )
+            .expect("reranker"),
+        )
+    } else {
+        None
+    };
+    let mut rr_ms = 0u128;
     let cfg = SemanticConfig {
         tier: Tier::parse(&a[1]),
         device: Device::Auto,
@@ -99,7 +117,7 @@ fn main() {
         t.elapsed(),
         sem.device()
     );
-    let (mut score, mut n, mut noise_ok) = (0.0f64, 0usize, true);
+    let (mut score, mut n, mut noise_ok, mut mrr) = (0.0f64, 0usize, true, 0.0f64);
     for (q, expected) in QUERIES {
         let (qtext, cat) = if use_plan {
             let p = query::understand(q);
@@ -131,6 +149,29 @@ fn main() {
                 cy.cmp(&cx).then(y.score.total_cmp(&x.score))
             });
         }
+        if let Some(rr) = &reranker {
+            // Üretimdeki gibi: sorgu + adayın temiz doküman metni (kategori dahil).
+            let docs: Vec<String> = hits
+                .iter()
+                .map(|h| items[idx(h.infohash)].1.clone())
+                .collect();
+            let t = std::time::Instant::now();
+            let scores = rr.score(&qtext, &docs).unwrap();
+            rr_ms += t.elapsed().as_millis();
+            let mut order: Vec<usize> = (0..hits.len()).collect();
+            order.sort_by(|&x, &y| scores[y].total_cmp(&scores[x]));
+            if std::env::var("FUSE").is_ok() {
+                // RRF harmanı: rerank sırası (ağırlık 1.0) + orijinal sıra (ağırlık w).
+                let w: f32 = std::env::var("FUSE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.5);
+                let orig: Vec<usize> = (0..hits.len()).collect();
+                let fused = dragnet_core::rank::rrf(&[order.clone(), orig], &[1.0, w], 60.0);
+                order = fused.into_iter().map(|(i, _)| i).collect();
+            }
+            hits = order.into_iter().map(|i| hits[i]).collect();
+        }
         let top: Vec<&str> = hits
             .iter()
             .take(5)
@@ -146,13 +187,20 @@ fn main() {
             continue;
         }
         let hit = top.iter().any(|t| expected.iter().any(|e| t.contains(e)));
+        let rank = hits
+            .iter()
+            .position(|h| expected.iter().any(|e| names[idx(h.infohash)].contains(e)));
         n += 1;
         if hit {
             score += 1.0;
         }
+        if let Some(r) = rank {
+            mrr += 1.0 / (r as f64 + 1.0);
+        }
         println!(
-            "{:>5}  {q}  → {}",
+            "{:>5} r={:<3} {q}  → {}",
             if hit { "OK" } else { "MISS" },
+            rank.map(|r| (r + 1).to_string()).unwrap_or("-".into()),
             top.first()
                 .map(|s| s.chars().take(60).collect::<String>())
                 .as_deref()
@@ -160,10 +208,10 @@ fn main() {
         );
     }
     println!(
-        "\n=== tier={} plan={use_plan} hit@5={:.0}% ({}/{n}) anlamsız-boş={noise_ok}",
-        a[1],
-        100.0 * score / n as f64,
-        score as usize
+        "\n=== tier={} plan={use_plan} rerank={} hit@5={:.0}% ({}/{n}) MRR={:.2} anlamsız-boş={noise_ok} rerank_ort={} ms/sorgu",
+        a[1], reranker.as_ref().map(|r| r.device()).unwrap_or("-"),
+        100.0 * score / n as f64, score as usize, mrr / n as f64,
+        if use_rerank { rr_ms / QUERIES.len() as u128 } else { 0 }
     );
 }
 fn idx(ih: InfoHash) -> usize {

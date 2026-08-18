@@ -21,6 +21,7 @@ pub mod onnx;
 pub mod potion;
 pub mod quant;
 pub mod query;
+pub mod rerank;
 pub mod text;
 
 use std::path::PathBuf;
@@ -64,6 +65,8 @@ pub struct SemanticStatus {
     pub model_id: String,
     pub tier: String,
     pub device: String,
+    /// Yeniden sıralayıcı: `None` = kapalı; `Some("cpu"|"directml")`.
+    pub rerank_device: Option<String>,
     pub dim: usize,
     pub indexed: usize,
     pub index_bytes: usize,
@@ -74,6 +77,8 @@ pub struct SemanticStatus {
 pub struct Semantic {
     embedder: Box<dyn Embedder>,
     index: RwLock<VecIndex>,
+    /// Opsiyonel cross-encoder yeniden sıralayıcı (bkz. [`rerank`]).
+    reranker: RwLock<Option<std::sync::Arc<rerank::Reranker>>>,
     tier: Tier,
     min_score: f32,
     /// Anlamsız sorguların bu indekste aldığı en yüksek benzerlik (gürültü tabanı).
@@ -83,6 +88,8 @@ pub struct Semantic {
     /// Son kalibrasyondan beri eklenen satır (yeniden kalibrasyon tetikleyicisi).
     added_since_calib: std::sync::atomic::AtomicUsize,
 }
+/// Yeniden sıralanacak aday sayısı (ilk N; sonrası harman sırasında kalır).
+pub const RERANK_TOP_N: usize = 30;
 
 /// Gürültü tabanı ölçümünde kullanılan anlamsız sorgular.
 const NOISE_PROBES: [&str; 4] = [
@@ -125,6 +132,7 @@ impl Semantic {
             min_score,
             noise_floor: RwLock::new(min_score),
             added_since_calib: std::sync::atomic::AtomicUsize::new(0),
+            reranker: RwLock::new(None),
         }
     }
 
@@ -222,12 +230,24 @@ impl Semantic {
         Ok(None)
     }
 
+    /// Yeniden sıralayıcıyı takar/söker.
+    pub fn set_reranker(&self, r: Option<std::sync::Arc<rerank::Reranker>>) {
+        *self.reranker.write().unwrap_or_else(|p| p.into_inner()) = r;
+    }
+    pub fn reranker(&self) -> Option<std::sync::Arc<rerank::Reranker>> {
+        self.reranker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     pub fn status(&self) -> SemanticStatus {
         let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
         SemanticStatus {
             model_id: self.model_id().to_string(),
             tier: self.tier.as_str().to_string(),
             device: self.device().to_string(),
+            rerank_device: self.reranker().map(|r| r.device().to_string()),
             dim: self.dim(),
             indexed: idx.len(),
             index_bytes: idx.memory_bytes(),

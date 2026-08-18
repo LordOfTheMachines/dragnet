@@ -137,9 +137,57 @@ pub async fn search(
         SearchMode::Semantic => ("", SearchMode::Semantic),
         _ => (fts_text, SearchMode::Hybrid),
     };
-    let rows = store
-        .search_hybrid_boosted(fts_query, &ids, limit, offset, sort, desc, filter, &boost)
-        .await?;
+    // Yeniden sıralayıcı (cross-encoder) varsa ve alaka sırasındaysak: harmanın ilk
+    // RERANK_TOP_N adayı sorguyla birlikte puanlanıp yeniden sıralanır; sayfalama bunun
+    // üstünde yapılır (ilk N tutarlı kalsın diye her sayfada aynı pencere yeniden sıralanır).
+    let reranker = if matches!(sort, SortKey::Relevance) {
+        sem.reranker()
+    } else {
+        None
+    };
+    let rows = if let Some(rr) = reranker {
+        let n = dragnet_semantic::RERANK_TOP_N as i64;
+        let want = (offset + limit).max(n);
+        let mut all = store
+            .search_hybrid_boosted(fts_query, &ids, want, 0, sort, desc, filter, &boost)
+            .await?;
+        let head_len = all.len().min(n as usize);
+        if head_len > 1 {
+            let head: Vec<_> = all.drain(..head_len).collect();
+            let docs: Vec<String> = head
+                .iter()
+                .map(|s| dragnet_semantic::text::doc_text(&s.name, &s.category))
+                .collect();
+            let qtext = plan.semantic_text.clone();
+            let rr2 = Arc::clone(&rr);
+            let scores = tokio::task::spawn_blocking(move || rr2.score(&qtext, &docs))
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+            let head = match scores {
+                Some(sc) if sc.len() == head.len() => {
+                    let mut order: Vec<usize> = (0..head.len()).collect();
+                    order.sort_by(|&x, &y| sc[y].total_cmp(&sc[x]));
+                    let mut opt: Vec<Option<_>> = head.into_iter().map(Some).collect();
+                    order
+                        .into_iter()
+                        .filter_map(|i| opt[i].take())
+                        .collect::<Vec<_>>()
+                }
+                _ => head,
+            };
+            let mut merged = head;
+            merged.extend(all);
+            all = merged;
+        }
+        let start = (offset.max(0) as usize).min(all.len());
+        let end = (start + limit.max(0) as usize).min(all.len());
+        all[start..end].to_vec()
+    } else {
+        store
+            .search_hybrid_boosted(fts_query, &ids, limit, offset, sort, desc, filter, &boost)
+            .await?
+    };
     Ok(SearchOutcome { rows, used })
 }
 

@@ -116,7 +116,7 @@ function renderSemantic(st) {
     txt = `Model indiriliyor… ${st.file || ""} ${st.total > 0 ? pct + "%" : humanSize(st.done)}`;
   } else if (st.phase === "loading") { txt = "Model yükleniyor…"; }
   else if (st.phase === "ready") {
-    txt = `Hazır — ${st.model} · ${st.device === "directml" ? "GPU (DirectML)" : "CPU"} · ${nf(st.indexed)} kayıt indekslendi (${st.index_mb} MB RAM)`;
+    txt = `Hazır — ${st.model} · ${st.device === "directml" ? "GPU (DirectML)" : "CPU"} · ${nf(st.indexed)} kayıt indekslendi (${st.index_mb} MB RAM)` + (st.rerank ? ` · yeniden sıralayıcı aktif (${st.rerank})` : "");
   } else if (st.phase === "error") { txt = "Hata: " + (st.error || ""); }
   el.textContent = txt;
   el.className = "muted small" + (st.phase === "error" ? " err" : "");
@@ -431,6 +431,7 @@ async function loadSettings() {
     $("set-sem").checked = !!s.semantic_enabled;
     $("set-sem-tier").value = s.semantic_tier || "quality";
     $("set-sem-device").value = s.semantic_device || "auto";
+    $("set-sem-rerank").checked = s.semantic_rerank !== false;
     blockKw = Array.isArray(s.block_keywords) ? s.block_keywords.slice() : [];
     renderBlockChips();
     loadSettings._cur = s;
@@ -448,6 +449,7 @@ $("btn-save").addEventListener("click", async () => {
   s.semantic_enabled = $("set-sem").checked;
   s.semantic_tier = $("set-sem-tier").value;
   s.semantic_device = $("set-sem-device").value;
+  s.semantic_rerank = $("set-sem-rerank").checked;
   try {
     await invoke("set_settings", { settings: s });
     $("save-msg").textContent = "Kaydedildi ✓"; setTimeout(() => ($("save-msg").textContent = ""), 2000);

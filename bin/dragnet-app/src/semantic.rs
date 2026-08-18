@@ -63,10 +63,11 @@ pub struct SemanticManager {
 
 fn cfg_key(s: &Settings) -> String {
     format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{}",
         s.semantic_tier.trim().to_lowercase(),
         s.semantic_device.trim().to_lowercase(),
-        s.models_dir_abs().display()
+        s.models_dir_abs().display(),
+        s.semantic_rerank
     )
 }
 
@@ -110,6 +111,7 @@ impl SemanticManager {
         // Farklı yapılandırma → eskisini sök, yenisini kur.
         self.teardown().await;
         let cfg = settings.semantic_config();
+        let want_rerank = settings.semantic_rerank;
         self.set_ui(|u| {
             *u = UiState {
                 phase: Phase::Downloading,
@@ -158,6 +160,48 @@ impl SemanticManager {
                     return;
                 }
             };
+            // 2b) Yeniden sıralayıcı (opsiyonel): indir (ilerlemeli) + yükle (CPU; int8 model
+            // DirectML'de daha yavaş ölçüldü). Başarısızlık semantiği düşürmez, yalnız loglanır.
+            if want_rerank {
+                me.set_ui(|u| {
+                    u.phase = Phase::Downloading;
+                    u.file.clear();
+                });
+                let ui = Arc::clone(&me.ui);
+                let dir = cfg.models_dir.clone();
+                let dl = tokio::task::spawn_blocking(move || {
+                    dragnet_semantic::rerank::Reranker::ensure_model(&dir, &|file, done, total| {
+                        if let Ok(mut g) = ui.lock() {
+                            g.file = format!("reranker/{file}");
+                            g.done = done;
+                            g.total = total;
+                        }
+                    })
+                })
+                .await;
+                match flatten(dl) {
+                    Ok(()) => {
+                        me.set_ui(|u| u.phase = Phase::Loading);
+                        let dir = cfg.models_dir.clone();
+                        let loaded = tokio::task::spawn_blocking(move || {
+                            dragnet_semantic::rerank::Reranker::load(
+                                &dir,
+                                dragnet_semantic::Device::Cpu,
+                            )
+                        })
+                        .await;
+                        match flatten(loaded) {
+                            Ok(r) => sem.set_reranker(Some(Arc::new(r))),
+                            Err(e) => {
+                                error!(error = %e, "reranker yüklenemedi (semantik reranker'sız sürüyor)")
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "reranker indirilemedi (semantik reranker'sız sürüyor)")
+                    }
+                }
+            }
             // 3) Kalıcı indeksi RAM'e al, yuvaya tak, indeksleyiciyi başlat.
             if let Err(e) = semantic_indexer::load_index(&store, &sem).await {
                 error!(error = %e, "semantik indeks yüklenemedi");
@@ -205,6 +249,7 @@ impl SemanticManager {
             "model": st.as_ref().map(|s| s.model_id.clone()),
             "tier": st.as_ref().map(|s| s.tier.clone()),
             "device": st.as_ref().map(|s| s.device.clone()),
+            "rerank": st.as_ref().and_then(|s| s.rerank_device.clone()),
             "dim": st.as_ref().map(|s| s.dim),
             "indexed": st.as_ref().map(|s| s.indexed).unwrap_or(0),
             "index_mb": st.as_ref().map(|s| s.index_bytes / 1_048_576).unwrap_or(0),
