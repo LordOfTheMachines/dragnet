@@ -8,12 +8,14 @@ use dragnet_semantic::{hw, Device, Semantic, SemanticConfig, Tier};
 fn mem(tag: &str) -> u64 {
     match hw::gpu_memory() {
         Some(g) => {
+            let b = g.breakdown.unwrap_or_default();
             println!(
-                "{tag:<22} kullanım {:>5} MB · bütçe {:>5} MB · toplam {:>5} MB · {}",
+                "{tag:<22} bu süreç (DXGI) {:>5} MB | PDH: süreç {:>5} · uygulama ağacı {:>5} · cihaz geneli {:>5} / {:>5} MB",
                 g.current_usage / 1_048_576,
-                g.budget / 1_048_576,
+                b.own / 1_048_576,
+                b.app / 1_048_576,
+                b.device / 1_048_576,
                 g.dedicated_total / 1_048_576,
-                g.adapter
             );
             g.current_usage / 1_048_576
         }
@@ -32,8 +34,31 @@ fn watch(tag: &str, secs: u64) {
     }
 }
 
+/// Gerçek indeksleyici gibi 256'lık partiler hâlinde embed eder (arena büyümesini görmek için).
+fn load_batches(sem: &Semantic, batches: usize) {
+    for b in 0..batches {
+        let docs: Vec<(dragnet_core::InfoHash, String)> = (0..256)
+            .map(|i| {
+                let mut h = [0u8; 20];
+                h[0] = b as u8;
+                h[1] = i as u8;
+                (
+                    dragnet_core::InfoHash::from_bytes(h),
+                    format!("Some Movie Title {b}x{i} 1080p BluRay x264 group"),
+                )
+            })
+            .collect();
+        let _ = sem.embed_and_add(&docs);
+    }
+}
+
 fn main() {
     let tier = Tier::parse(&std::env::args().nth(1).unwrap_or_default());
+    // 2. argüman: indeksleyici benzeri yük (256'lık parti sayısı; ORT/DirectML arena testi).
+    let batches: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let cfg = SemanticConfig {
         tier,
         device: Device::Auto,
@@ -49,6 +74,11 @@ fn main() {
         "warmup query text".into(),
     )]);
     mem("ilk çıkarım sonrası");
+    if batches > 0 {
+        println!("-- {batches} parti × 256 ad embed ediliyor (indeksleyici benzeri yük)");
+        load_batches(&sem, batches);
+        mem("yük sonrası");
+    }
     println!("-- YÜKLÜ ({}) — 8 sn izleniyor", sem.device());
     watch("yüklü", 8);
     drop(sem);

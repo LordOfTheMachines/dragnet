@@ -16,6 +16,10 @@ pub struct GpuMemory {
     pub current_usage: u64,
     /// Bağdaştırıcının toplam ayrılmış video belleği (VRAM).
     pub dedicated_total: u64,
+    /// Cihaz geneli / uygulama ağacı dökümü (PDH sayaçları; okunamazsa `None`).
+    /// DXGI süreç-yerel olduğu için "toplam ne kadar dolu, ne kadarı bizim" ayrımı
+    /// buradan gelir (bkz. `crate::pdh`).
+    pub breakdown: Option<crate::pdh::GpuBreakdown>,
 }
 
 /// İlk (birincil) donanım GPU'sunun bellek bilgisi. Yazılım/temel bağdaştırıcılar atlanır.
@@ -51,11 +55,16 @@ pub fn gpu_memory() -> Option<GpuMemory> {
             {
                 continue;
             }
+            // Cihaz geneli / uygulama ağacı dökümü: sayaç örnekleri bağdaştırıcının
+            // LUID'i ile adlandırılır, bu yüzden eşleştirme LUID üzerinden yapılır.
+            let prefix =
+                crate::pdh::luid_prefix(desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart);
             return Some(GpuMemory {
                 adapter: name,
                 budget: info.Budget,
                 current_usage: info.CurrentUsage,
                 dedicated_total: desc.DedicatedVideoMemory as u64,
+                breakdown: crate::pdh::breakdown(&prefix),
             });
         }
         None

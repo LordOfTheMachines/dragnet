@@ -173,6 +173,32 @@ function setMeter(id, pct, val, title, cls, mark) {
   }
 }
 
+// VRAM çubuğu: yığılmış (Dragnet payı + diğer uygulamalar) toplam VRAM üzerinden.
+// DXGI süreç-yereldir; cihaz geneli ve uygulama ağacı (arayüz/WebView2 dahil) PDH
+// sayaçlarından gelir — Görev Yöneticisi ile aynı kaynak. Semantik kapalıyken de
+// gösterilir: kullanıcı serbest bırakmayı canlı izleyebilsin.
+function renderVram(st) {
+  const v = st.vram, row = $("sm-vram"), leg = $("sm-vram-legend");
+  const base = v ? (v.total_mb || v.budget_mb || 0) : 0;
+  if (!v || base <= 0) { row.classList.add("hidden"); leg.classList.add("hidden"); return; }
+  row.classList.remove("hidden"); leg.classList.remove("hidden");
+  const app = v.app_mb || 0, others = v.others_mb || 0, dev = v.device_mb || app;
+  const w = (mb) => (mb > 0 ? Math.max(1.2, Math.min(100, 100 * mb / base)) : 0) + "%";
+  $("sv-app").style.width = w(app);
+  $("sv-other").style.width = w(others);
+  $("sv-val").textContent = `${mbTxt(dev)} / ${mbTxt(base)}`;
+  const mark = $("sv-mark"), mpct = 100 * (v.budget_mb || 0) / base;
+  const showMark = mpct > 0 && mpct < 100;
+  mark.classList.toggle("hidden", !showMark);
+  if (showMark) mark.style.left = mpct + "%";
+  row.title = `${v.adapter} · bütçemiz ${mbTxt(v.budget_mb)} (çubuktaki işaret) · semantik motor oturum tepesi ${mbTxt(v.peak_mb)}` +
+    (v.has_pdh ? "" : " · cihaz geneli okunamadı (PDH sayaçları yok)");
+  const parts = [`<span><i class="app"></i>Dragnet <b>${mbTxt(app)}</b>` +
+    (v.ui_mb > 0 ? ` <span class="muted">(semantik ${mbTxt(v.usage_mb)} + arayüz ${mbTxt(v.ui_mb)})</span>` : "") + `</span>`];
+  if (v.has_pdh) parts.push(`<span><i class="other"></i>Diğer uygulamalar <b>${mbTxt(others)}</b></span>`);
+  leg.innerHTML = parts.join("");
+}
+
 function renderSemantic(st, fetched) {
   if (!st) return;
   semReady = st.phase === "ready";
@@ -208,20 +234,10 @@ function renderSemantic(st, fetched) {
       done ? "good" : "");
   } else { $("sm-idx").classList.add("hidden"); }
 
-  // VRAM: her yoklamada canlı okunur (DirectML ilk çıkarımda tahsis eder → tek seferlik
-  // ölçüm 0 MB gösteriyordu). Model henüz yokken (indirme) ya da CPU'da çalışırken anlamsız.
-  const v = st.vram;
-  if (v && (st.phase === "loading" || (st.phase === "ready" && st.device !== "cpu"))) {
-    const base = v.total_mb || v.budget_mb || 0;
-    const pct = base > 0 ? 100 * v.usage_mb / base : 0;
-    const share = v.budget_mb > 0 ? v.usage_mb / v.budget_mb : 0;
-    setMeter("sm-vram", pct, `${mbTxt(v.usage_mb)} / ${mbTxt(base)}`,
-      `${v.adapter} · bütçe ${mbTxt(v.budget_mb)} · oturum tepesi ${mbTxt(v.peak_mb)} · işaret: bütçe sınırı`,
-      share > 0.9 ? "hot" : share > 0.7 ? "warn" : "",
-      base > 0 ? Math.round(100 * v.budget_mb / base) : null);
-  } else { $("sm-vram").classList.add("hidden"); }
+  renderVram(st);
 
   // Donanım + otomatik kademe gerekçesi (kapalıyken son VRAM notu).
+  const v = st.vram;
   const hw = [];
   if (v) hw.push(`${v.adapter} · ${mbTxt(v.total_mb)} VRAM`);
   if (st.cores) hw.push(`${st.cores} çekirdek`);
