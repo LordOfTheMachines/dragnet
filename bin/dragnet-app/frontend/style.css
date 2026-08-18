@@ -164,6 +164,28 @@ input[type=text]:focus, input[type=number]:focus { outline: none; border-color: 
 .progress .bar { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 #sem-badge { margin-right: 10px; vertical-align: middle; }
 .err { color: #ff7b7b; }
+.pill.bad { background: rgba(242,84,91,.14); color: #ff9ea2; } .pill.bad .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.pill.busy { background: rgba(79,140,247,.14); color: #a8c6ff; } .pill.busy .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+/* Durum kartı: rozetler + ölçüm çubukları (Faz F0) */
+.statcard { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.badges:not(:empty) { margin-bottom: 11px; }
+.badge { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2); border: 1px solid var(--border2); color: var(--muted); padding: 3px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+.badge b { color: var(--text); font-weight: 600; }
+.badge.accent { border-color: rgba(79,140,247,.45); background: rgba(79,140,247,.10); }
+.badge.good { border-color: rgba(41,209,127,.4); background: rgba(41,209,127,.10); }
+.badge.dim { opacity: .6; }
+
+.meters { display: flex; flex-direction: column; gap: 8px; }
+#sem-hw:not(:empty) { margin-top: 11px; } #sem-err:not(:empty) { margin-top: 8px; }
+.meter { display: grid; grid-template-columns: 62px 1fr auto; align-items: center; gap: 10px; font-size: 12px; }
+.meter .mlabel { color: var(--muted); }
+.meter .mtrack { position: relative; height: 9px; border-radius: 999px; background: rgba(147,160,179,.14); overflow: hidden; }
+.meter .mfill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 999px; background: var(--accent); transition: width .3s; }
+.meter .mfill.good { background: var(--green); } .meter .mfill.warn { background: var(--yellow); } .meter .mfill.hot { background: var(--red); }
+.meter .mmark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--faint); opacity: .8; }
+.meter .mval { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Grafik: eksen, işaretler, hover ipucu (Faz E) */
 .chart .axis { stroke: var(--border); stroke-width: 1; }

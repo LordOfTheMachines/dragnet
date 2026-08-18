@@ -3,6 +3,7 @@
 //! indir, yükle, kalıcı indeksi RAM'e al, arka plan indeksleyiciyi başlat; durumu UI'ya
 //! raporla. Aç/kapa **yeniden başlatma gerektirmez** — `SemanticSlot` anında güncellenir.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::Serialize;
@@ -35,9 +36,9 @@ pub struct UiState {
     pub done: u64,
     pub total: u64,
     pub error: String,
-    /// GPU belleği notu (DXGI): "RTX 4070 · kullanım 165 MB / bütçe 6.9 GB" ya da son
-    /// kapatmada "VRAM serbest bırakıldı: 180 → 15 MB".
-    pub gpu: String,
+    /// Yalnız kapatma notu: "VRAM serbest bırakıldı: 180 → 15 MB". Canlı VRAM ölçümü
+    /// burada tutulmaz — `status_json()` her yoklamada DXGI'yi yeniden okur (bkz. F0).
+    pub gpu_note: String,
     /// Otomatik kademe seçildiyse gerekçe ("GPU: … → yüksek kalite").
     pub tier_reason: String,
     /// Yüklenen yapılandırmanın anahtarı (kademe+cihaz+dizin) — değişim tespiti.
@@ -53,7 +54,7 @@ impl Default for UiState {
             done: 0,
             total: 0,
             error: String::new(),
-            gpu: String::new(),
+            gpu_note: String::new(),
             tier_reason: String::new(),
             key: String::new(),
         }
@@ -66,6 +67,10 @@ pub struct SemanticManager {
     pub ui: Arc<StdMutex<UiState>>,
     indexer: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     worker: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Bu oturumda görülen en yüksek VRAM kullanımı (bayt). DirectML tahsisleri partiler
+    /// arasında geri verilebildiği için anlık değer dalgalanır; tepe değeri gerçek
+    /// ayak izini gösterir.
+    vram_peak: AtomicU64,
 }
 
 fn cfg_key(s: &Settings) -> String {
@@ -85,6 +90,7 @@ impl SemanticManager {
             ui: Arc::new(StdMutex::new(UiState::default())),
             indexer: tokio::sync::Mutex::new(None),
             worker: tokio::sync::Mutex::new(None),
+            vram_peak: AtomicU64::new(0),
         }
     }
 
@@ -126,23 +132,12 @@ impl SemanticManager {
             cfg.tier = t;
             tier_reason = why;
         }
-        let gpu_before = dragnet_semantic::hw::gpu_memory();
+        self.vram_peak.store(0, Ordering::Relaxed);
         self.set_ui(|u| {
             *u = UiState {
                 phase: Phase::Downloading,
                 key: key.clone(),
                 tier_reason: tier_reason.clone(),
-                gpu: gpu_before
-                    .as_ref()
-                    .map(|g| {
-                        format!(
-                            "{} · kullanım {} MB / bütçe {} MB",
-                            g.adapter,
-                            g.current_usage / 1_048_576,
-                            g.budget / 1_048_576
-                        )
-                    })
-                    .unwrap_or_default(),
                 ..Default::default()
             };
         });
@@ -266,8 +261,11 @@ impl SemanticManager {
         let mut note = String::new();
         if had {
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            // Tepe değer (oturum boyunca ölçülen) çıkış notunda "önce" olarak daha
+            // anlamlıdır: anlık okuma kapanış anında zaten düşmüş olabilir.
+            let peak = self.vram_peak.load(Ordering::Relaxed) / 1_048_576;
             if let (Some(b), Some(a)) = (
-                before,
+                before.map(|b| b.max(peak)),
                 dragnet_semantic::hw::gpu_memory().map(|g| g.current_usage / 1_048_576),
             ) {
                 note = format!("VRAM serbest bırakıldı: {b} → {a} MB");
@@ -278,19 +276,30 @@ impl SemanticManager {
                 );
             }
         }
+        self.vram_peak.store(0, Ordering::Relaxed);
         self.set_ui(|u| {
             *u = UiState {
-                gpu: note,
+                gpu_note: note,
                 ..UiState::default()
             };
         });
     }
 
-    /// UI için birleşik durum JSON'u.
+    /// UI için birleşik durum JSON'u. VRAM her çağrıda **canlı** okunur (F0): DirectML
+    /// ağırlık/tampon tahsisini ilk çıkarımda yapar, bu yüzden yükleme anındaki tek
+    /// ölçüm 0 MB gösteriyordu. Yoklama 2,5 s'de bir; DXGI sorgusu süreç-yerel ve ucuz.
     pub async fn status_json(&self) -> serde_json::Value {
         let ui = self.ui_state();
         let sem = self.slot.read().await.clone();
         let st = sem.as_ref().map(|s| s.status());
+        let mem = dragnet_semantic::hw::gpu_memory();
+        let peak = match &mem {
+            Some(g) => {
+                self.vram_peak.fetch_max(g.current_usage, Ordering::Relaxed);
+                self.vram_peak.load(Ordering::Relaxed).max(g.current_usage)
+            }
+            None => self.vram_peak.load(Ordering::Relaxed),
+        };
         serde_json::json!({
             "phase": ui.phase,
             "file": ui.file,
@@ -304,7 +313,16 @@ impl SemanticManager {
             "dim": st.as_ref().map(|s| s.dim),
             "indexed": st.as_ref().map(|s| s.indexed).unwrap_or(0),
             "index_mb": st.as_ref().map(|s| s.index_bytes / 1_048_576).unwrap_or(0),
-            "gpu": ui.gpu,
+            // Canlı VRAM (DXGI, süreç-yerel): kullanım/bütçe/toplam + oturum tepesi.
+            "vram": mem.as_ref().map(|g| serde_json::json!({
+                "adapter": g.adapter,
+                "usage_mb": g.current_usage / 1_048_576,
+                "budget_mb": g.budget / 1_048_576,
+                "total_mb": g.dedicated_total / 1_048_576,
+                "peak_mb": peak / 1_048_576,
+            })),
+            "cores": std::thread::available_parallelism().map(|p| p.get()).unwrap_or(0),
+            "gpu_note": ui.gpu_note,
             "tier_reason": ui.tier_reason,
         })
     }
