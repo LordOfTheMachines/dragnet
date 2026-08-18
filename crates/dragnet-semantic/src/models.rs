@@ -145,7 +145,9 @@ impl ModelSpec {
     }
     /// Modelin yerel dizini.
     pub fn dir(&self, models_dir: &Path) -> PathBuf {
-        models_dir.join(self.id)
+        // `id` indeks uyumluluk kimliğidir ("...:v2" şema soneki içerir); dizin adı iki nokta
+        // öncesi kısımdır (Windows'ta `:` dosya adında geçersiz).
+        models_dir.join(self.id.split(':').next().unwrap_or(self.id))
     }
     /// Tüm dosyalar (tam) indirilmiş mi?
     pub fn is_downloaded(&self, models_dir: &Path) -> bool {
@@ -161,7 +163,7 @@ impl ModelSpec {
 
 pub static POTION: ModelSpec = ModelSpec {
     tier: Tier::Light,
-    id: "potion-multilingual-128M",
+    id: "potion-multilingual-128M:v2",
     display_name: "Potion multilingual 128M (model2vec, statik)",
     engine: Engine::Model2Vec,
     dim: 256,
@@ -182,7 +184,7 @@ pub static POTION: ModelSpec = ModelSpec {
 
 pub static MINILM: ModelSpec = ModelSpec {
     tier: Tier::Balanced,
-    id: "minilm-l12-multilingual-q",
+    id: "minilm-l12-multilingual-q:v2",
     display_name: "paraphrase-multilingual-MiniLM-L12-v2 (int8 ONNX)",
     engine: Engine::Onnx,
     dim: 384,
@@ -195,14 +197,14 @@ pub static MINILM: ModelSpec = ModelSpec {
     doc_prefix: "",
     query_prefix: "",
     max_tokens: 64,
-    min_score: 0.25,
+    min_score: 0.45,
     gpu_ok: true,
     license: "Apache-2.0",
 };
 
 pub static GEMMA: ModelSpec = ModelSpec {
     tier: Tier::Quality,
-    id: "embeddinggemma-300m-q4",
+    id: "embeddinggemma-300m-q4:v2",
     display_name: "EmbeddingGemma 300M (Q4 ONNX)",
     engine: Engine::Onnx,
     dim: 768,
@@ -217,14 +219,14 @@ pub static GEMMA: ModelSpec = ModelSpec {
     doc_prefix: "title: none | text: ",
     query_prefix: "task: search result | query: ",
     max_tokens: 64,
-    min_score: 0.30,
+    min_score: 0.25,
     gpu_ok: true,
     license: "Gemma Terms of Use (kullanıcı çalışma anında indirir; koda gömülmez)",
 };
 
 pub static QWEN3: ModelSpec = ModelSpec {
     tier: Tier::Experimental,
-    id: "qwen3-embedding-0.6b-q4f16",
+    id: "qwen3-embedding-0.6b-q4f16:v2",
     display_name: "Qwen3-Embedding-0.6B (q4f16 ONNX, deneysel)",
     engine: Engine::Onnx,
     dim: 1024,
@@ -238,7 +240,7 @@ pub static QWEN3: ModelSpec = ModelSpec {
     query_prefix: "Instruct: Given a web search query, retrieve relevant passages that answer the query
 Query: ",
     max_tokens: 64,
-    min_score: 0.30,
+    min_score: 0.25,
     gpu_ok: false,
     license: "Apache-2.0",
 };

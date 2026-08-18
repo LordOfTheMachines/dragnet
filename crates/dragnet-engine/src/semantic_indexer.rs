@@ -78,7 +78,12 @@ pub fn spawn_indexer(store: Store, sem: Arc<Semantic>) -> JoinHandle<()> {
             }
             let n = items.len();
             let sem2 = Arc::clone(&sem);
-            let rows = match tokio::task::spawn_blocking(move || sem2.embed_and_add(&items)).await {
+            // Doküman metni: temiz başlık + yıl + kategori (bkz. `text::doc_text`).
+            let docs: Vec<(dragnet_core::InfoHash, String)> = items
+                .iter()
+                .map(|(ih, name, cat)| (*ih, dragnet_semantic::text::doc_text(name, cat)))
+                .collect();
+            let rows = match tokio::task::spawn_blocking(move || sem2.embed_and_add(&docs)).await {
                 Ok(Ok(rows)) => rows,
                 Ok(Err(e)) => {
                     warn!(error = %e, "embed hatası; bekleyip yeniden denenecek");

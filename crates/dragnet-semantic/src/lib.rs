@@ -20,6 +20,7 @@ pub mod models;
 pub mod onnx;
 pub mod potion;
 pub mod quant;
+pub mod query;
 pub mod text;
 
 use std::path::PathBuf;
@@ -242,6 +243,7 @@ impl Semantic {
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        // Çağıran ham ad ya da `text::doc_text` çıktısını verebilir; normalize idempotenttir.
         let texts: Vec<String> = items.iter().map(|(_, n)| text::normalize_name(n)).collect();
         let vecs = self.embedder.embed_docs(&texts)?;
         let mut idx = self.index.write().unwrap_or_else(|p| p.into_inner());
@@ -269,7 +271,12 @@ impl Semantic {
         let Some(top) = raw.first().map(|h| h.score) else {
             return Ok(raw);
         };
-        let cut = (self.noise_floor() + NOISE_MARGIN).max(top * RELATIVE_CUT);
+        // Faz E ölçümü (3.5k gerçek ad): gürültü tabanı mutlak eşik olarak KULLANILMAZ — büyük
+        // ve gürültülü korpusta (kod/CJK adlar) taban 0.42'ye çıkıp meşru TR→EN eşleşmeleri
+        // (0.30–0.40) siliyordu. Yalnız göreli kesim + modelin sanity tabanı; gürültü tabanı
+        // teşhis/rozet amaçlı ölçülmeye devam eder.
+        let _ = NOISE_MARGIN;
+        let cut = top * RELATIVE_CUT;
         Ok(raw.into_iter().filter(|h| h.score >= cut).collect())
     }
 

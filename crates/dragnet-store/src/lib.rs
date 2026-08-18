@@ -895,14 +895,14 @@ impl Store {
     // ------------------------------------------------------------------
 
     /// Bu model için henüz embed edilmemiş (metadata'sı çekilmiş) torrent'ler:
-    /// `(infohash, name)`. En yeni keşfedilenler önce (kullanıcı taze içeriği hemen bulsun).
+    /// `(infohash, name, category)`. En yeni keşfedilenler önce (kullanıcı taze içeriği hemen bulsun).
     pub async fn embed_backlog(
         &self,
         model_id: &str,
         limit: i64,
-    ) -> Result<Vec<(InfoHash, String)>, StoreError> {
+    ) -> Result<Vec<(InfoHash, String, String)>, StoreError> {
         let rows = sqlx::query(
-            "SELECT t.infohash, t.name FROM torrents t
+            "SELECT t.infohash, t.name, t.category FROM torrents t
                LEFT JOIN torrent_embeddings e ON e.infohash = t.infohash AND e.model_id = ?1
               WHERE t.metadata_status = 'fetched' AND e.infohash IS NULL
                 AND instr(t.name, char(65533)) = 0 AND length(t.name) >= 2
@@ -916,7 +916,11 @@ impl Store {
         for r in rows {
             let hex: String = r.get("infohash");
             if let Some(ih) = InfoHash::from_hex(&hex) {
-                out.push((ih, r.get::<String, _>("name")));
+                out.push((
+                    ih,
+                    r.get::<String, _>("name"),
+                    r.get::<String, _>("category"),
+                ));
             }
         }
         Ok(out)
@@ -1022,6 +1026,32 @@ impl Store {
         desc: bool,
         filter: &Filter,
     ) -> Result<Vec<TorrentSummary>, StoreError> {
+        self.search_hybrid_boosted(
+            query,
+            semantic,
+            limit,
+            offset,
+            sort,
+            desc,
+            filter,
+            &Boost::default(),
+        )
+        .await
+    }
+
+    /// [`Store::search_hybrid_paged`] + yumuşak niyet artırması (kategori/yıl).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_hybrid_boosted(
+        &self,
+        query: &str,
+        semantic: &[InfoHash],
+        limit: i64,
+        offset: i64,
+        sort: SortKey,
+        desc: bool,
+        filter: &Filter,
+        boost: &Boost,
+    ) -> Result<Vec<TorrentSummary>, StoreError> {
         // 1) FTS adayları (filtreli, popülerlik sırasıyla) — en fazla HYBRID_CANDIDATES.
         let match_query = to_fts_query(query);
         let fts_ids: Vec<InfoHash> = if match_query.is_empty() {
@@ -1048,13 +1078,13 @@ impl Store {
         if fts_ids.is_empty() && semantic.is_empty() {
             return Ok(Vec::new());
         }
-        // 2) RRF harmanı.
+        // 2) RRF harmanı (skorlar aşağıda niyet artırmasıyla yeniden sıralanabilir).
         let fused = dragnet_core::rank::rrf(
             &[fts_ids, semantic.to_vec()],
             &[],
             dragnet_core::rank::RRF_K,
         );
-        let ordered: Vec<InfoHash> = fused.into_iter().map(|(ih, _)| ih).collect();
+        let ordered: Vec<InfoHash> = fused.iter().map(|(ih, _)| *ih).collect();
 
         // 3) Aday satırlarını çek (filtre burada semantik-yalnız adaylara da uygulanır).
         let (fsql, fbinds) = filter.where_and_binds("");
@@ -1080,9 +1110,33 @@ impl Store {
             let s = row_to_summary(r)?;
             by_id.insert(s.infohash, s);
         }
-        // 4) Sırala + sayfala.
-        let mut items: Vec<TorrentSummary> =
-            ordered.iter().filter_map(|ih| by_id.remove(ih)).collect();
+        // 4) Sırala + sayfala. Alaka sırasında niyet artırması: kategori/yıl eşleşen adayların
+        // harman skoru çarpılır (yumuşak: eşleşmeyenler düşer ama kalır).
+        let boosting = matches!(sort, SortKey::Relevance)
+            && (boost.category.is_some() || boost.year_range.is_some());
+        let mut items: Vec<TorrentSummary> = if boosting {
+            let mut scored: Vec<(f32, usize, TorrentSummary)> = fused
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (ih, score))| by_id.remove(ih).map(|s| (*score, i, s)))
+                .collect();
+            for (score, _, s) in scored.iter_mut() {
+                if boost.category.as_deref() == Some(s.category.as_str()) {
+                    *score *= BOOST_CATEGORY;
+                }
+                if let Some((a, b)) = boost.year_range {
+                    if let Some(y) = dragnet_core::parse::year_of(&s.name) {
+                        if y >= a && y <= b {
+                            *score *= BOOST_YEAR;
+                        }
+                    }
+                }
+            }
+            scored.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)));
+            scored.into_iter().map(|(_, _, s)| s).collect()
+        } else {
+            ordered.iter().filter_map(|ih| by_id.remove(ih)).collect()
+        };
         if !matches!(sort, SortKey::Relevance) {
             sort_summaries(&mut items, sort, desc);
         }
@@ -1098,6 +1152,21 @@ pub const MAX_FETCH_ATTEMPTS: i64 = 3;
 pub const FETCH_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
 /// "Sıcak" sayılma penceresi (sn): bu süre içinde pasif trafikte görülen infohash öncelikli.
 pub const HOT_WINDOW_SECS: i64 = 2 * 3600;
+
+/// Hibrit sıralamada yumuşak artırma (sorgu niyeti): kategori eşleşmesi ve yıl aralığı.
+/// Filtre DEĞİL — eşleşmeyenler listede kalır, eşleşenler öne çıkar (kategori sezgiseli
+/// ve ad ayrıştırıcı kusurlu olduğundan sert filtre kayıp verir).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Boost {
+    pub category: Option<String>,
+    /// Kapsayıcı yıl aralığı (addan ayrıştırılan yıl bu aralıktaysa artır).
+    pub year_range: Option<(u16, u16)>,
+}
+
+/// Kategori eşleşmesinde harman skoru çarpanı.
+const BOOST_CATEGORY: f32 = 1.5;
+/// Yıl aralığı eşleşmesinde harman skoru çarpanı.
+const BOOST_YEAR: f32 = 1.3;
 
 /// Hibrit aramada FTS tarafından alınacak en fazla aday sayısı (semantik taraf da
 /// çağıran tarafından benzer sayıda verilir; RRF sonrası sayfalama bunun içinde gezer).
@@ -1524,7 +1593,7 @@ mod tests {
         }
         let backlog = store.embed_backlog("m1", 10).await.unwrap();
         assert_eq!(backlog.len(), 3);
-        assert!(backlog.iter().any(|(_, n)| n == "Bravo"));
+        assert!(backlog.iter().any(|(_, n, _)| n == "Bravo"));
 
         let a = InfoHash::from_hex("1111111111111111111111111111111111111111").unwrap();
         let b = InfoHash::from_hex("2222222222222222222222222222222222222222").unwrap();
