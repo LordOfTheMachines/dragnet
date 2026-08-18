@@ -35,6 +35,10 @@ pub struct Settings {
     /// Cihaz: `auto` | `gpu` | `cpu`.
     #[serde(default = "default_device")]
     pub semantic_device: String,
+    /// Cross-encoder yeniden sıralayıcı (bge-reranker-v2-m3, ~570 MB, CPU): ilk 30 adayı
+    /// sorguyla birlikte puanlar; daha isabetli, sorgu başına ~0,25 s ek gecikme.
+    #[serde(default = "default_true")]
+    pub semantic_rerank: bool,
     /// Model dizini (boş = exe yanında `models`). Kısa/düz bir yol olmalı.
     #[serde(default)]
     pub semantic_models_dir: String,
@@ -45,6 +49,9 @@ fn default_tier() -> String {
 }
 fn default_device() -> String {
     "auto".to_string()
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -63,6 +70,7 @@ impl Default for Settings {
             semantic_enabled: false,
             semantic_tier: default_tier(),
             semantic_device: default_device(),
+            semantic_rerank: true,
             semantic_models_dir: String::new(),
             seed_infohashes: vec![
                 "08ada5a7a6183aae1e09d831df6748d566095a10".to_string(), // Sintel

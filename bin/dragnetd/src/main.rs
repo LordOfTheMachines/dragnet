@@ -58,8 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let store = engine.store();
         let slot = semantic_slot.clone();
+        let cfg_rerank = cfg.semantic_rerank;
         tokio::spawn(async move {
             let scfg2 = scfg.clone();
+            let scfg3 = scfg.clone();
             let dl = tokio::task::spawn_blocking(move || {
                 dragnet_semantic::Semantic::ensure_model(&scfg2, &|f, d, t| {
                     if t > 0 && d == t {
@@ -76,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             let loaded =
-                tokio::task::spawn_blocking(move || dragnet_semantic::Semantic::load(&scfg)).await;
+                tokio::task::spawn_blocking(move || dragnet_semantic::Semantic::load(&scfg3)).await;
             let sem = match loaded
                 .map_err(|e| e.to_string())
                 .and_then(|r| r.map_err(|e| e.to_string()))
@@ -90,6 +92,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = dragnet_engine::semantic_indexer::load_index(&store, &sem).await {
                 tracing::error!(error = %e, "semantik indeks yüklenemedi");
                 return;
+            }
+            if cfg_rerank {
+                let dir = scfg.models_dir.clone();
+                let ok = tokio::task::spawn_blocking(move || {
+                    dragnet_semantic::rerank::Reranker::ensure_model(&dir, &|_, _, _| {})
+                })
+                .await;
+                if let Ok(Ok(())) = ok {
+                    let dir = scfg.models_dir.clone();
+                    if let Ok(Ok(r)) = tokio::task::spawn_blocking(move || {
+                        dragnet_semantic::rerank::Reranker::load(
+                            &dir,
+                            dragnet_semantic::Device::Cpu,
+                        )
+                    })
+                    .await
+                    {
+                        sem.set_reranker(Some(std::sync::Arc::new(r)));
+                        info!("yeniden sıralayıcı hazır");
+                    }
+                }
             }
             *slot.write().await = Some(std::sync::Arc::clone(&sem));
             info!(

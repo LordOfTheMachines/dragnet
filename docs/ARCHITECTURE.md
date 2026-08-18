@@ -286,6 +286,14 @@ başarısız çekim ~70 s sürüyordu (50 peer × 8 s, önce topla sonra dene). 
    ("hery poter"), soyut ("büyücü çocuk"), TR başlık çevirisi ("taht oyunları"), dönem.
 
 
+9. **Cross-encoder yeniden sıralayıcı** (Faz E-c): `dragnet_semantic::rerank` — bge-reranker-v2-m3
+   (XLM-R large, çok dilli, MIT; onnx-community int8 ~570 MB). Harmanın ilk 30 adayı sorguyla
+   birlikte puanlanıp yeniden sıralanır (`RERANK_TOP_N`), sayfalama üstünde. Ölçüm: hit@5
+   %74→%79, MRR 0.68→0.72; asıl kazanım niyet ayrımı ("zombi oyunları" → Plants vs Zombies 10.→1.,
+   "game of thrones" 2.→1.). int8 model DirectML'de CPU'dan yavaş (743 vs 238 ms/30 aday) →
+   reranker **CPU'da** çalışır; sorgu gecikmesi +0,25–0,7 s. Rerank+orijinal sıra RRF harmanı
+   denendi, saf rerank sırasını geçmedi. Opsiyonel (`semantic_rerank`, varsayılan açık).
+
 **Açık:** NAT'lı peer'lere uTP/holepunch (BEP-55) ile ulaşmak; sıcak kuyruk büyüdükçe
 öncelik ağırlıklarını yeniden ayarlamak; peer ipuçlarını kalıcılaştırmak.
 

@@ -256,14 +256,35 @@ pub fn download(
     progress: Progress<'_>,
 ) -> Result<(), SemanticError> {
     let dir = spec.dir(models_dir);
-    fs::create_dir_all(&dir)?;
+    download_files_to(spec.id, &dir, spec.files, progress)
+}
+
+/// Genel indirici: `models_dir/<dir_name>/` altına dosya listesini indirir (embedding
+/// modelleri ve reranker ortak kullanır).
+pub fn download_files(
+    dir_name: &str,
+    files: &[ModelFile],
+    models_dir: &Path,
+    progress: Progress<'_>,
+) -> Result<(), SemanticError> {
+    let dir = models_dir.join(dir_name.split(':').next().unwrap_or(dir_name));
+    download_files_to(dir_name, &dir, files, progress)
+}
+
+fn download_files_to(
+    model_id: &str,
+    dir: &Path,
+    files: &[ModelFile],
+    progress: Progress<'_>,
+) -> Result<(), SemanticError> {
+    fs::create_dir_all(dir)?;
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("dragnet-semantic/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(60 * 60))
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| SemanticError::Http(e.to_string()))?;
-    for f in spec.files {
+    for f in files {
         let dest = dir.join(f.name);
         let part = dir.join(format!("{}.part", f.name));
         if dest.is_file()
@@ -274,7 +295,7 @@ pub fn download(
             continue;
         }
         tracing::info!(
-            model = spec.id,
+            model = model_id,
             file = f.name,
             url = f.url,
             "model dosyası indiriliyor"

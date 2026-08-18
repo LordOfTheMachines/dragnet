@@ -43,3 +43,5 @@ semantic_tier = "quality"
 semantic_device = "auto"
 # Model dizini — KISA/düz bir yol tut (ORT çok uzun yolları reddedebiliyor).
 semantic_models_dir = "models"
+# Cross-encoder yeniden sıralayıcı (bge-reranker-v2-m3, ~570 MB, CPU): daha isabetli, +~0.25 s/sorgu
+semantic_rerank = true
