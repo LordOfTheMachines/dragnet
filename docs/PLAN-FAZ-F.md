@@ -60,6 +60,23 @@ Qwen3-Embedding kademesi elendi (torrent adlarında Gemma'nın altında, CPU'da 
 - Kabul: F1 setinde hit@5 ≥ %90, MRR ≥ 0.85 (quality); light ≥ %75.
 
 ### F4 — Sorgu-yanı iyileştirmeler (modelden bağımsız, ucuz)
+
+**F4-1 TAMAM (2026-08-18): güven kapısı + TR→EN sözlük — hit@5 %79 → %84, MRR 0.72 → 0.75.**
+- Ölçüm: "korpusta karşılığı yok" ayrımını **kosinüs yapamıyor** — klavye zırvası
+  ("asdkjhqwe zxcv") 0.421 alırken meşru TR sorgu ("taht oyunları dizisi") 0.332 alıyor;
+  gürültü tabanı 0.407 tam ortada, yani yanlış tarafta ayırıyor. Skor-şekli (top1/kuyruk)
+  da ayırmıyor (zırva 1.14–1.27 vs meşru zayıf 1.11–1.31), tokenizer parçalanması da
+  (zırva 1.62–1.86 krk/parça vs meşru TR 2.00–2.25). **Ayrımı cross-encoder yapıyor**:
+  isabetli 15 sorgu −3.72…+6.58; zırva/karşılıksız −5.43, −5.29, −5.14, −5.02, −4.97, −4.62.
+  → `WEAK_MATCH_SCORE = −4.5` (model değişirse yeniden ölçülmeli). Kapı yalnız **sözcüksel
+  kanıt yokken** uygulanır; API/uygulama `weak: true` döner, liste bilerek boş gelir;
+  arayüz "eşleşme bulunamadı" + "Yine de en yakın sonuçları göster" (`show_weak`) sunar.
+- TR→EN sözlük (`query::ALIAS_PHRASES` / `ALIAS_WORDS`): çeviri başlıklar (taht oyunları →
+  game of thrones …) + tür/tema (bilim kurgu → sci-fi science fiction, büyücü → wizard …).
+  "taht oyunları dizisi" MISS r=7 → **OK r=1**. Kelime zaten İngilizce biçimdeyse
+  dokunulmaz ("zombies" → "zombie" FTS eşleşmesini bozardı).
+- Kalan: yazım düzeltme (F4-2), dönem sorgusu (F4-3), kullanıcı geri beslemesi (F4-4).
+
 - Yazım düzeltme: FTS için trigram/edit-distance önerisi (indeksten sözlük; "hery poter" →
   "harry potter"), semantik zaten kısmen toleranslı.
 - Dönem sorgusu: yıl aralığı artırması + adında yıl olmayanlara sezon/yıl çıkarımı;

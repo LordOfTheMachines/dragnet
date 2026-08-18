@@ -97,6 +97,11 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       sorgu anlama + kategori-farkındalı embedding (hit@5 %47→%74); bge-reranker-v2-m3 yeniden sıralayıcı (%79).
 - [x] Faz E (6): DXGI VRAM ölçümü + kapatmada serbest bırakma notu, donanıma göre otomatik kademe,
       Qwen3 kademesi elendi.
+- [x] Faz F (F4-1): güven kapısı (karşılığı olmayan sorgu → boş sonuç; cross-encoder eşiği
+      −4.5, kosinüs bu ayrımı yapamıyor) + TR→EN sözlük (çeviri başlık/tür); hit@5 %79→%84,
+      MRR 0.72→0.75. Kalan F4: yazım düzeltme, dönem sorgusu, geri besleme.
+- [x] Faz F (F0-2): VRAM'de cihaz geneli / Dragnet ayrımı (PDH sayaçları; NVML yerine
+      vendor-bağımsız), yığılmış çubuk + WebView2 payı ayrımı.
 - [x] Faz F (F0): semantik durum kartı (rozet + çubuk: model/kademe, cihaz, reranker, RAM,
       indeks ilerlemesi, canlı VRAM/bütçe + donanım satırı); VRAM her yoklamada DXGI ile
       canlı okunuyor ("0 MB" hatası: ölçüm ilk çıkarımdan önce alınıyordu).
