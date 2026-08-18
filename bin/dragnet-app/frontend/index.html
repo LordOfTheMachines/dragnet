@@ -225,8 +225,13 @@
             <div class="meters">
               <div class="meter hidden" id="sm-dl"><span class="mlabel">İndirme</span><span class="mtrack"><i class="mfill"></i></span><span class="mval">–</span></div>
               <div class="meter hidden" id="sm-idx"><span class="mlabel">İndeks</span><span class="mtrack"><i class="mfill"></i></span><span class="mval">–</span></div>
-              <div class="meter hidden" id="sm-vram"><span class="mlabel">VRAM</span><span class="mtrack"><i class="mfill"></i><i class="mmark hidden"></i></span><span class="mval">–</span></div>
+              <div class="meter hidden" id="sm-vram">
+                <span class="mlabel">VRAM</span>
+                <span class="mtrack stack"><i class="seg app" id="sv-app"></i><i class="seg other" id="sv-other"></i><i class="mmark hidden" id="sv-mark"></i></span>
+                <span class="mval" id="sv-val">–</span>
+              </div>
             </div>
+            <div class="legend hidden" id="sm-vram-legend"></div>
             <div class="muted small" id="sem-hw"></div>
             <div class="small err hidden" id="sem-err"></div>
           </div>

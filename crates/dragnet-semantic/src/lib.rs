@@ -19,6 +19,7 @@ pub mod hybrid;
 pub mod index;
 pub mod models;
 pub mod onnx;
+pub mod pdh;
 pub mod potion;
 pub mod quant;
 pub mod query;

@@ -268,7 +268,13 @@ impl SemanticManager {
                 before.map(|b| b.max(peak)),
                 dragnet_semantic::hw::gpu_memory().map(|g| g.current_usage / 1_048_576),
             ) {
-                note = format!("VRAM serbest bırakıldı: {b} → {a} MB");
+                // Not ölçüme dayanır: gerçekten düşmediyse "serbest bırakıldı" denmez.
+                // (Arayüz/WebView2 kendi VRAM'ini ayrı süreçlerde tutmaya devam eder.)
+                note = if a + 16 < b {
+                    format!("Semantik motorun VRAM'i serbest bırakıldı: {b} → {a} MB")
+                } else {
+                    format!("Semantik motor kapatıldı; VRAM {b} → {a} MB (arayüzün payı sürüyor)")
+                };
                 info!(
                     before_mb = b,
                     after_mb = a,
@@ -313,14 +319,26 @@ impl SemanticManager {
             "dim": st.as_ref().map(|s| s.dim),
             "indexed": st.as_ref().map(|s| s.indexed).unwrap_or(0),
             "index_mb": st.as_ref().map(|s| s.index_bytes / 1_048_576).unwrap_or(0),
-            // Canlı VRAM (DXGI, süreç-yerel): kullanım/bütçe/toplam + oturum tepesi.
-            "vram": mem.as_ref().map(|g| serde_json::json!({
-                "adapter": g.adapter,
-                "usage_mb": g.current_usage / 1_048_576,
-                "budget_mb": g.budget / 1_048_576,
-                "total_mb": g.dedicated_total / 1_048_576,
-                "peak_mb": peak / 1_048_576,
-            })),
+            // Canlı VRAM: DXGI (bu süreç = semantik motor) + PDH dökümü (uygulama ağacı,
+            // cihaz geneli). Ayrım kullanıcı içindir: "ne kadarı bizim, ne kadarı diğerleri".
+            "vram": mem.as_ref().map(|g| {
+                let b = g.breakdown.unwrap_or_default();
+                let app = b.app.max(g.current_usage); // PDH yoksa en azından kendi payımız
+                serde_json::json!({
+                    "adapter": g.adapter,
+                    "usage_mb": g.current_usage / 1_048_576,
+                    "budget_mb": g.budget / 1_048_576,
+                    "total_mb": g.dedicated_total / 1_048_576,
+                    "peak_mb": peak / 1_048_576,
+                    // PDH: uygulamanın tamamı (arayüz/WebView2 alt süreçleri dahil),
+                    // cihazdaki toplam kullanım ve diğer uygulamaların payı.
+                    "app_mb": app / 1_048_576,
+                    "ui_mb": app.saturating_sub(g.current_usage) / 1_048_576,
+                    "device_mb": b.device / 1_048_576,
+                    "others_mb": b.device.saturating_sub(app) / 1_048_576,
+                    "has_pdh": g.breakdown.is_some(),
+                })
+            }),
             "cores": std::thread::available_parallelism().map(|p| p.get()).unwrap_or(0),
             "gpu_note": ui.gpu_note,
             "tier_reason": ui.tier_reason,
