@@ -8,10 +8,7 @@ use tokenizers::Tokenizer;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let tok = Tokenizer::from_file(&a[1]).expect("tokenizer");
-    println!(
-        "{:<26} {:>6} {:>7} {:>8}  {}",
-        "sorgu", "kelime", "parça", "krk/parça", "en kötü kelime"
-    );
+    println!("{:<26} {:>6} {:>7} {:>8}  en kötü kelime", "sorgu", "kelime", "parça", "krk/parça");
     for q in &a[2..] {
         let mut words = 0usize;
         let mut pieces = 0usize;
