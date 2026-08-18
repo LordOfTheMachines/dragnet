@@ -404,7 +404,7 @@ async function loadNetwork() {
 $("btn-net").addEventListener("click", loadNetwork);
 
 // --- Gözat & Ara (tek sıralanabilir, sayfalı tablo) ---
-const browse = { q: "", cat: "all", sort: "", desc: true, offset: 0, PAGE: 60, hasMore: true, loading: false, loaded: false, mode: "auto", lastMode: "" };
+const browse = { q: "", cat: "all", sort: "", desc: true, offset: 0, PAGE: 60, hasMore: true, loading: false, loaded: false, mode: "auto", lastMode: "", weak: false, showWeak: false };
 
 function rowHtml(r, n) {
   return `<tr>
@@ -435,9 +435,12 @@ async function loadMore() {
       query: browse.q, limit: browse.PAGE, offset: browse.offset,
       sort: browse.sort, desc: browse.desc,
       category: browse.cat, hideAdult: $("sf-adult").checked, onlyAlive: $("sf-alive").checked,
-      mode: browse.mode, hideGarbled: $("sf-garbled").checked,
+      mode: browse.mode, hideGarbled: $("sf-garbled").checked, showWeak: browse.showWeak,
     });
     const rows = r.results || [];
+    // Güven kapısı (F4): cross-encoder hiçbir adayı alakalı bulmadıysa liste bilerek boş
+    // gelir — 30 alakasız satır göstermek yerine durumu söyleyip seçenek sunuyoruz.
+    browse.weak = !!r.weak;
     if (browse.q && r.mode) {
       browse.lastMode = r.mode;
       const badge = $("sem-badge");
@@ -452,6 +455,17 @@ async function loadMore() {
     browse.offset += rows.length;
     browse.hasMore = rows.length === browse.PAGE;
     $("results-empty").classList.toggle("hidden", browse.offset > 0);
+    if (browse.weak && browse.offset === 0) {
+      $("results-empty").innerHTML =
+        `<b>“${esc(browse.q)}”</b> için eşleşme bulunamadı.<br>` +
+        `<span class="muted small">İndekste bu sorguya karşılık gelen bir ad yok. ` +
+        `(İndeks tarama sürdükçe büyür.)</span><br>` +
+        `<button class="btn small ghost" id="btn-weak" style="margin-top:10px">Yine de en yakın sonuçları göster</button>`;
+      const bw = $("btn-weak");
+      if (bw) bw.addEventListener("click", () => { browse.showWeak = true; resetAndLoad(); });
+    } else if (browse.offset === 0) {
+      $("results-empty").textContent = "Sonuç yok. (İndeks dolarken adlar zamanla artar.)";
+    }
     $("result-count").innerHTML = browse.offset > 0
       ? `${nf(browse.offset)} sonuç${browse.hasMore ? "+" : ""}${browse.q ? "" : " (gözat)"}` +
         // Sorgu varken alaka dışı sıralama seçiliyse hatırlat: alakalılar listenin
@@ -474,8 +488,8 @@ $("results-wrap").addEventListener("scroll", (e) => {
 });
 
 // arama / temizle
-$("search-form").addEventListener("submit", (e) => { e.preventDefault(); browse.q = $("q").value.trim(); resetAndLoad(); });
-$("btn-clear").addEventListener("click", () => { $("q").value = ""; browse.q = ""; resetAndLoad(); });
+$("search-form").addEventListener("submit", (e) => { e.preventDefault(); browse.q = $("q").value.trim(); browse.showWeak = false; resetAndLoad(); });
+$("btn-clear").addEventListener("click", () => { $("q").value = ""; browse.q = ""; browse.showWeak = false; resetAndLoad(); });
 $("sf-adult").addEventListener("change", resetAndLoad);
 $("sf-alive").addEventListener("change", resetAndLoad);
 $("sf-garbled").addEventListener("change", resetAndLoad);

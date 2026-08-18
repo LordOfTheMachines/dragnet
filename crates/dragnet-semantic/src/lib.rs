@@ -93,6 +93,19 @@ pub struct Semantic {
 /// Yeniden sıralanacak aday sayısı (ilk N; sonrası harman sırasında kalır).
 pub const RERANK_TOP_N: usize = 30;
 
+/// "Bu sorgunun korpusta karşılığı yok" eşiği — **cross-encoder** (bge-reranker-v2-m3)
+/// logit'i. Embedding kosinüsü bu ayrımı YAPAMAZ: F4 ölçümünde (3.5k gerçek ad) klavye
+/// zırvası ("asdkjhqwe zxcv") 0.421 kosinüs alırken meşru TR sorgu ("taht oyunları
+/// dizisi") 0.332 aldı — zırva daha yüksek, çünkü rastgele diziler kod-benzeri adlara
+/// (MNGS-056, sürüm etiketleri) yakın düşüyor. Cross-encoder ise sorgu-belge çiftini
+/// birlikte puanladığı için ayrımı temiz yapar:
+///   isabetli 15 sorgu: −3.72 … +6.58   |   zırva/karşılıksız: −5.43, −5.29, −5.14,
+///   −5.02, −4.97, −4.62
+/// Eşik ikisinin arasına konur; model değişirse yeniden ölçülmelidir (logit ölçeği
+/// modele özgüdür). Yalnız sözcüksel kanıt yokken (adlarda sorgu kelimesi geçmiyorsa)
+/// uygulanır — FTS eşleşen sorgular her zaman gösterilir.
+pub const WEAK_MATCH_SCORE: f32 = -4.5;
+
 /// Gürültü tabanı ölçümünde kullanılan anlamsız sorgular.
 const NOISE_PROBES: [&str; 4] = [
     "asdkjhqwe zxcv",

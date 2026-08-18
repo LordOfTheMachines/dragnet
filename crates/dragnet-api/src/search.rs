@@ -52,6 +52,27 @@ impl SearchMode {
 pub struct SearchOutcome {
     pub rows: Vec<TorrentSummary>,
     pub used: SearchMode,
+    /// Sorgunun korpusta karşılığı bulunamadı (cross-encoder skoru eşiğin altında ve
+    /// adlarda sözcüksel kanıt yok) → `rows` bilerek boştur. UI "eşleşme bulunamadı"
+    /// der; eskiden 30 alakasız satır gösteriliyordu. Bkz. `WEAK_MATCH_SCORE`.
+    pub weak: bool,
+}
+
+/// Adlarda sorgu kelimelerinden biri geçiyor mu? (Sözcüksel kanıt: geçiyorsa sonuçlar
+/// zayıf sayılmaz — kullanıcı yazdığı kelimeyi sonuçta görüyordur.)
+fn has_lexical_evidence(names: &[String], query: &str) -> bool {
+    let toks: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| t.chars().count() >= 3)
+        .collect();
+    if toks.is_empty() {
+        return false;
+    }
+    names.iter().any(|n| {
+        let n = n.to_lowercase();
+        toks.iter().any(|t| n.contains(t.as_str()))
+    })
 }
 
 /// Sorguyu moda göre yürütür. Boş sorgu → gözat (`list_paged`; Relevance → Seen).
@@ -67,6 +88,8 @@ pub async fn search(
     sort: SortKey,
     desc: bool,
     filter: &Filter,
+    // `true`: güven kapısı atlanır — kullanıcı "yine de en yakın sonuçları göster" dedi.
+    show_weak: bool,
 ) -> Result<SearchOutcome, StoreError> {
     let q = query.trim();
     if q.is_empty() {
@@ -79,6 +102,7 @@ pub async fn search(
         return Ok(SearchOutcome {
             rows,
             used: SearchMode::Fts,
+            weak: false,
         });
     }
     // Sorgu anlama: dolgu temizliği, kategori niyeti, yıl aralığı (bkz.
@@ -111,6 +135,7 @@ pub async fn search(
         return Ok(SearchOutcome {
             rows,
             used: SearchMode::Fts,
+            weak: false,
         });
     };
     // Sorgu embed'i CPU-yoğun (10–60 ms) → blocking havuzunda.
@@ -164,6 +189,26 @@ pub async fn search(
                 .await
                 .ok()
                 .and_then(|r| r.ok());
+            // Güven kapısı: cross-encoder'ın en iyi skoru eşiğin altındaysa ve adlarda
+            // sorgu kelimesi geçmiyorsa, bu sorgunun korpusta karşılığı yok demektir.
+            if let Some(sc) = &scores {
+                let best = sc.iter().copied().fold(f32::MIN, f32::max);
+                if best < dragnet_semantic::WEAK_MATCH_SCORE && !show_weak {
+                    let names: Vec<String> = head.iter().map(|s| s.name.clone()).collect();
+                    let probe = if plan.fts_text.is_empty() {
+                        q
+                    } else {
+                        plan.fts_text.as_str()
+                    };
+                    if !has_lexical_evidence(&names, probe) {
+                        return Ok(SearchOutcome {
+                            rows: Vec::new(),
+                            used,
+                            weak: true,
+                        });
+                    }
+                }
+            }
             let head = match scores {
                 Some(sc) if sc.len() == head.len() => {
                     let mut order: Vec<usize> = (0..head.len()).collect();
@@ -188,7 +233,11 @@ pub async fn search(
             .search_hybrid_boosted(fts_query, &ids, limit, offset, sort, desc, filter, &boost)
             .await?
     };
-    Ok(SearchOutcome { rows, used })
+    Ok(SearchOutcome {
+        rows,
+        used,
+        weak: false,
+    })
 }
 
 #[cfg(test)]
@@ -250,6 +299,7 @@ mod tests {
             SortKey::Relevance,
             true,
             &f,
+            false,
         )
         .await
         .unwrap();
@@ -266,6 +316,7 @@ mod tests {
             SortKey::Relevance,
             true,
             &f,
+            false,
         )
         .await
         .unwrap();
@@ -305,6 +356,7 @@ mod tests {
             SortKey::Relevance,
             true,
             &f,
+            false,
         )
         .await
         .unwrap();
@@ -321,6 +373,7 @@ mod tests {
             SortKey::Relevance,
             true,
             &f,
+            false,
         )
         .await
         .unwrap();
@@ -336,6 +389,7 @@ mod tests {
             SortKey::Relevance,
             true,
             &f,
+            false,
         )
         .await
         .unwrap();
@@ -353,6 +407,7 @@ mod tests {
             SortKey::Relevance,
             true,
             &f,
+            false,
         )
         .await
         .unwrap();
