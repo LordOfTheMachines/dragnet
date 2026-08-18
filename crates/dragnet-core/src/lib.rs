@@ -4,6 +4,7 @@
 //! Bu crate yalnızca veri tiplerini ve temel doğrulamayı içerir; ağ, disk veya
 //! async mantık barındırmaz. Böylece dht/meta/store/api crate'lerinin ortak dili olur.
 
+pub mod parse;
 pub mod rank;
 
 use std::fmt;

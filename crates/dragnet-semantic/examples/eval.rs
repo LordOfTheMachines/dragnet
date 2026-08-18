@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Semantik arama değerlendirmesi: `eval <tier> <names.txt> [--plan]`
+//! Sabit sorgu seti (TR/EN, doğal dil, yazım hatalı, dönem/kategori niyetli) ile
+//! hits@5 (beklenen alt-dizeler) ölçer. `--plan`: sorgu anlama uygulanır (metin
+//! temizliği + kategori artırması, üretim yoluyla aynı mantık). Doküman metni üretimdeki
+//! gibi `text::doc_text(name, kategori)` (kategori `dragnet_core::categorize(name, [])`).
+use dragnet_core::InfoHash;
+use dragnet_semantic::{query, text, Device, Semantic, SemanticConfig, Tier};
+
+const QUERIES: &[(&str, &[&str])] = &[
+    (
+        "içinde heroes geçen oyunları listeler misin",
+        &["Heroes of Might", "Heroes.of.Might"],
+    ),
+    (
+        "zombi konulu oyunları listeler misin",
+        &["Plants_vs_Zombies"],
+    ),
+    ("resident evil filmleri", &["Resident Evil"]),
+    ("büyük tavşan animasyonu", &["Big Buck Bunny"]),
+    ("çelik gözyaşları", &["Tears of Steel"]),
+    (
+        "linux işletim sistemi",
+        &["ubuntu", "debian", "linuxmint", "archlinux", "xubuntu"],
+    ),
+    (
+        "linux dağıtımı iso",
+        &["ubuntu", "debian", "linuxmint", "archlinux", "xubuntu"],
+    ),
+    ("witcher 3", &["Witcher 3"]),
+    ("doom oyunu", &["DOOM"]),
+    ("harry potter filmi", &["Harry.Potter", "Harry Potter"]),
+    ("game of thrones", &["Game of Thrones", "Game.of.Thrones"]),
+    (
+        "taht oyunları dizisi",
+        &["Game of Thrones", "Game.of.Thrones"],
+    ),
+    ("batman 2022", &["The.Batman.2022"]),
+    ("mozart klasik müzik", &["Mozart"]),
+    (
+        "japon animesi",
+        &["Anime", "Jujutsu", "Spy.x.Family", "Naruto"],
+    ),
+    ("hery poter", &["Harry.Potter", "Harry Potter"]),
+    ("büyücü çocuk filmi", &["Harry.Potter", "Harry Potter"]),
+    (
+        "kahramanlar strateji oyunu",
+        &["Heroes of Might", "Heroes.of.Might"],
+    ),
+    (
+        "2000'lerin bilim kurgu filmleri",
+        &[
+            "Resident Evil Extinction",
+            "Matrix",
+            "Minority",
+            "Equilibrium",
+        ],
+    ),
+    ("asdkjhqwe zxcv", &[]),
+];
+
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let use_plan = a.iter().any(|x| x == "--plan");
+    let cfg = SemanticConfig {
+        tier: Tier::parse(&a[1]),
+        device: Device::Auto,
+        models_dir: "C:/dgcache/dragnet-models".into(),
+    };
+    let sem = Semantic::load(&cfg).expect("model");
+    let names: Vec<String> = std::fs::read_to_string(&a[2])
+        .unwrap()
+        .lines()
+        .map(|s| s.to_string())
+        .filter(|s| !s.contains('\u{FFFD}'))
+        .collect();
+    let cats: Vec<&'static str> = names
+        .iter()
+        .map(|n| dragnet_core::categorize(n, &[]))
+        .collect();
+    let items: Vec<(InfoHash, String)> = names
+        .iter()
+        .zip(&cats)
+        .enumerate()
+        .map(|(i, (n, c))| {
+            let mut b = [0u8; 20];
+            b[..4].copy_from_slice(&(i as u32).to_le_bytes());
+            (InfoHash::from_bytes(b), text::doc_text(n, c))
+        })
+        .collect();
+    let t = std::time::Instant::now();
+    for chunk in items.chunks(256) {
+        sem.embed_and_add(chunk).unwrap();
+    }
+    let floor = sem.calibrate_noise().unwrap();
+    eprintln!(
+        "{} ad ({:?}, {}) taban={floor:.3} plan={use_plan}",
+        names.len(),
+        t.elapsed(),
+        sem.device()
+    );
+    let (mut score, mut n, mut noise_ok) = (0.0f64, 0usize, true);
+    for (q, expected) in QUERIES {
+        let (qtext, cat) = if use_plan {
+            let p = query::understand(q);
+            (p.semantic_text, p.category)
+        } else {
+            (q.to_string(), None)
+        };
+        let mut hits = sem.search(&qtext, 30).unwrap();
+        if std::env::var("DEBUG").is_ok() {
+            let raw = sem.search_raw(&qtext, 5).unwrap();
+            eprintln!(
+                "  [{qtext}] kesimli={} ham: {}",
+                hits.len(),
+                raw.iter()
+                    .map(|h| format!(
+                        "{:.3}:{}",
+                        h.score,
+                        names[idx(h.infohash)].chars().take(28).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
+        }
+        // Kategori artırması (üretimdeki RRF çarpanının semantik-yalnız benzeri): eşleşenleri öne al.
+        if let Some(c) = cat {
+            hits.sort_by(|x, y| {
+                let cx = cats[idx(x.infohash)] == c;
+                let cy = cats[idx(y.infohash)] == c;
+                cy.cmp(&cx).then(y.score.total_cmp(&x.score))
+            });
+        }
+        let top: Vec<&str> = hits
+            .iter()
+            .take(5)
+            .map(|h| names[idx(h.infohash)].as_str())
+            .collect();
+        if expected.is_empty() {
+            noise_ok = hits.is_empty();
+            println!(
+                "{:>5}  {q}  → {} sonuç (boş beklenir)",
+                if hits.is_empty() { "OK" } else { "MISS" },
+                hits.len()
+            );
+            continue;
+        }
+        let hit = top.iter().any(|t| expected.iter().any(|e| t.contains(e)));
+        n += 1;
+        if hit {
+            score += 1.0;
+        }
+        println!(
+            "{:>5}  {q}  → {}",
+            if hit { "OK" } else { "MISS" },
+            top.first()
+                .map(|s| s.chars().take(60).collect::<String>())
+                .as_deref()
+                .unwrap_or("-")
+        );
+    }
+    println!(
+        "\n=== tier={} plan={use_plan} hit@5={:.0}% ({}/{n}) anlamsız-boş={noise_ok}",
+        a[1],
+        100.0 * score / n as f64,
+        score as usize
+    );
+}
+fn idx(ih: InfoHash) -> usize {
+    u32::from_le_bytes(ih.as_bytes()[..4].try_into().unwrap()) as usize
+}

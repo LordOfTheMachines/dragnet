@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use dragnet_semantic::Semantic;
-use dragnet_store::{Filter, SortKey, Store, StoreError, TorrentSummary, HYBRID_CANDIDATES};
+use dragnet_store::{Boost, Filter, SortKey, Store, StoreError, TorrentSummary, HYBRID_CANDIDATES};
 
 /// Semantik katman yuvası: `None` = kapalı. Uygulama ayarlardan açıp kapatınca yuvayı
 /// günceller; API/arama bir sonraki sorguda yeni durumu görür (yeniden başlatma yok).
@@ -81,14 +81,32 @@ pub async fn search(
             used: SearchMode::Fts,
         });
     }
+    // Sorgu anlama: dolgu temizliği, kategori niyeti, yıl aralığı (bkz.
+    // `dragnet_semantic::query`). FTS-yalnız modda da dolgu temizliği uygulanır (dolgu FTS'i
+    // de bozar) — niyet artırması yalnız hibrit yolda (saf FTS sözleşmesi değişmesin).
+    let plan = dragnet_semantic::query::understand(q);
+    let boost = Boost {
+        // Kullanıcı kategori seçtiyse ona saygı; yoksa sorgudan çıkarılan.
+        category: if filter.category.is_some() {
+            None
+        } else {
+            plan.category.map(str::to_string)
+        },
+        year_range: plan.year_range,
+    };
     let sem = if mode == SearchMode::Fts {
         None
     } else {
         slot.read().await.clone()
     };
     let Some(sem) = sem else {
+        let fts_q = if plan.fts_text.is_empty() {
+            q
+        } else {
+            plan.fts_text.as_str()
+        };
         let rows = store
-            .search_paged(q, limit, offset, sort, desc, filter)
+            .search_paged(fts_q, limit, offset, sort, desc, filter)
             .await?;
         return Ok(SearchOutcome {
             rows,
@@ -96,7 +114,11 @@ pub async fn search(
         });
     };
     // Sorgu embed'i CPU-yoğun (10–60 ms) → blocking havuzunda.
-    let qs = q.to_string();
+    let qs = if plan.semantic_text.is_empty() {
+        q.to_string()
+    } else {
+        plan.semantic_text.clone()
+    };
     let sem2 = Arc::clone(&sem);
     // Semantik aday sayısı: FTS adaylarından az (kesim sonrası genelde çok daha az kalır).
     let hits =
@@ -106,12 +128,17 @@ pub async fn search(
             .and_then(|r| r.ok())
             .unwrap_or_default();
     let ids: Vec<_> = hits.iter().map(|h| h.infohash).collect();
+    let fts_text = if plan.fts_text.is_empty() {
+        q
+    } else {
+        plan.fts_text.as_str()
+    };
     let (fts_query, used) = match mode {
         SearchMode::Semantic => ("", SearchMode::Semantic),
-        _ => (q, SearchMode::Hybrid),
+        _ => (fts_text, SearchMode::Hybrid),
     };
     let rows = store
-        .search_hybrid_paged(fts_query, &ids, limit, offset, sort, desc, filter)
+        .search_hybrid_boosted(fts_query, &ids, limit, offset, sort, desc, filter, &boost)
         .await?;
     Ok(SearchOutcome { rows, used })
 }

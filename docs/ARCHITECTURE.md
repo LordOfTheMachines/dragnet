@@ -1,283 +1,296 @@
-<!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# Dragnet — Mimari Tasarım
-
-## 1. Tasarım ilkeleri
-
-1. **Site bağımsızlığı.** Veri kaynağı BitTorrent DHT ağıdır, hiçbir web sitesi değil.
-2. **Yeniden inşa edilebilirlik.** İndeks, ağdan sıfırdan yeniden üretilebilir bir önbellektir;
-   asla "kaybedilemez" tek gerçeklik değildir. Ağ = gerçeklik kaynağı.
-3. **Bileşen ayrımı.** Harvest / fetch / store / serve birbirinden bağımsız crate'lerdir;
-   her biri ayrı ölçeklenebilir ve ayrı test edilir.
-4. **Backpressure.** DHT'den gelen infohash akışı, metadata fetch hızını aşabilir; aradaki
-   kuyruk sınırlı olmalı ve dolduğunda zarifçe düşürmeli (drop), çökmemeli.
-5. **Ayrı servis.** qBittorrent'e gömülmez; onunla yalnızca bir Python plugin + HTTP API
-   sözleşmesi üzerinden konuşur.
-
-## 2. Bileşenler
-
-### 2.1 `dragnet-dht` — DHT Harvester (Faz 1)
-- BitTorrent Mainline DHT'ye (BEP-5, Kademlia) bir düğüm olarak katılır.
-- İki mod:
-  - **Pasif:** ağda uçuşan `get_peers` / `announce_peer` sorgularını dinleyerek infohash toplar.
-  - **Aktif:** `find_node` ile kimlik uzayında gezinip (node ID'yi periyodik değiştirerek)
-    daha fazla trafik görünürlüğü kazanır ("horizontal crawling").
-- Çıktı: benzersiz infohash akışı (sınırlı kanal / bounded channel üzerinden).
-- Aday crate'ler: `mainline`, `rustydht-lib`. Değerlendirilecek; birini seçip sarmalayacağız.
-- Node ID rotasyonu, rate-limit ve kötü niyetli düğüm filtreleme burada ele alınır.
-
-### 2.2 `dragnet-meta` — Metadata Fetcher (Faz 2)
-- Girdi: infohash. Görev: torrent metadata'sını **tracker'sız** almak.
-- Adımlar: DHT'den peer bul (`get_peers`) → peer'e bağlan → BEP-10 extension handshake →
-  BEP-9 `ut_metadata` ile metadata parçalarını çek → infohash ile doğrula → bencode çöz.
-- Çıktı: `TorrentRecord` (isim, toplam boyut, dosya listesi).
-- Aday yapı taşı: `librqbit` / `librqbit-core` (olgun Rust torrent client; peer wire + metadata
-  değişimini zaten içerir). Sıfırdan yazmak yerine bunu değerlendireceğiz.
-- Zaman aşımı, yeniden deneme ve "ulaşılamayan infohash" işaretlemesi burada.
-
-### 2.3 `dragnet-store` — Kalıcılık + Arama İndeksi (Faz 3)
-- Başlangıç: **SQLite** (`sqlx` async) + **FTS5** tam metin arama. Tek dosya, sıfır kurulum.
-- Ölçekleme yolu: aynı `sqlx` soyutlamasıyla PostgreSQL'e geçiş.
-- Şema (bkz. §4). Yazma yolu idempotent: aynı infohash tekrar görülürse `last_seen` /
-  `seen_count` güncellenir (popülerlik vekili), yeni satır açılmaz.
-
-### 2.4 `dragnet-api` — HTTP Arama API (Faz 4)
-- `axum` tabanlı REST. Uç noktalar:
-  - `GET /search?q=<sorgu>&cat=<kategori>&limit=<n>` → JSON sonuç listesi.
-  - `GET /healthz` → sağlık kontrolü.
-  - `GET /stats` → indeks büyüklüğü, crawl hızı.
-- Bu, qBittorrent plugin'inin konuştuğu tek yüzeydir. Sözleşme `docs/INTEGRATION.md`.
-
-### 2.5 `dragnetd` — Daemon (Faz 5)
-- Tüm crate'leri tek süreçte birleştirir: harvester → kuyruk → fetcher havuzu → store → api.
-- Yapılandırma (`figment`/`config`): dinleme portu, DB yolu, eşzamanlılık, kuyruk boyutu.
-- Gözlemlenebilirlik: `tracing` ile yapılandırılmış log; `/stats` üzerinden metrik.
-
-### 2.6 `plugins/qbittorrent/dragnet.py` — Entegrasyon (Faz 6)
-- nova3 `Engine` arayüzünü uygulayan ince Python dosyası. `dragnet-api`'ye HTTP sorgusu atar,
-  gelen JSON'u `novaprinter.prettyPrinter` sözleşmesine (`link|name|size|seeds|leech|...`) çevirir.
-- qBittorrent kaynağına dokunmaz; kullanıcı bu dosyayı kendi arama-plugin dizinine kopyalar.
-
-### 2.7 `dragnet-semantic` — Semantik arama (Faz D)
-- Yerel (çevrimdışı) embedding + hibrit arama. `Embedder` trait'i altında 3 kademe:
-  **hafif** (potion-multilingual, model2vec, saf Rust), **dengeli** (MiniLM-L12 int8, ONNX),
-  **yüksek kalite** (EmbeddingGemma-300m Q4, ONNX; Windows'ta DirectML GPU). Karar: §7.3.
-- Vektörler `torrent_embeddings` (int8 BLOB) tablosunda kalıcı; açılışta bellek-içi
-  `VecIndex`'e yüklenir, brute-force kosinüs (500k×768 ≈ 150 ms). ANN yok (açık karar §7.4).
-- Hibrit: `dragnet-api::search` FTS adaylarını ve semantik top-k'yı RRF ile harmanlar;
-  `mode=fts|semantic|hybrid`. Katman **opt-in** ve çalışma anında takılıp çıkarılabilir
-  (`SemanticSlot`) — kapalıyken davranış birebir eski FTS.
-- İndeksleme `dragnet-engine::semantic_indexer` ile Engine'den bağımsız (tarama kapalıyken
-  de çalışır): backlog → partili embed (`spawn_blocking`) → SQLite + RAM. Model dosyaları
-  kısa/düz `models/<id>/` dizinine bir kez indirilir (HF; kendi release açık karar).
-
-## 3. Veri akışı (uçtan uca)
-
-1. `dragnet-dht` ağı tarar, ham infohash üretir.
-2. Sınırlı kanal + dedup (yakın zamanda görülenler için bloom/LRU) → gürültüyü keser.
-3. `dragnet-meta` havuzu her yeni infohash için metadata çeker (paralel, zaman aşımlı).
-4. Başarılı kayıtlar `dragnet-store`'a yazılır; FTS indeksine girer.
-5. `dragnet-api` sorguları FTS üzerinden yanıtlar; semantik açıksa FTS + vektör adaylarını
-   RRF ile harmanlar (hibrit).
-6. qBittorrent plugin'i API'yi sorgular, kullanıcıya sonuç gösterir.
-
-## 4. Veri modeli (ilk taslak)
-
-`torrents` tablosu:
-
-| alan | tip | açıklama |
-|---|---|---|
-| `infohash` | TEXT (PK) | 40 hex karakter (v1) — birincil anahtar |
-| `name` | TEXT | torrent adı (metadata'dan) |
-| `total_size` | INTEGER | bayt cinsinden toplam boyut |
-| `file_count` | INTEGER | dosya sayısı |
-| `first_seen` | INTEGER | ilk görülme (unix ts) |
-| `last_seen` | INTEGER | son görülme (unix ts) |
-| `seen_count` | INTEGER | DHT'de kaç kez görüldü (popülerlik vekili) |
-| `metadata_status` | TEXT | `pending` / `fetched` / `unreachable` |
-
-`files` tablosu (1-N): `infohash`, `path`, `size`.
-`torrents_fts` (FTS5): `name` üzerinde tam metin arama; `infohash` ile eşlenir.
-`torrent_embeddings` (Faz D): `infohash` (PK, CASCADE), `model_id`, `dim`, `scale`, `q` (int8 BLOB) —
-nicemlenmiş ad embedding'i; model değişince yeniden üretilir (ağdan yeniden-inşa edilebilir).
-
-> Not: "seeds/leech" değerleri DHT crawl'ından doğrudan gelmez; `seen_count` bir vekildir.
-> Gerçek seed sayısı istenirse sorgu anında DHT `get_peers` scrape'i ile tahmin edilebilir (Faz 4+).
-
-## 5. Teknoloji seçimleri
-
-| İhtiyaç | Seçim | Gerekçe |
-|---|---|---|
-| Dil | Rust | yüksek eşzamanlı ağ I/O, bellek güvenliği, tek binary |
-| Runtime | `tokio` | async ağ için fiilî standart |
-| DHT | `mainline` / `rustydht-lib` (değerlendirilecek) | hazır Kademlia/BEP-5 |
-| Peer wire + BEP-9 | `librqbit` bileşenleri (değerlendirilecek) | olgun, yeniden yazmayı önler |
-| Depolama | `sqlx` + SQLite/FTS5 → sonra PostgreSQL | sıfır kurulumla başla, sonra ölçekle |
-| HTTP API | `axum` | tokio ekosistemi, ergonomik |
-| Serileştirme | `serde`, bencode: `bendy`/`serde_bencode` | standart |
-| Log/metrik | `tracing` | yapılandırılmış gözlemlenebilirlik |
-| Config | `figment` | katmanlı yapılandırma |
-
-## 6. Legal & Safety
-
-- DHT indeksi doğası gereği yasa dışı içerik de barındırabilir (bkz. magnetico'nun aynı uyarısı).
-- API/UI varsayılan olarak yerel (`127.0.0.1`) dinlemeli; herkese açık dağıtım kullanıcının
-  bilinçli kararı olmalı ve kimlik doğrulama gerektirmeli.
-- İçerik filtreleme (engellenecek infohash/kelime listeleri) opsiyonel bir katman olarak
-  planlanır (Faz 4+). Sorumlu kullanım kullanıcının yükümlülüğüdür.
-
-## 7. Kararlar
-
-### 7.1 DHT crate seçimi (Faz 1 spike — KARAR VERİLDİ)
-
-**Karar:** Temel bağımlılık olarak **`mainline`** (pubky/mainline) seçildi; ancak pasif
-infohash hasadı **kendi ince KRPC dinleyicimizle** yapılıyor (`crates/dragnet-dht`).
-
-**Değerlendirme:**
-
-| Ölçüt | `mainline` v8.0.0 | `rustydht-lib` |
-|---|---|---|
-| Bakım | Aktif; Pubky altyapısında üretimde (crates.io'da 400k+ indirme, son sürüm 2026-08) | **Terk edilmiş** — crates.io'da yok, GitHub deposu (raptorswing/rustydht-lib) 404 |
-| BEP-5 kapsamı | Tam (Kademlia, get/put, BEP-42 güvenli node Id, BEP-44) | Tam (daha alt seviye) |
-| Async | `tokio` uyumlu (`async` feature, `flume`) | Eski/bakımsız |
-| **Pasif trafik dinleme** | **Yetersiz** — `RequestFilter::allow_request` yalnız `bool` döndürür; gelen sorgunun `info_hash`'ini taşıyan `RequestTypeSpecific` tipi crate dışına export **edilmemiştir** (`mod rpc;` private). Filtre sorguyu görebilir ama içeriğini okuyamaz. | Tasarımı gereği gelen ham paketleri açar (bu işe uygundu) ama artık kullanılamaz |
-
-**Sonuç:** İki aday da pasif hasat için "gelen `get_peers`/`announce_peer` gövdesini
-okuma" yüzeyini kullanılabilir biçimde vermiyor. Bu yüzden:
-
-- `mainline`'ı **temel** olarak alıyoruz: BEP-42 uyumlu `Id` üretimi, `DEFAULT_BOOTSTRAP_NODES`
-  listesi ve **Faz 2**'de metadata için gereken `get_peers` istemcisi buradan gelecek.
-- Pasif dinleme için `tokio::net::UdpSocket` üzerinde **kendi minimal KRPC katmanımızı**
-  (`krpc.rs`) yazdık. Böylece gelen her paketi görüp infohash çıkarabiliyoruz; ayrıca
-  node ID rotasyonu ve rate-limit üzerinde tam kontrol sağlıyoruz. Bu, magnetico'nun
-  "indexing service" yaklaşımıyla aynı: aktif `find_node` ile yönlendirme tablolarına
-  girip pasif olarak `get_peers`/`announce_peer` trafiği hasat etmek.
-
-Çözümleme `serde_bencode::Value` ile toleranslı; üretim ise bencode anahtar sıralaması
-için elle yapılıyor.
-
-### 7.2 Metadata wire implementasyonu (Faz 2 spike — KARAR VERİLDİ)
-
-**Karar:** `librqbit` sarmalamak yerine **minimal kendi wire katmanı** yazıldı
-(`crates/dragnet-meta/src/wire.rs`).
-
-**Gerekçe:**
-- `librqbit` olgun ama **tam bir torrent istemcisidir** (piece indirme, disk I/O,
-  seçim algoritmaları…). Bizim tek ihtiyacımız metadata değişimi (BEP-9); bu ağır
-  bağımlılık gereksiz yüzey ve derleme yükü getirir.
-- DHT harvester'da (Faz 1) zaten kendi KRPC katmanımızı yazdık; aynı yaklaşımla
-  BEP-3 handshake + BEP-10 extension + BEP-9 `ut_metadata` yazmak küçük (~300 satır),
-  test edilebilir ve tam kontrol sağlar.
-- Peer bulma için `mainline`'ın `get_peers` istemcisini kullanıyoruz (Faz 1'de temel
-  olarak seçilmişti) — böylece DHT tarafını yeniden yazmıyoruz.
-
-**Doğrulama:** Canlı ağda Sintel ve Big Buck Bunny infohash'lerinden isim + dosya
-listesi + boyut başarıyla çekildi; indirilen metadata'nın SHA-1'i infohash ile doğrulandı.
-
-### 7.3 Semantik arama: embedding motoru + vektör deposu (Faz D spike — KARAR VERİLDİ)
-
-**Karar:** Yeni crate `dragnet-semantic`; `Embedder` trait'i altında **3 kademeli model
-yelpazesi** (hız ↔ kalite), vektörler **SQLite'ta BLOB olarak kalıcı + bellek-içi saf-Rust
-int8 brute-force tarama** (sqlite-vec / harici ANN yok). Arama **hibrit**: FTS5 ve semantik
-aday listeleri RRF ile harmanlanır. Opt-in; kapalıyken davranış birebir eski FTS.
-
-**Bake-off (2026-08-16, Windows 11, RTX 4070 Laptop 8GB, CUDA toolkit yok → DirectML).**
-Korpus: 60 gerçekçi scene-adı (film/dizi/müzik/oyun/yazılım/kitap; TR dahil), 24 sorgu
-(EN/TR, eşanlamlı, yazım hatalı, soyut tür, dönem). Ölçüt: hits@5 / MRR; hız: ad/sn.
-
-| Model | Motor | hits@5 | MRR | CPU ad/sn | DirectML ad/sn | Disk |
-|---|---|---|---|---|---|---|
-| **EmbeddingGemma-300m Q4** (768d) | ort | **0.928** | 0.869 | 45 | 92 (batch 512) | 197 MB |
-| EmbeddingGemma-300m f32 | ort | 0.919 | **0.894** | 55–67 | 162 (batch 512, sabit pad) | 1.2 GB |
-| Qwen3-Embedding-0.6B q4f16 (1024d) | ort | 0.820 | 0.824 | 8 | DML hata (Concat) | 541 MB |
-| Qwen3-Embedding-0.6B int8 | ort | 0.777 | 0.803 | 36 | DML hata | 585 MB |
-| BGE-M3 (1024d) | ort | 0.759 | 0.805 | 52 | 246 | 2.2 GB |
-| multilingual-e5-base (768d) | ort | 0.728 | 0.760 | 149 | 460 | 1.1 GB |
-| **paraphrase-multilingual-MiniLM-L12-Q** (384d) | ort | 0.704 | 0.756 | 384 | 456 | 118 MB |
-| multilingual-e5-small (384d) | ort | 0.657 | 0.681 | 305 | 765 | 465 MB |
-| **potion-multilingual-128M** (256d, statik) | model2vec | 0.636 | 0.720 | **58 000** | — | 490 MB |
-| potion-base-8M (EN) | model2vec | 0.555 | 0.535 | 48 000 | — | 30 MB |
-
-Notlar: Gemma dinamik-quant (`model_quantized`) batch ile çalışmıyor; Gemma fp16 DirectML'de
-NaN üretiyor (bilinen fp16 taşması). MRL-256 kısaltma Gemma'da 0.928→0.862 (kabul edilebilir
-ama gerekmedi). DirectML'de değişken şekil her batch'te yeniden derleme yapıyor (sorgu gecikmesi
-0.5 s) → **sabit uzunluğa pad** (32–48 token) ile 46 ms; büyük batch (512) ile 3× hız.
-
-**Kademeler (bake-off verisiyle):**
-
-| Kademe | Model | Motor | Ne için |
-|---|---|---|---|
-| Hafif | potion-multilingual-128M | model2vec-rs (saf Rust) | zayıf makineler; 500k kaydı ~10 sn'de indeksler, anında model değişimi |
-| Dengeli | paraphrase-multilingual-MiniLM-L12-v2 (int8 ONNX) | ort (CPU) | orta CPU maliyeti, küçük indirme |
-| **Yüksek (varsayılan)** | EmbeddingGemma-300m Q4 | ort (CPU / **DirectML**) | en iyi kalite; GPU'lu makinede 2–3× hızlı indeksleme |
-
-Cihaz `auto`: DirectML dene → başarısızsa CPU. GPU yalnız **indeksleme** batch'lerinde
-kullanılır (sabit pad + büyük batch); tek sorgu embed'i CPU'da (küçük ve tutarlı gecikme).
-
-**Elenenler / neden:** `fastembed` (Apache-2.0) doğrulama için kullanıldı ama üründe **doğrudan
-`ort` + `tokenizers`** tercih edildi: sabit-pad/batch kontrolü, `sentence_embedding` çıkışı,
-gereksiz image bağımlılıkları yok ve `tokenizers` sürümü model2vec ile tekilleştirilebiliyor
-(fastembed+model2vec birlikte MSVC'de CRT `LNK2038` çakışması: model2vec'in `esaxx_fast`
-C++ özelliği; çözüm `model2vec-rs` default-features kapalı + `tokenizers` yalnız `onig`).
-Qwen3-0.6B/BGE-M3/e5-large "büyük" adaylar torrent adlarında Gemma'yı geçemedi; GPU'nun
-faydası kalite değil hız oldu.
-
-**Vektör deposu:** `sqlite-vec 0.1.6` çalıştı (0.1.10-alpha MSVC'de derlenmiyor) ama
-200k×768'de KNN 0.56 s (int8) / 1.1 s (f32) — interaktif için yavaş; ayrıca repo'ya ilk
-`unsafe` + C derlemesi getirirdi. Bellek-içi saf-Rust int8 tarama: 500k×768 → **148 ms**
-tek çekirdek (native CPU'da 65 ms), 366 MB RAM; 256d → 65 ms / 122 MB. Karar: vektörler
-`torrent_embeddings(infohash, model_id, dim, scale, q INT8 BLOB)` tablosunda kalıcı; açılışta
-RAM'e yüklenir; yeni kayıtlar artımlı eklenir. Model/kademe değişince tablo düşürülüp
-yeniden kurulur (ağdan yeniden-inşa ilkesi korunur — vektörler adlardan türetilir).
-
-**ORT tuzağı (Windows):** ~230 karakterlik derin HF-cache yolundaki model dosyasını ORT
-"File doesn't exist" diye reddetti; kısa yol çalıştı → modeller **kısa/düz** bir dizine
-indirilir (`<data>/models/<id>/model.onnx`), HF snapshot iç içe düzeni kullanılmaz.
-
-### 7.4 Faz E — bütünsel kalite çevrimi: çekim boru hattı, kodlama, kalibrasyon (KARAR VERİLDİ)
-
-**Ölçüm (2026-08-17, gerçek DB: 797k bilinen infohash, 528 fetched, 34.6k unreachable):**
-çekim başarı oranı **%1,5**; kontrollü deney (150 popüler pending, eski fetcher): 0 → tek
-eşzamanlı istemcide %100 (BBB/Sintel/ToS), 10 eşzamanlıda %18 ama 150 hash **1111 s** —
-başarılı çekim medyanı 14 s, kuyruk 40 s+, `peer_gather_timeout=20 s` bunları kesiyordu;
-başarısız çekim ~70 s sürüyordu (50 peer × 8 s, önce topla sonra dene). Ayrıca engine
-"izin boşsa çek" (`try_acquire`) ile firehose'daki hash'lerin çoğunu **hiç denemiyordu**.
-
-**Kararlar ve etkileri:**
-1. **Pipelined fetch** (`dragnet-meta`): `get_peers` akışı sürerken gelen peer'e hemen
-   bağlan; ilk başarı kazanır; tek bütçe (`overall_timeout=45 s`), bağlanma zaman aşımı
-   ayrı (3,5 s — peer denemelerinin ~%92'si NAT'lı adreslerin bağlanma zaman aşımıydı),
-   çekim başına 12 eşzamanlı / 40 peer. Aynı 150 hash: 1111 s → **143 s**, başarı medyanı
-   14 s → 4 s; saatlik verim ~3× (başarısızlar 70 s yerine ~6 s harcar).
-2. **Öncelikli çekim kuyruğu** (`store.next_to_fetch`): sıcak (2 saat içinde pasif trafikte
-   ya da peer-ipuçlu görülen) › popüler (`seen_count`) › taze; en çok 3 deneme, 6 saat soğuma;
-   `fetch_attempts/last_attempt/hot_seen/hot_count/fetched_at` kolonları; eski `unreachable`
-   kayıtlar bir kez geri kuyruğa (`PRAGMA user_version=1`).
-3. **Sighting kaynağı** (`dragnet-dht`): `Sighting { infohash, source, peers }`;
-   get_peers/announce = sıcak (ana dedup'ı atlar, kısa pencerede bastırılır).
-4. **BEP-51 takip `get_peers`**: örnek veren düğüm o infohash için peer saklıyordur → yeni
-   örneklerin birkaçı (3/yanıt, rate-limit bütçesinden) için aynı düğüme doğrudan
-   `get_peers`; `values` → `SamplePeers` sighting (sıcak, peer ipuçlu). Engine ipuçlarını
-   bellek-içi (50k) tutar, fetch önce onları dener. Canlıda: peer-yok oranı %73 → ~%1,
-   başarı %3 → %8 (asıl kalan darboğaz NAT'lı peer'ler).
-5. **Ad kodlaması** (`dragnet-meta::text`): `name.utf-8`/`path.utf-8` tercih; değilse
-   chardetng tahmini + GB18030/Shift_JIS/EUC-KR/CP1251/CP1254/CP1252 adayları arasından
-   hatasız çözülüp "harf oranı" en yüksek olan (kısa CJK dizeler GBK/SJIS arasında doğası
-   gereği belirsiz). Bozuk (`�`) adlar semantik indekse alınmaz.
-6. **Semantik kalibrasyon**: mutlak `min_score` yerine **kendi kendini kalibre eden gürültü
-   tabanı** (4 anlamsız sonda → en iyi skorların medyanı; her 5000 eklemede yenilenir) +
-   göreli kesim (en iyi × 0,80). Gerçek DB'de Gemma taban 0,377 (isabet 0,42–0,69), MiniLM
-   0,645, potion 0,352. Semantik aday sayısı 100'e düşürüldü. 4. kademe **Deneysel**:
-   Qwen3-Embedding-0.6B q4f16 (last-token pooling, boş KV girdileri; yalnız CPU).
-7. **Keşif grafiği**: `discovery` artık şimdiden geriye tam N kova (boş=0) döner; eksen
-   işaretleri, "şimdi" çizgisi, hover ipucu. `FetchStats` (peer hata türleriyle) → `/stats`,
-   daemon log ve pano "Metadata çekimi" kartı.
-
-**Açık:** NAT'lı peer'lere uTP/holepunch (BEP-55) ile ulaşmak; sıcak kuyruk büyüdükçe
-öncelik ağırlıklarını yeniden ayarlamak; peer ipuçlarını kalıcılaştırmak.
-
-### 7.5 Hâlâ açık kararlar
-
-- BitTorrent v2 (SHA-256 infohash) desteği ne zaman? → v1 çalıştıktan sonra.
-- Daemon'da (Faz 5) harvester ile fetcher aynı DHT düğümünü mü paylaşmalı? → Faz 5'te ölçülecek.
-- Semantik: özel damıtılmış model (Model2Vec ile Gemma'dan torrent-adı korpusuna damıtma,
-  kendi GitHub release'inden dağıtım); CUDA EP opsiyonu; >2M kayıtta ANN (HNSW) geçişi.
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->'
+# Dragnet — Mimari Tasarım'
+'
+## 1. Tasarım ilkeleri'
+'
+1. **Site bağımsızlığı.** Veri kaynağı BitTorrent DHT ağıdır, hiçbir web sitesi değil.'
+2. **Yeniden inşa edilebilirlik.** İndeks, ağdan sıfırdan yeniden üretilebilir bir önbellektir;'
+   asla "kaybedilemez" tek gerçeklik değildir. Ağ = gerçeklik kaynağı.'
+3. **Bileşen ayrımı.** Harvest / fetch / store / serve birbirinden bağımsız crate'lerdir;'
+   her biri ayrı ölçeklenebilir ve ayrı test edilir.'
+4. **Backpressure.** DHT'den gelen infohash akışı, metadata fetch hızını aşabilir; aradaki'
+   kuyruk sınırlı olmalı ve dolduğunda zarifçe düşürmeli (drop), çökmemeli.'
+5. **Ayrı servis.** qBittorrent'e gömülmez; onunla yalnızca bir Python plugin + HTTP API'
+   sözleşmesi üzerinden konuşur.'
+'
+## 2. Bileşenler'
+'
+### 2.1 `dragnet-dht` — DHT Harvester (Faz 1)'
+- BitTorrent Mainline DHT'ye (BEP-5, Kademlia) bir düğüm olarak katılır.'
+- İki mod:'
+  - **Pasif:** ağda uçuşan `get_peers` / `announce_peer` sorgularını dinleyerek infohash toplar.'
+  - **Aktif:** `find_node` ile kimlik uzayında gezinip (node ID'yi periyodik değiştirerek)'
+    daha fazla trafik görünürlüğü kazanır ("horizontal crawling").'
+- Çıktı: benzersiz infohash akışı (sınırlı kanal / bounded channel üzerinden).'
+- Aday crate'ler: `mainline`, `rustydht-lib`. Değerlendirilecek; birini seçip sarmalayacağız.'
+- Node ID rotasyonu, rate-limit ve kötü niyetli düğüm filtreleme burada ele alınır.'
+'
+### 2.2 `dragnet-meta` — Metadata Fetcher (Faz 2)'
+- Girdi: infohash. Görev: torrent metadata'sını **tracker'sız** almak.'
+- Adımlar: DHT'den peer bul (`get_peers`) → peer'e bağlan → BEP-10 extension handshake →'
+  BEP-9 `ut_metadata` ile metadata parçalarını çek → infohash ile doğrula → bencode çöz.'
+- Çıktı: `TorrentRecord` (isim, toplam boyut, dosya listesi).'
+- Aday yapı taşı: `librqbit` / `librqbit-core` (olgun Rust torrent client; peer wire + metadata'
+  değişimini zaten içerir). Sıfırdan yazmak yerine bunu değerlendireceğiz.'
+- Zaman aşımı, yeniden deneme ve "ulaşılamayan infohash" işaretlemesi burada.'
+'
+### 2.3 `dragnet-store` — Kalıcılık + Arama İndeksi (Faz 3)'
+- Başlangıç: **SQLite** (`sqlx` async) + **FTS5** tam metin arama. Tek dosya, sıfır kurulum.'
+- Ölçekleme yolu: aynı `sqlx` soyutlamasıyla PostgreSQL'e geçiş.'
+- Şema (bkz. §4). Yazma yolu idempotent: aynı infohash tekrar görülürse `last_seen` /'
+  `seen_count` güncellenir (popülerlik vekili), yeni satır açılmaz.'
+'
+### 2.4 `dragnet-api` — HTTP Arama API (Faz 4)'
+- `axum` tabanlı REST. Uç noktalar:'
+  - `GET /search?q=<sorgu>&cat=<kategori>&limit=<n>` → JSON sonuç listesi.'
+  - `GET /healthz` → sağlık kontrolü.'
+  - `GET /stats` → indeks büyüklüğü, crawl hızı.'
+- Bu, qBittorrent plugin'inin konuştuğu tek yüzeydir. Sözleşme `docs/INTEGRATION.md`.'
+'
+### 2.5 `dragnetd` — Daemon (Faz 5)'
+- Tüm crate'leri tek süreçte birleştirir: harvester → kuyruk → fetcher havuzu → store → api.'
+- Yapılandırma (`figment`/`config`): dinleme portu, DB yolu, eşzamanlılık, kuyruk boyutu.'
+- Gözlemlenebilirlik: `tracing` ile yapılandırılmış log; `/stats` üzerinden metrik.'
+'
+### 2.6 `plugins/qbittorrent/dragnet.py` — Entegrasyon (Faz 6)'
+- nova3 `Engine` arayüzünü uygulayan ince Python dosyası. `dragnet-api`'ye HTTP sorgusu atar,'
+  gelen JSON'u `novaprinter.prettyPrinter` sözleşmesine (`link|name|size|seeds|leech|...`) çevirir.'
+- qBittorrent kaynağına dokunmaz; kullanıcı bu dosyayı kendi arama-plugin dizinine kopyalar.'
+'
+### 2.7 `dragnet-semantic` — Semantik arama (Faz D)'
+- Yerel (çevrimdışı) embedding + hibrit arama. `Embedder` trait'i altında 3 kademe:'
+  **hafif** (potion-multilingual, model2vec, saf Rust), **dengeli** (MiniLM-L12 int8, ONNX),'
+  **yüksek kalite** (EmbeddingGemma-300m Q4, ONNX; Windows'ta DirectML GPU). Karar: §7.3.'
+- Vektörler `torrent_embeddings` (int8 BLOB) tablosunda kalıcı; açılışta bellek-içi'
+  `VecIndex`'e yüklenir, brute-force kosinüs (500k×768 ≈ 150 ms). ANN yok (açık karar §7.4).'
+- Hibrit: `dragnet-api::search` FTS adaylarını ve semantik top-k'yı RRF ile harmanlar;'
+  `mode=fts|semantic|hybrid`. Katman **opt-in** ve çalışma anında takılıp çıkarılabilir'
+  (`SemanticSlot`) — kapalıyken davranış birebir eski FTS.'
+- İndeksleme `dragnet-engine::semantic_indexer` ile Engine'den bağımsız (tarama kapalıyken'
+  de çalışır): backlog → partili embed (`spawn_blocking`) → SQLite + RAM. Model dosyaları'
+  kısa/düz `models/<id>/` dizinine bir kez indirilir (HF; kendi release açık karar).'
+'
+## 3. Veri akışı (uçtan uca)'
+'
+1. `dragnet-dht` ağı tarar, ham infohash üretir.'
+2. Sınırlı kanal + dedup (yakın zamanda görülenler için bloom/LRU) → gürültüyü keser.'
+3. `dragnet-meta` havuzu her yeni infohash için metadata çeker (paralel, zaman aşımlı).'
+4. Başarılı kayıtlar `dragnet-store`'a yazılır; FTS indeksine girer.'
+5. `dragnet-api` sorguları FTS üzerinden yanıtlar; semantik açıksa FTS + vektör adaylarını'
+   RRF ile harmanlar (hibrit).'
+6. qBittorrent plugin'i API'yi sorgular, kullanıcıya sonuç gösterir.'
+'
+## 4. Veri modeli (ilk taslak)'
+'
+`torrents` tablosu:'
+'
+| alan | tip | açıklama |'
+|---|---|---|'
+| `infohash` | TEXT (PK) | 40 hex karakter (v1) — birincil anahtar |'
+| `name` | TEXT | torrent adı (metadata'dan) |'
+| `total_size` | INTEGER | bayt cinsinden toplam boyut |'
+| `file_count` | INTEGER | dosya sayısı |'
+| `first_seen` | INTEGER | ilk görülme (unix ts) |'
+| `last_seen` | INTEGER | son görülme (unix ts) |'
+| `seen_count` | INTEGER | DHT'de kaç kez görüldü (popülerlik vekili) |'
+| `metadata_status` | TEXT | `pending` / `fetched` / `unreachable` |'
+'
+`files` tablosu (1-N): `infohash`, `path`, `size`.'
+`torrents_fts` (FTS5): `name` üzerinde tam metin arama; `infohash` ile eşlenir.'
+`torrent_embeddings` (Faz D): `infohash` (PK, CASCADE), `model_id`, `dim`, `scale`, `q` (int8 BLOB) —'
+nicemlenmiş ad embedding'i; model değişince yeniden üretilir (ağdan yeniden-inşa edilebilir).'
+'
+> Not: "seeds/leech" değerleri DHT crawl'ından doğrudan gelmez; `seen_count` bir vekildir.'
+> Gerçek seed sayısı istenirse sorgu anında DHT `get_peers` scrape'i ile tahmin edilebilir (Faz 4+).'
+'
+## 5. Teknoloji seçimleri'
+'
+| İhtiyaç | Seçim | Gerekçe |'
+|---|---|---|'
+| Dil | Rust | yüksek eşzamanlı ağ I/O, bellek güvenliği, tek binary |'
+| Runtime | `tokio` | async ağ için fiilî standart |'
+| DHT | `mainline` / `rustydht-lib` (değerlendirilecek) | hazır Kademlia/BEP-5 |'
+| Peer wire + BEP-9 | `librqbit` bileşenleri (değerlendirilecek) | olgun, yeniden yazmayı önler |'
+| Depolama | `sqlx` + SQLite/FTS5 → sonra PostgreSQL | sıfır kurulumla başla, sonra ölçekle |'
+| HTTP API | `axum` | tokio ekosistemi, ergonomik |'
+| Serileştirme | `serde`, bencode: `bendy`/`serde_bencode` | standart |'
+| Log/metrik | `tracing` | yapılandırılmış gözlemlenebilirlik |'
+| Config | `figment` | katmanlı yapılandırma |'
+'
+## 6. Legal & Safety'
+'
+- DHT indeksi doğası gereği yasa dışı içerik de barındırabilir (bkz. magnetico'nun aynı uyarısı).'
+- API/UI varsayılan olarak yerel (`127.0.0.1`) dinlemeli; herkese açık dağıtım kullanıcının'
+  bilinçli kararı olmalı ve kimlik doğrulama gerektirmeli.'
+- İçerik filtreleme (engellenecek infohash/kelime listeleri) opsiyonel bir katman olarak'
+  planlanır (Faz 4+). Sorumlu kullanım kullanıcının yükümlülüğüdür.'
+'
+## 7. Kararlar'
+'
+### 7.1 DHT crate seçimi (Faz 1 spike — KARAR VERİLDİ)'
+'
+**Karar:** Temel bağımlılık olarak **`mainline`** (pubky/mainline) seçildi; ancak pasif'
+infohash hasadı **kendi ince KRPC dinleyicimizle** yapılıyor (`crates/dragnet-dht`).'
+'
+**Değerlendirme:**'
+'
+| Ölçüt | `mainline` v8.0.0 | `rustydht-lib` |'
+|---|---|---|'
+| Bakım | Aktif; Pubky altyapısında üretimde (crates.io'da 400k+ indirme, son sürüm 2026-08) | **Terk edilmiş** — crates.io'da yok, GitHub deposu (raptorswing/rustydht-lib) 404 |'
+| BEP-5 kapsamı | Tam (Kademlia, get/put, BEP-42 güvenli node Id, BEP-44) | Tam (daha alt seviye) |'
+| Async | `tokio` uyumlu (`async` feature, `flume`) | Eski/bakımsız |'
+| **Pasif trafik dinleme** | **Yetersiz** — `RequestFilter::allow_request` yalnız `bool` döndürür; gelen sorgunun `info_hash`'ini taşıyan `RequestTypeSpecific` tipi crate dışına export **edilmemiştir** (`mod rpc;` private). Filtre sorguyu görebilir ama içeriğini okuyamaz. | Tasarımı gereği gelen ham paketleri açar (bu işe uygundu) ama artık kullanılamaz |'
+'
+**Sonuç:** İki aday da pasif hasat için "gelen `get_peers`/`announce_peer` gövdesini'
+okuma" yüzeyini kullanılabilir biçimde vermiyor. Bu yüzden:'
+'
+- `mainline`'ı **temel** olarak alıyoruz: BEP-42 uyumlu `Id` üretimi, `DEFAULT_BOOTSTRAP_NODES`'
+  listesi ve **Faz 2**'de metadata için gereken `get_peers` istemcisi buradan gelecek.'
+- Pasif dinleme için `tokio::net::UdpSocket` üzerinde **kendi minimal KRPC katmanımızı**'
+  (`krpc.rs`) yazdık. Böylece gelen her paketi görüp infohash çıkarabiliyoruz; ayrıca'
+  node ID rotasyonu ve rate-limit üzerinde tam kontrol sağlıyoruz. Bu, magnetico'nun'
+  "indexing service" yaklaşımıyla aynı: aktif `find_node` ile yönlendirme tablolarına'
+  girip pasif olarak `get_peers`/`announce_peer` trafiği hasat etmek.'
+'
+Çözümleme `serde_bencode::Value` ile toleranslı; üretim ise bencode anahtar sıralaması'
+için elle yapılıyor.'
+'
+### 7.2 Metadata wire implementasyonu (Faz 2 spike — KARAR VERİLDİ)'
+'
+**Karar:** `librqbit` sarmalamak yerine **minimal kendi wire katmanı** yazıldı'
+(`crates/dragnet-meta/src/wire.rs`).'
+'
+**Gerekçe:**'
+- `librqbit` olgun ama **tam bir torrent istemcisidir** (piece indirme, disk I/O,'
+  seçim algoritmaları…). Bizim tek ihtiyacımız metadata değişimi (BEP-9); bu ağır'
+  bağımlılık gereksiz yüzey ve derleme yükü getirir.'
+- DHT harvester'da (Faz 1) zaten kendi KRPC katmanımızı yazdık; aynı yaklaşımla'
+  BEP-3 handshake + BEP-10 extension + BEP-9 `ut_metadata` yazmak küçük (~300 satır),'
+  test edilebilir ve tam kontrol sağlar.'
+- Peer bulma için `mainline`'ın `get_peers` istemcisini kullanıyoruz (Faz 1'de temel'
+  olarak seçilmişti) — böylece DHT tarafını yeniden yazmıyoruz.'
+'
+**Doğrulama:** Canlı ağda Sintel ve Big Buck Bunny infohash'lerinden isim + dosya'
+listesi + boyut başarıyla çekildi; indirilen metadata'nın SHA-1'i infohash ile doğrulandı.'
+'
+### 7.3 Semantik arama: embedding motoru + vektör deposu (Faz D spike — KARAR VERİLDİ)'
+'
+**Karar:** Yeni crate `dragnet-semantic`; `Embedder` trait'i altında **3 kademeli model'
+yelpazesi** (hız ↔ kalite), vektörler **SQLite'ta BLOB olarak kalıcı + bellek-içi saf-Rust'
+int8 brute-force tarama** (sqlite-vec / harici ANN yok). Arama **hibrit**: FTS5 ve semantik'
+aday listeleri RRF ile harmanlanır. Opt-in; kapalıyken davranış birebir eski FTS.'
+'
+**Bake-off (2026-08-16, Windows 11, RTX 4070 Laptop 8GB, CUDA toolkit yok → DirectML).**'
+Korpus: 60 gerçekçi scene-adı (film/dizi/müzik/oyun/yazılım/kitap; TR dahil), 24 sorgu'
+(EN/TR, eşanlamlı, yazım hatalı, soyut tür, dönem). Ölçüt: hits@5 / MRR; hız: ad/sn.'
+'
+| Model | Motor | hits@5 | MRR | CPU ad/sn | DirectML ad/sn | Disk |'
+|---|---|---|---|---|---|---|'
+| **EmbeddingGemma-300m Q4** (768d) | ort | **0.928** | 0.869 | 45 | 92 (batch 512) | 197 MB |'
+| EmbeddingGemma-300m f32 | ort | 0.919 | **0.894** | 55–67 | 162 (batch 512, sabit pad) | 1.2 GB |'
+| Qwen3-Embedding-0.6B q4f16 (1024d) | ort | 0.820 | 0.824 | 8 | DML hata (Concat) | 541 MB |'
+| Qwen3-Embedding-0.6B int8 | ort | 0.777 | 0.803 | 36 | DML hata | 585 MB |'
+| BGE-M3 (1024d) | ort | 0.759 | 0.805 | 52 | 246 | 2.2 GB |'
+| multilingual-e5-base (768d) | ort | 0.728 | 0.760 | 149 | 460 | 1.1 GB |'
+| **paraphrase-multilingual-MiniLM-L12-Q** (384d) | ort | 0.704 | 0.756 | 384 | 456 | 118 MB |'
+| multilingual-e5-small (384d) | ort | 0.657 | 0.681 | 305 | 765 | 465 MB |'
+| **potion-multilingual-128M** (256d, statik) | model2vec | 0.636 | 0.720 | **58 000** | — | 490 MB |'
+| potion-base-8M (EN) | model2vec | 0.555 | 0.535 | 48 000 | — | 30 MB |'
+'
+Notlar: Gemma dinamik-quant (`model_quantized`) batch ile çalışmıyor; Gemma fp16 DirectML'de'
+NaN üretiyor (bilinen fp16 taşması). MRL-256 kısaltma Gemma'da 0.928→0.862 (kabul edilebilir'
+ama gerekmedi). DirectML'de değişken şekil her batch'te yeniden derleme yapıyor (sorgu gecikmesi'
+0.5 s) → **sabit uzunluğa pad** (32–48 token) ile 46 ms; büyük batch (512) ile 3× hız.'
+'
+**Kademeler (bake-off verisiyle):**'
+'
+| Kademe | Model | Motor | Ne için |'
+|---|---|---|---|'
+| Hafif | potion-multilingual-128M | model2vec-rs (saf Rust) | zayıf makineler; 500k kaydı ~10 sn'de indeksler, anında model değişimi |'
+| Dengeli | paraphrase-multilingual-MiniLM-L12-v2 (int8 ONNX) | ort (CPU) | orta CPU maliyeti, küçük indirme |'
+| **Yüksek (varsayılan)** | EmbeddingGemma-300m Q4 | ort (CPU / **DirectML**) | en iyi kalite; GPU'lu makinede 2–3× hızlı indeksleme |'
+'
+Cihaz `auto`: DirectML dene → başarısızsa CPU. GPU yalnız **indeksleme** batch'lerinde'
+kullanılır (sabit pad + büyük batch); tek sorgu embed'i CPU'da (küçük ve tutarlı gecikme).'
+'
+**Elenenler / neden:** `fastembed` (Apache-2.0) doğrulama için kullanıldı ama üründe **doğrudan'
+`ort` + `tokenizers`** tercih edildi: sabit-pad/batch kontrolü, `sentence_embedding` çıkışı,'
+gereksiz image bağımlılıkları yok ve `tokenizers` sürümü model2vec ile tekilleştirilebiliyor'
+(fastembed+model2vec birlikte MSVC'de CRT `LNK2038` çakışması: model2vec'in `esaxx_fast`'
+C++ özelliği; çözüm `model2vec-rs` default-features kapalı + `tokenizers` yalnız `onig`).'
+Qwen3-0.6B/BGE-M3/e5-large "büyük" adaylar torrent adlarında Gemma'yı geçemedi; GPU'nun'
+faydası kalite değil hız oldu.'
+'
+**Vektör deposu:** `sqlite-vec 0.1.6` çalıştı (0.1.10-alpha MSVC'de derlenmiyor) ama'
+200k×768'de KNN 0.56 s (int8) / 1.1 s (f32) — interaktif için yavaş; ayrıca repo'ya ilk'
+`unsafe` + C derlemesi getirirdi. Bellek-içi saf-Rust int8 tarama: 500k×768 → **148 ms**'
+tek çekirdek (native CPU'da 65 ms), 366 MB RAM; 256d → 65 ms / 122 MB. Karar: vektörler'
+`torrent_embeddings(infohash, model_id, dim, scale, q INT8 BLOB)` tablosunda kalıcı; açılışta'
+RAM'e yüklenir; yeni kayıtlar artımlı eklenir. Model/kademe değişince tablo düşürülüp'
+yeniden kurulur (ağdan yeniden-inşa ilkesi korunur — vektörler adlardan türetilir).'
+'
+**ORT tuzağı (Windows):** ~230 karakterlik derin HF-cache yolundaki model dosyasını ORT'
+"File doesn't exist" diye reddetti; kısa yol çalıştı → modeller **kısa/düz** bir dizine'
+indirilir (`<data>/models/<id>/model.onnx`), HF snapshot iç içe düzeni kullanılmaz.'
+'
+### 7.4 Faz E — bütünsel kalite çevrimi: çekim boru hattı, kodlama, kalibrasyon (KARAR VERİLDİ)'
+'
+**Ölçüm (2026-08-17, gerçek DB: 797k bilinen infohash, 528 fetched, 34.6k unreachable):**'
+çekim başarı oranı **%1,5**; kontrollü deney (150 popüler pending, eski fetcher): 0 → tek'
+eşzamanlı istemcide %100 (BBB/Sintel/ToS), 10 eşzamanlıda %18 ama 150 hash **1111 s** —'
+başarılı çekim medyanı 14 s, kuyruk 40 s+, `peer_gather_timeout=20 s` bunları kesiyordu;'
+başarısız çekim ~70 s sürüyordu (50 peer × 8 s, önce topla sonra dene). Ayrıca engine'
+"izin boşsa çek" (`try_acquire`) ile firehose'daki hash'lerin çoğunu **hiç denemiyordu**.'
+'
+**Kararlar ve etkileri:**'
+1. **Pipelined fetch** (`dragnet-meta`): `get_peers` akışı sürerken gelen peer'e hemen'
+   bağlan; ilk başarı kazanır; tek bütçe (`overall_timeout=45 s`), bağlanma zaman aşımı'
+   ayrı (3,5 s — peer denemelerinin ~%92'si NAT'lı adreslerin bağlanma zaman aşımıydı),'
+   çekim başına 12 eşzamanlı / 40 peer. Aynı 150 hash: 1111 s → **143 s**, başarı medyanı'
+   14 s → 4 s; saatlik verim ~3× (başarısızlar 70 s yerine ~6 s harcar).'
+2. **Öncelikli çekim kuyruğu** (`store.next_to_fetch`): sıcak (2 saat içinde pasif trafikte'
+   ya da peer-ipuçlu görülen) › popüler (`seen_count`) › taze; en çok 3 deneme, 6 saat soğuma;'
+   `fetch_attempts/last_attempt/hot_seen/hot_count/fetched_at` kolonları; eski `unreachable`'
+   kayıtlar bir kez geri kuyruğa (`PRAGMA user_version=1`).'
+3. **Sighting kaynağı** (`dragnet-dht`): `Sighting { infohash, source, peers }`;'
+   get_peers/announce = sıcak (ana dedup'ı atlar, kısa pencerede bastırılır).'
+4. **BEP-51 takip `get_peers`**: örnek veren düğüm o infohash için peer saklıyordur → yeni'
+   örneklerin birkaçı (3/yanıt, rate-limit bütçesinden) için aynı düğüme doğrudan'
+   `get_peers`; `values` → `SamplePeers` sighting (sıcak, peer ipuçlu). Engine ipuçlarını'
+   bellek-içi (50k) tutar, fetch önce onları dener. Canlıda: peer-yok oranı %73 → ~%1,'
+   başarı %3 → %8 (asıl kalan darboğaz NAT'lı peer'ler).'
+5. **Ad kodlaması** (`dragnet-meta::text`): `name.utf-8`/`path.utf-8` tercih; değilse'
+   chardetng tahmini + GB18030/Shift_JIS/EUC-KR/CP1251/CP1254/CP1252 adayları arasından'
+   hatasız çözülüp "harf oranı" en yüksek olan (kısa CJK dizeler GBK/SJIS arasında doğası'
+   gereği belirsiz). Bozuk (`�`) adlar semantik indekse alınmaz.'
+6. **Semantik kalibrasyon**: mutlak `min_score` yerine **kendi kendini kalibre eden gürültü'
+   tabanı** (4 anlamsız sonda → en iyi skorların medyanı; her 5000 eklemede yenilenir) +'
+   göreli kesim (en iyi × 0,80). Gerçek DB'de Gemma taban 0,377 (isabet 0,42–0,69), MiniLM'
+   0,645, potion 0,352. Semantik aday sayısı 100'e düşürüldü. 4. kademe **Deneysel**:'
+   Qwen3-Embedding-0.6B q4f16 (last-token pooling, boş KV girdileri; yalnız CPU).'
+7. **Keşif grafiği**: `discovery` artık şimdiden geriye tam N kova (boş=0) döner; eksen'
+   işaretleri, "şimdi" çizgisi, hover ipucu. `FetchStats` (peer hata türleriyle) → `/stats`,'
+   daemon log ve pano "Metadata çekimi" kartı.'
+8. **Sorgu anlama + kategori-farkındalı doküman** (Faz E-b): `dragnet_core::parse`'
+   (scene adı → başlık/yıl/sezon/çözünürlük/etiket/grup, regex\'siz), `dragnet_semantic::query`'
+   (TR/EN dolgu temizliği; kategori niyeti — kelime son konumdaysa ya da İngilizce çoğul ilk'
+   kelimeyse; "2000\'lerin"/"90\'ların"/"2010s" yıl aralığı) ve `text::doc_text` (temiz başlık +'
+   yıl + sezon + kategori sözcüğü; teknik etiketler atılır). Kategori/yıl niyeti **yumuşak'
+   artırma** (`store::Boost`, RRF skoru ×1.5 / ×1.3) — filtre değil. Kategori kelimesi'
+   semantik metinde KALIR (dokümanla hizalanır: "harry potter filmi" > "harry potter"), FTS'
+   metninden çıkar. Model kimlikleri `:v2` şema soneki (indeks otomatik yeniden kurulur).'
+   **Gürültü tabanı mutlak eşik olmaktan çıkarıldı**: 3.5k gerçek adla taban 0.42\'ye çıkıp'
+   meşru TR→EN eşleşmeleri (0.30–0.40) siliyordu; yalnız göreli kesim (en iyi × 0.80) +'
+   modelin sanity tabanı kaldı. Değerlendirme seti (`examples/eval.rs`, 19 sorgu, gerçek DB'
+   adları): hit@5 kalite %47→**%74**, hafif %53→%68, dengeli %63; kalanlar yazım hatası'
+   ("hery poter"), soyut ("büyücü çocuk"), TR başlık çevirisi ("taht oyunları"), dönem.'
+'
+**Açık:** NAT'lı peer'lere uTP/holepunch (BEP-55) ile ulaşmak; sıcak kuyruk büyüdükçe'
+öncelik ağırlıklarını yeniden ayarlamak; peer ipuçlarını kalıcılaştırmak.'
+'
+### 7.5 Hâlâ açık kararlar'
+'
+- BitTorrent v2 (SHA-256 infohash) desteği ne zaman? → v1 çalıştıktan sonra.'
+- Daemon'da (Faz 5) harvester ile fetcher aynı DHT düğümünü mü paylaşmalı? → Faz 5'te ölçülecek.'
+- Semantik: özel damıtılmış model (Model2Vec ile Gemma'dan torrent-adı korpusuna damıtma,'
+  kendi GitHub release'inden dağıtım); CUDA EP opsiyonu; >2M kayıtta ANN (HNSW) geçişi.'
