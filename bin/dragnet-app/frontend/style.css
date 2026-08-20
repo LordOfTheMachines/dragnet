@@ -212,3 +212,22 @@ input[type=text]:focus, input[type=number]:focus { outline: none; border-color: 
 .tile.sm .tval { font-size: 22px; }
 @media (max-width: 1100px) { .tiles-6 { grid-template-columns: repeat(3, 1fr); } }
 #sort-reset { color: var(--accent); text-decoration: none; } #sort-reset:hover { text-decoration: underline; }
+
+/* Dosya ağacı penceresi (F8-2) */
+.modal { position: fixed; inset: 0; background: rgba(4,7,12,.72); backdrop-filter: blur(3px); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 32px; }
+.modal-box { background: var(--panel); border: 1px solid var(--border2); border-radius: var(--radius); width: min(920px, 100%); max-height: 100%; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,.55); }
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.modal-title { font-weight: 600; word-break: break-word; }
+.tree { overflow: auto; padding: 12px 18px 18px; font-size: 13px; }
+.tree .tnode { margin: 2px 0; }
+.tree summary { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 6px; border-radius: 6px; }
+.tree summary:hover { background: rgba(79,140,247,.08); }
+.tree .tdir { color: var(--text); font-weight: 600; }
+.tree .tdir::before { content: "📁 "; }
+.tree .tchild { margin-left: 16px; border-left: 1px solid var(--border); padding-left: 10px; }
+.tree .tfile { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 6px; }
+.tree .tname { color: var(--muted); word-break: break-all; }
+.tree .tname::before { content: "📄 "; }
+.tree .tmeta { color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.fileslink { cursor: pointer; }
+.fileslink:hover { color: var(--accent); text-decoration: underline; }

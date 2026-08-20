@@ -93,6 +93,10 @@ pub struct Semantic {
 /// Yeniden sıralanacak aday sayısı (ilk N; sonrası harman sırasında kalır).
 pub const RERANK_TOP_N: usize = 30;
 
+/// Doküman metnine katılacak dosya adlarının karakter bütçesi (F8-1). Gemma bağlamı
+/// 2048 token; uzun dosya listeleri başlığın sinyalini boğar, bu yüzden sınırlı tutulur.
+pub const DOC_FILES_MAX_CHARS: usize = 400;
+
 /// "Bu sorgunun korpusta karşılığı yok" eşiği — **cross-encoder** (bge-reranker-v2-m3)
 /// logit'i. Embedding kosinüsü bu ayrımı YAPAMAZ: F4 ölçümünde (3.5k gerçek ad) klavye
 /// zırvası ("asdkjhqwe zxcv") 0.421 kosinüs alırken meşru TR sorgu ("taht oyunları

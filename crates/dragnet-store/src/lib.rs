@@ -180,6 +180,10 @@ pub struct Store {
 /// Önbellekteki yazım dizini ve kurulma anı (TTL kontrolü için).
 type SpellCache = Arc<tokio::sync::RwLock<Option<(Arc<dragnet_core::spell::SpellIndex>, Instant)>>>;
 
+/// FTS ve semantik metne katılacak en fazla dosya yolu (en büyük dosyadan başlayarak).
+/// Torrent'ler yüz binlerce dosya içerebilir; sınır indekslemeyi öngörülebilir tutar.
+const FTS_MAX_PATHS: i64 = 48;
+
 /// Yazım sözlüğünün tazelenme aralığı: indeksleme sürerken yeni adlar sözlüğe girsin,
 /// ama her sorguda yeniden kurulmasın (4k ad ≈ 30k terim, kurulum birkaç ms).
 const SPELL_TTL: std::time::Duration = std::time::Duration::from_secs(600);
@@ -345,11 +349,50 @@ impl Store {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_infohash ON files(infohash);")
             .execute(&self.pool)
             .await?;
-        sqlx::query(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS torrents_fts USING fts5(name, infohash UNINDEXED);",
-        )
-        .execute(&self.pool)
-        .await?;
+        // FTS şeması (F8-1): ad + **dosya yolları** ayrı sütunlarda, aksan eritmeli
+        // tokenizer ile. Adı anlamsız olan torrent'ler ("s01") ancak içindeki dosya
+        // adlarından anlaşılır; `remove_diacritics 2` ise "işletim"↔"isletim",
+        // "büyücü"↔"buyucu" farkını eritir (Türkçe sorgular için elle ASCII varyantı
+        // yazmaya gerek kalmaz). Şema değiştiği için eski tablo düşürülüp yeniden kurulur.
+        const FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE torrents_fts USING fts5(name, paths, \
+             infohash UNINDEXED, tokenize='unicode61 remove_diacritics 2')";
+        let existing: Option<String> =
+            sqlx::query("SELECT sql FROM sqlite_master WHERE type='table' AND name='torrents_fts'")
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get::<String, _>("sql"));
+        let needs_rebuild = match &existing {
+            None => true,
+            // Sütun/tokenizer kümesi eşleşmiyorsa yeniden kur (eski sürümden yükseltme).
+            Some(sql) => !sql.contains("paths") || !sql.contains("remove_diacritics 2"),
+        };
+        if needs_rebuild {
+            if existing.is_some() {
+                // vocab görünümü FTS tablosuna bağlı: önce o düşürülür.
+                sqlx::query("DROP TABLE IF EXISTS torrents_vocab")
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query("DROP TABLE torrents_fts")
+                    .execute(&self.pool)
+                    .await?;
+            }
+            sqlx::query(FTS_SCHEMA).execute(&self.pool).await?;
+            // Mevcut kayıtlardan yeniden doldur (ad + dosya yolları).
+            let n = sqlx::query(
+                "INSERT INTO torrents_fts (name, paths, infohash)
+                 SELECT t.name,
+                        COALESCE((SELECT group_concat(f.path, ' ')
+                                  FROM (SELECT path FROM files WHERE infohash = t.infohash
+                                        ORDER BY size DESC LIMIT ?1) f), ''),
+                        t.infohash
+                 FROM torrents t WHERE t.name <> ''",
+            )
+            .bind(FTS_MAX_PATHS)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            debug!(rows = n, "FTS indeksi yeni şemayla yeniden kuruldu");
+        }
         // F4-2: FTS sözlüğü (terim + kaç dokümanda geçtiği). Veri kopyalamaz, indeksin
         // üstünde bir görünümdür; yazım düzeltme adayları buradan gelir (bkz.
         // `dragnet_core::spell`) — harici sözlük yok, korpusta olmayan bir kelimeye
@@ -572,8 +615,17 @@ impl Store {
             .bind(&hex)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO torrents_fts (name, infohash) VALUES (?1, ?2)")
+        // En büyük FTS_MAX_PATHS dosyanın yolu da indekslenir (F8-1).
+        let paths: String = rec
+            .files
+            .iter()
+            .take(FTS_MAX_PATHS as usize)
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        sqlx::query("INSERT INTO torrents_fts (name, paths, infohash) VALUES (?1, ?2, ?3)")
             .bind(&rec.name)
+            .bind(&paths)
             .bind(&hex)
             .execute(&mut *tx)
             .await?;
@@ -647,11 +699,18 @@ impl Store {
         let sql = format!(
             "SELECT t.infohash, t.name, t.total_size, t.file_count, t.seen_count,
                     t.first_seen, t.last_seen, t.peer_count, t.last_check, t.category
-               FROM torrents_fts f JOIN torrents t ON t.infohash = f.infohash
-              WHERE f.name MATCH ? AND t.metadata_status = 'fetched'{fsql}
+               FROM torrents_fts JOIN torrents t ON t.infohash = torrents_fts.infohash
+              WHERE torrents_fts MATCH ? AND t.metadata_status = 'fetched'{fsql}
               ORDER BY {order}
               LIMIT ? OFFSET ?",
-            order = sort.order_sql("t.", desc),
+            // Alaka sırasında sözcüksel skor (bm25) birincil: **ad** eşleşmesi dosya yolu
+            // eşleşmesinden 10× ağır (F8-1; yollar indekslendikten sonra yalnız içerikte
+            // geçen kayıtlar adı eşleşenlerin önüne geçmesin). Eşitlikte popülerlik.
+            order = if matches!(sort, SortKey::Relevance) {
+                "bm25(torrents_fts, 10.0, 1.0), t.seen_count DESC, t.infohash".to_string()
+            } else {
+                sort.order_sql("t.", desc)
+            },
         );
         let mut q = sqlx::query(&sql).bind(&match_query);
         for b in fbinds {
@@ -983,7 +1042,7 @@ impl Store {
         &self,
         model_id: &str,
         limit: i64,
-    ) -> Result<Vec<(InfoHash, String, String)>, StoreError> {
+    ) -> Result<Vec<(InfoHash, String, String, Vec<String>)>, StoreError> {
         let rows = sqlx::query(
             "SELECT t.infohash, t.name, t.category FROM torrents t
                LEFT JOIN torrent_embeddings e ON e.infohash = t.infohash AND e.model_id = ?1
@@ -999,10 +1058,22 @@ impl Store {
         for r in rows {
             let hex: String = r.get("infohash");
             if let Some(ih) = InfoHash::from_hex(&hex) {
+                // En büyük dosyaların adları semantik metne katılır (F8-1).
+                let files: Vec<String> = sqlx::query(
+                    "SELECT path FROM files WHERE infohash = ?1 ORDER BY size DESC LIMIT ?2",
+                )
+                .bind(&hex)
+                .bind(FTS_MAX_PATHS)
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .map(|f| f.get::<String, _>("path"))
+                .collect();
                 out.push((
                     ih,
                     r.get::<String, _>("name"),
                     r.get::<String, _>("category"),
+                    files,
                 ));
             }
         }
@@ -1142,8 +1213,8 @@ impl Store {
         } else {
             let (fsql, fbinds) = filter.where_and_binds("t.");
             let sql = format!(
-                "SELECT t.infohash FROM torrents_fts f JOIN torrents t ON t.infohash = f.infohash
-                  WHERE f.name MATCH ? AND t.metadata_status = 'fetched'{fsql}
+                "SELECT t.infohash FROM torrents_fts JOIN torrents t ON t.infohash = torrents_fts.infohash
+                  WHERE torrents_fts MATCH ? AND t.metadata_status = 'fetched'{fsql}
                   ORDER BY {order} LIMIT ?",
                 order = SortKey::Relevance.order_sql("t.", true),
             );
@@ -1676,7 +1747,7 @@ mod tests {
         }
         let backlog = store.embed_backlog("m1", 10).await.unwrap();
         assert_eq!(backlog.len(), 3);
-        assert!(backlog.iter().any(|(_, n, _)| n == "Bravo"));
+        assert!(backlog.iter().any(|(_, n, _, _)| n == "Bravo"));
 
         let a = InfoHash::from_hex("1111111111111111111111111111111111111111").unwrap();
         let b = InfoHash::from_hex("2222222222222222222222222222222222222222").unwrap();

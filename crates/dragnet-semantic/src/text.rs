@@ -86,6 +86,45 @@ pub fn doc_text(name: &str, category: &str) -> String {
     s
 }
 
+/// Doküman metni + **dosya adları** (F8-1). Adı anlamsız olan torrent'ler ("s01",
+/// "07-coyotes") ancak içeriğinden anlaşılır; dosya adları hem konuyu hem türü ele verir.
+/// Yalnız dosya **adı** alınır (dizin yolu değil: tekrar eden klasör adları gürültüdür),
+/// tekrarlar ve uzantı-etiket çöpü normalize edilir, toplam karakter sınırlanır —
+/// embedding modelinin bağlam penceresi kısa (Gemma 2048 token) ve uzun listeler
+/// başlığın sinyalini boğar.
+pub fn doc_text_with_files(
+    name: &str,
+    category: &str,
+    files: &[String],
+    max_chars: usize,
+) -> String {
+    let mut s = doc_text(name, category);
+    if files.is_empty() {
+        return s;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut extra = String::new();
+    for f in files {
+        let base = f.rsplit(['/', '\\']).next().unwrap_or(f);
+        let norm = normalize_name(base);
+        let norm = norm.trim();
+        // Ad zaten dosya adını içeriyorsa (tek dosyalı torrent) tekrar etme.
+        if norm.is_empty() || s.contains(norm) || !seen.insert(norm.to_string()) {
+            continue;
+        }
+        if extra.len() + norm.len() + 1 > max_chars {
+            break;
+        }
+        extra.push(' ');
+        extra.push_str(norm);
+    }
+    if !extra.is_empty() {
+        s.push_str(" — files:");
+        s.push_str(&extra);
+    }
+    s
+}
+
 #[cfg(test)]
 mod doc_tests {
     use super::*;

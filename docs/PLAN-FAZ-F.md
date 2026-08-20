@@ -126,6 +126,34 @@ düşürüyordu). Teşhis aracı: `dragnet-store --example vocab <db> <kelime…
   olarak kullanılır). ORT DML tahsis sayacıyla çapraz doğrulama gerekmedi.
 - Görsel dil pano kartlarıyla hizalı (card-head + rozet + `muted small` açıklama satırı).
 
+### F8 — Dosya yolları + sertleştirme (Python portu incelemesinden, 2026-08-19)
+
+Arkadaşın Python portu (`dragnetpy`) incelendi; mimari örtüşüyor (aynı SQLite+FTS5, int8
+nicemleme, %80 göreli kesim, bge-reranker). Bizde olmayan ve alınacak dört şey — bu
+sırayla yapılacak:
+
+1. **Dosya yollarını indeksle** (en büyük kalite kazancı). FTS tablosu `fts5(name, paths,
+   infohash UNINDEXED, tokenize='unicode61 remove_diacritics 2')` olarak yeniden kurulur;
+   semantik doküman metni `ad + kategori + en büyük N dosya yolu` (sınırlı) olur, model
+   kimliği `:v3` ile eski vektörler geçersizleşir. Adı `s01` gibi anlamsız olan torrent'ler
+   ancak içeriğinden anlaşılabiliyor; kategori tahmini de dosya uzantılarıyla isabetlenir.
+   Aynı işlemde **aksan eritme** (`remove_diacritics 2`) gelir: "işletim"↔"isletim",
+   "büyücü"↔"buyucu" — sözlükteki elle yazılmış ASCII varyantlarına gerek kalmaz.
+   Sıralamada ad ağırlığı yollardan yüksek tutulur (`bm25(torrents_fts, 10.0, 1.0)`).
+2. **Dosya ağacı görüntüleyici** (kullanıcı isteği): sonuç satırından tıklanınca torrent'in
+   dosya listesi ağaç olarak açılır (boyutlar + toplam). Veri zaten `files` tablosunda.
+3. **Peer adres politikası** (güvenlik açığı): bir peer'e TCP bağlanmadan önce adresin
+   **global** olduğu doğrulanır; özel (RFC1918), loopback, link-local, multicast, reserved
+   ve CGNAT aralıkları reddedilir. Bugün yalnız loopback/unspecified eleniyor → kötü
+   niyetli bir DHT düğümü yerel ağa bağlantı denemesi yaptırabilir (DHT→LAN SSRF).
+4. **Depolama büyüme freni**: DB bütçesi aşılınca ya da boş disk rezervin altına inince
+   yazma (sighting/metadata/embedding) duraklar, indeks salt-okunur sunulmaya devam eder;
+   basınç geçince kendiliğinden sürer. Ayarlarda bütçe + rezerv alanı.
+
+Küçük notlar (opsiyonel): model kimliğine bağlam şemasını gömmek (bizde `:v2` elle),
+API'de sabit-zamanlı token karşılaştırması + sorgu uzunluğu sınırı + IP başına hız limiti
+(varsayılan loopback bind olduğu için düşük öncelikli).
+
 ### F7 — Zenginleştirme: "bu torrent gerçekte nedir?" (kullanıcı önerisi, 2026-08-19)
 
 Kategori ve başlık şu an **yalnız ada bakarak** tahmin ediliyor; tavan burada. Öneri: ad

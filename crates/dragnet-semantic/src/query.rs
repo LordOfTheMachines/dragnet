@@ -154,15 +154,18 @@ const ALIAS_PHRASES: &[(&str, &str)] = &[
 /// bildirimi: örnekleri her durumda eklemek "windows işletim sistemi" sorgusuna linux
 /// dağıtımlarını getiriyordu — genişletme kullanıcının niyetiyle yarışıyordu.)
 const ALIAS_CONCEPTS: &[(&str, &str, &str)] = &[
+    // "işletim sistemi" tek başına sorulduğunda kullanıcı **hepsini** bekler: Windows,
+    // Linux dağıtımları, macOS. Örnek listesi bu yüzden geniş; ama sorguda zaten bir
+    // ürün adı varsa ("windows işletim sistemi") örnekler eklenmez (aşağıdaki kural).
     (
         "işletim sistemi",
         "operating system",
-        "linux ubuntu debian iso",
+        "windows linux ubuntu debian mint fedora macos iso",
     ),
     (
         "isletim sistemi",
         "operating system",
-        "linux ubuntu debian iso",
+        "windows linux ubuntu debian mint fedora macos iso",
     ),
     (
         "linux dağıtımı",
@@ -359,16 +362,21 @@ pub fn understand(query: &str) -> QueryPlan {
     let mut text = kept.join(" ");
 
     // Kavramlar: İngilizce karşılık her zaman, örnekler yalnız kavram sorgunun tamamıysa.
+    let mut example_words: Vec<String> = Vec::new();
     for (tr, en, examples) in ALIAS_CONCEPTS {
         if text.contains(tr) {
             let rest: String = text.replace(tr, " ");
             let only_concept = rest.split_whitespace().all(|w| {
                 FILLER_PHRASES.contains(&w) || CATEGORY_HINTS.iter().any(|(k, _)| w == *k)
             });
-            text = text.replace(
-                tr,
-                &format!("{en} {}", if only_concept { examples } else { "" }),
-            );
+            let add = if only_concept { *examples } else { "" };
+            // Örnek kelimeler **yalnız embedding metnine** girer, FTS'e girmez: FTS
+            // terimleri VE ile birleşir, "operating system windows linux ubuntu debian…"
+            // hiçbir kayıtla eşleşmez ve sözcüksel yolu tamamen kör eder.
+            if !add.is_empty() {
+                example_words.extend(add.split_whitespace().map(str::to_string));
+            }
+            text = text.replace(tr, &format!("{en} {add}"));
             plan.recognized = true;
         }
     }
@@ -452,7 +460,8 @@ pub fn understand(query: &str) -> QueryPlan {
             }
         }
         sem_words.push(w);
-        if !is_cat {
+        // Kategori kelimeleri ve kavram örnekleri FTS metnine girmez.
+        if !is_cat && !example_words.iter().any(|e| e == w) {
             fts_words.push(w);
         }
     }

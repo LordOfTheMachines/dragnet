@@ -261,6 +261,20 @@
     </section>
   </main>
 
+  <!-- Dosya ağacı penceresi (F8-2): sonuç satırındaki ada tıklanınca açılır -->
+  <div id="files-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <div>
+          <div id="files-title" class="modal-title"></div>
+          <div id="files-sub" class="muted small"></div>
+        </div>
+        <button id="files-close" class="btn small ghost">Kapat</button>
+      </div>
+      <div id="files-body" class="tree"></div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
   <script src="app.js"></script>
 </body>

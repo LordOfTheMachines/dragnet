@@ -147,6 +147,7 @@ fn main() {
             commands::set_settings,
             commands::set_autostart,
             commands::semantic_status,
+            commands::torrent_files,
             commands::check_update,
             commands::install_update,
         ])

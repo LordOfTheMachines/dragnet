@@ -138,7 +138,8 @@ impl ModelSpec {
     }
     /// Modelin yerel dizini.
     pub fn dir(&self, models_dir: &Path) -> PathBuf {
-        // `id` indeks uyumluluk kimliğidir ("...:v2" şema soneki içerir); dizin adı iki nokta
+        // `id` indeks uyumluluk kimliğidir (":v3" = ad+kategori+dosya adları şeması, F8-1);
+        // şema değişince eski vektörler otomatik silinir. Dizin adı iki nokta
         // öncesi kısımdır (Windows'ta `:` dosya adında geçersiz).
         models_dir.join(self.id.split(':').next().unwrap_or(self.id))
     }
@@ -156,7 +157,7 @@ impl ModelSpec {
 
 pub static POTION: ModelSpec = ModelSpec {
     tier: Tier::Light,
-    id: "potion-multilingual-128M:v2",
+    id: "potion-multilingual-128M:v3",
     display_name: "Potion multilingual 128M (model2vec, statik)",
     engine: Engine::Model2Vec,
     dim: 256,
@@ -177,7 +178,7 @@ pub static POTION: ModelSpec = ModelSpec {
 
 pub static MINILM: ModelSpec = ModelSpec {
     tier: Tier::Balanced,
-    id: "minilm-l12-multilingual-q:v2",
+    id: "minilm-l12-multilingual-q:v3",
     display_name: "paraphrase-multilingual-MiniLM-L12-v2 (int8 ONNX)",
     engine: Engine::Onnx,
     dim: 384,
@@ -197,7 +198,7 @@ pub static MINILM: ModelSpec = ModelSpec {
 
 pub static GEMMA: ModelSpec = ModelSpec {
     tier: Tier::Quality,
-    id: "embeddinggemma-300m-q4:v2",
+    id: "embeddinggemma-300m-q4:v3",
     display_name: "EmbeddingGemma 300M (Q4 ONNX)",
     engine: Engine::Onnx,
     dim: 768,

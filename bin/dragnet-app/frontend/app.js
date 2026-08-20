@@ -409,7 +409,7 @@ const browse = { q: "", cat: "all", sort: "", desc: true, offset: 0, PAGE: 60, h
 function rowHtml(r, n) {
   return `<tr>
     <td class="r idx">${n}</td>
-    <td class="name" title="${escAttr(r.name)}">${esc(r.name)}</td>
+    <td class="name"><span class="fileslink" data-ih="${escAttr(r.infohash)}" title="Dosyaları göster: ${escAttr(r.name)}">${esc(r.name)}</span></td>
     <td>${catChip(r.category)}</td>
     <td class="r num">${humanSize(r.size)}</td>
     <td class="r num">${peerCell(r.peers)}</td>
@@ -418,6 +418,68 @@ function rowHtml(r, n) {
     <td class="r num"><span class="copy" data-magnet="${escAttr(r.magnet)}">magnet</span></td>
   </tr>`;
 }
+
+// --- Dosya ağacı (F8-2): sonuç satırındaki ada tıklayınca torrent'in içeriği ---
+// Yollar "a/b/c.mkv" biçiminde gelir; klasörler iç içe düğümlere çevrilir, boyutlar
+// yukarı toplanır. Ağaç <details> ile açılır/kapanır — ek kütüphane yok.
+function buildTree(files) {
+  const root = { dirs: new Map(), files: [], size: 0 };
+  for (const f of files) {
+    const parts = String(f.path).split(/[/\\]/).filter(Boolean);
+    let node = root;
+    node.size += f.size;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [], size: 0 });
+      node = node.dirs.get(parts[i]);
+      node.size += f.size;
+    }
+    node.files.push({ name: parts[parts.length - 1] || f.path, size: f.size });
+  }
+  return root;
+}
+function treeHtml(node, depth = 0) {
+  const dirs = [...node.dirs.entries()].sort((a, b) => b[1].size - a[1].size);
+  const files = node.files.slice().sort((a, b) => b.size - a.size);
+  let h = "";
+  for (const [name, child] of dirs) {
+    const count = countFiles(child);
+    h += `<details class="tnode"${depth < 1 ? " open" : ""}><summary><span class="tdir">${esc(name)}</span>` +
+      `<span class="tmeta">${nf(count)} dosya · ${humanSize(child.size)}</span></summary>` +
+      `<div class="tchild">${treeHtml(child, depth + 1)}</div></details>`;
+  }
+  for (const f of files) {
+    h += `<div class="tfile"><span class="tname">${esc(f.name)}</span><span class="tmeta">${humanSize(f.size)}</span></div>`;
+  }
+  return h;
+}
+function countFiles(node) {
+  let n = node.files.length;
+  for (const c of node.dirs.values()) n += countFiles(c);
+  return n;
+}
+async function showFiles(infohash) {
+  const dlg = $("files-modal"), body = $("files-body");
+  $("files-title").textContent = "Yükleniyor…";
+  body.innerHTML = "";
+  dlg.classList.remove("hidden");
+  try {
+    const d = await invoke("torrent_files", { infohash });
+    if (!d) { $("files-title").textContent = "Dosya listesi yok"; body.innerHTML = `<div class="muted small">Bu torrent'in metadata'sı henüz çekilmemiş.</div>`; return; }
+    $("files-title").textContent = d.name;
+    const files = d.files || [];
+    $("files-sub").textContent = `${nf(files.length)} dosya · ${humanSize(d.total_size)}`;
+    body.innerHTML = files.length ? treeHtml(buildTree(files)) : `<div class="muted small">Dosya kaydı yok.</div>`;
+  } catch (e) {
+    $("files-title").textContent = "Hata";
+    body.innerHTML = `<div class="muted small">Dosya listesi alınamadı.</div>`;
+  }
+}
+document.addEventListener("click", (e) => {
+  const link = e.target.closest(".fileslink");
+  if (link && link.dataset.ih) { showFiles(link.dataset.ih); return; }
+  if (e.target.closest("#files-close") || e.target.id === "files-modal") $("files-modal").classList.add("hidden");
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("files-modal").classList.add("hidden"); });
 
 function resetAndLoad() {
   browse.offset = 0; browse.hasMore = true; browse.loaded = true;

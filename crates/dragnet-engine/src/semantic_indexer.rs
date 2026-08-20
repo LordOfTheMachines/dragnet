@@ -81,7 +81,18 @@ pub fn spawn_indexer(store: Store, sem: Arc<Semantic>) -> JoinHandle<()> {
             // Doküman metni: temiz başlık + yıl + kategori (bkz. `text::doc_text`).
             let docs: Vec<(dragnet_core::InfoHash, String)> = items
                 .iter()
-                .map(|(ih, name, cat)| (*ih, dragnet_semantic::text::doc_text(name, cat)))
+                .map(|(ih, name, cat, files)| {
+                    // F8-1: doküman metnine en büyük dosyaların adları da katılır.
+                    (
+                        *ih,
+                        dragnet_semantic::text::doc_text_with_files(
+                            name,
+                            cat,
+                            files,
+                            dragnet_semantic::DOC_FILES_MAX_CHARS,
+                        ),
+                    )
+                })
                 .collect();
             let rows = match tokio::task::spawn_blocking(move || sem2.embed_and_add(&docs)).await {
                 Ok(Ok(rows)) => rows,

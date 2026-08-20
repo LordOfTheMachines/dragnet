@@ -152,6 +152,24 @@ pub async fn semantic_status(state: State<'_, AppState>) -> Result<Value, String
     Ok(state.semantic.status_json().await)
 }
 
+/// Bir torrent'in dosya listesi (F8-2): arayüzde ad'a tıklanınca ağaç olarak gösterilir.
+/// Veri zaten `files` tablosunda; metadata çekilmemişse `null` döner.
+#[tauri::command]
+pub async fn torrent_files(state: State<'_, AppState>, infohash: String) -> Result<Value, String> {
+    let Some(ih) = dragnet_core::InfoHash::from_hex(infohash.trim()) else {
+        return Err("geçersiz infohash".into());
+    };
+    let rec = state.store.get(ih).await.map_err(|e| e.to_string())?;
+    Ok(match rec {
+        Some(r) => json!({
+            "name": r.name,
+            "total_size": r.total_size,
+            "files": r.files.iter().map(|f| json!({ "path": f.path, "size": f.size })).collect::<Vec<_>>(),
+        }),
+        None => Value::Null,
+    })
+}
+
 /// Birleşik arama/gözat (tek sıralanabilir tablo). Sorgu boşsa FTS yerine tüm
 /// indeksi listeler (gözat). `sort`/`desc`/`offset` ile sunucu-tarafı sıralama +
 /// sonsuz-scroll sayfalama; engel kelimeleri ayarlardan uygulanır.
