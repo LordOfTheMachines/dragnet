@@ -203,7 +203,7 @@ pub async fn search(
     .await
     .map_err(|e| e.to_string())?;
     Ok(
-        json!({ "results": summaries_json(&outcome.rows), "count": outcome.rows.len(), "mode": outcome.used.as_str(), "weak": outcome.weak }),
+        json!({ "results": summaries_json(&outcome.rows), "count": outcome.rows.len(), "mode": outcome.used.as_str(), "weak": outcome.weak, "corrected": outcome.corrected }),
     )
 }
 

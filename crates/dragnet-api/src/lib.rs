@@ -133,6 +133,9 @@ struct SearchResponse {
     mode: &'static str,
     /// Sorgunun korpusta karşılığı yok (sonuç listesi bilerek boş).
     weak: bool,
+    /// Yazım düzeltmesi uygulandıysa aranan düzeltilmiş sorgu.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corrected: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -238,6 +241,7 @@ async fn search(
         Ok(outcome) => {
             let used = outcome.used.as_str();
             let weak = outcome.weak;
+            let corrected = outcome.corrected.clone();
             let results = outcome
                 .rows
                 .into_iter()
@@ -256,6 +260,7 @@ async fn search(
                 results,
                 mode: used,
                 weak,
+                corrected,
             })
             .into_response()
         }

@@ -121,6 +121,18 @@ fn main() {
         t.elapsed(),
         sem.device()
     );
+    // F4-2 yazım sözlüğü: üretimde FTS sözlüğünden (`Store::spell`) gelir; burada aynı
+    // kurallarla adların kelimelerinden kurulur (≥4 harf, ≥2 kayıtta geçen, salt harf).
+    let mut freq: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for nm in &names {
+        for w in nm.split(|c: char| !c.is_alphanumeric()) {
+            if w.chars().count() >= 4 && w.chars().all(|c| c.is_alphabetic()) {
+                *freq.entry(w.to_lowercase()).or_default() += 1;
+            }
+        }
+    }
+    let spell = dragnet_core::spell::SpellIndex::build(freq.into_iter().filter(|(_, f)| *f >= 2));
+    eprintln!("yazım sözlüğü: {} terim", spell.len());
     let (mut score, mut n, mut noise_ok, mut mrr) = (0.0f64, 0usize, true, 0.0f64);
     for (q, expected) in QUERIES {
         let (qtext, cat) = if use_plan {
@@ -186,9 +198,50 @@ fn main() {
             hits = order.into_iter().map(|i| hits[i]).collect();
         }
         // Üretimdeki güven kapısı (bkz. dragnet_semantic::WEAK_MATCH_SCORE): cross-encoder
-        // hiçbir adayı alakalı bulmadıysa sonuç listesi boşalır.
+        // hiçbir adayı alakalı bulmadıysa sonuç listesi boşalır. Boşalınca üretimdeki gibi
+        // yazım düzeltmesiyle **bir kez** yeniden denenir ("bunu mu demek istediniz").
         if rr_top.is_finite() && rr_top < dragnet_semantic::WEAK_MATCH_SCORE {
             hits.clear();
+            // Üretimdeki gibi: aday kombinasyonlarından korpusta birlikte geçeni seç
+            // (burada FTS yerine adlarda alt-dize sayımı — aynı mantık).
+            let fixed = spell
+                .candidates(&qtext, 24)
+                .into_iter()
+                .map(|c| {
+                    let toks: Vec<String> =
+                        c.split_whitespace().map(|s| s.to_lowercase()).collect();
+                    let hits = names
+                        .iter()
+                        .filter(|nm| {
+                            let low = nm.to_lowercase();
+                            toks.iter().all(|t| low.contains(t.as_str()))
+                        })
+                        .count();
+                    (hits, c)
+                })
+                .filter(|(h, _)| *h > 0)
+                .max_by_key(|(h, _)| *h)
+                .map(|(_, c)| c);
+            if let Some(fixed) = fixed {
+                let mut h2 = sem.search(&fixed, 30).unwrap();
+                if let Some(rr) = &reranker {
+                    let docs: Vec<String> = h2
+                        .iter()
+                        .map(|h| items[idx(h.infohash)].1.clone())
+                        .collect();
+                    if let Ok(sc) = rr.score(&fixed, &docs) {
+                        let best = sc.iter().copied().fold(f32::MIN, f32::max);
+                        if best >= dragnet_semantic::WEAK_MATCH_SCORE {
+                            let mut order: Vec<usize> = (0..h2.len()).collect();
+                            order.sort_by(|&x, &y| sc[y].total_cmp(&sc[x]));
+                            h2 = order.into_iter().map(|i| h2[i]).collect();
+                            rr_top = best;
+                            hits = h2;
+                            eprintln!("  düzeltildi: {qtext} → {fixed}");
+                        }
+                    }
+                }
+            }
         }
         let top: Vec<&str> = hits
             .iter()

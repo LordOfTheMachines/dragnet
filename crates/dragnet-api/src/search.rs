@@ -56,6 +56,9 @@ pub struct SearchOutcome {
     /// adlarda sözcüksel kanıt yok) → `rows` bilerek boştur. UI "eşleşme bulunamadı"
     /// der; eskiden 30 alakasız satır gösteriliyordu. Bkz. `WEAK_MATCH_SCORE`.
     pub weak: bool,
+    /// Yazım düzeltmesi uygulandıysa düzeltilmiş sorgu ("hery poter" → "harry potter").
+    /// UI kullanıcıya "… olarak arandı" der. Bkz. `dragnet_core::spell`.
+    pub corrected: Option<String>,
 }
 
 /// Adlarda sorgu kelimelerinden biri geçiyor mu? (Sözcüksel kanıt: geçiyorsa sonuçlar
@@ -77,8 +80,65 @@ fn has_lexical_evidence(names: &[String], query: &str) -> bool {
 
 /// Sorguyu moda göre yürütür. Boş sorgu → gözat (`list_paged`; Relevance → Seen).
 /// Semantik istenip de hazır değilse FTS'e düşer (hata değil).
+///
+/// Yazım düzeltme (F4-2) **yalnız sonuç bulunamadığında** devreye girer: sorgu güven
+/// kapısına takılırsa indeksin sözlüğüne göre düzeltilip **bir kez** yeniden aranır ve
+/// düzeltilmiş sorgu da sonuç veriyorsa onun sonuçları döner (`corrected` dolu). Böylece
+/// çalışan sorgulara hiç dokunulmaz — ölçüm: düzeltmeyi her sorguya uygulamak
+/// hit@5'i %84'ten %74'e düşürüyordu (Türkçe kelimeler İngilizce korpusta doğal olarak
+/// "bilinmeyen" olduğu için yanlış düzeltiliyordu).
 #[allow(clippy::too_many_arguments)]
 pub async fn search(
+    store: &Store,
+    slot: &SemanticSlot,
+    query: &str,
+    mode: SearchMode,
+    limit: i64,
+    offset: i64,
+    sort: SortKey,
+    desc: bool,
+    filter: &Filter,
+    show_weak: bool,
+) -> Result<SearchOutcome, StoreError> {
+    let out = search_once(
+        store, slot, query, mode, limit, offset, sort, desc, filter, show_weak,
+    )
+    .await?;
+    if !out.weak {
+        return Ok(out);
+    }
+    // Sonuç yok → "bunu mu demek istediniz": düzeltilmiş sorguyu bir kez dene.
+    let Some(spell) = store.spell().await else {
+        return Ok(out);
+    };
+    // Aday kombinasyonlarından korpusta **gerçekten geçeni** seç: kelime kelime en sık
+    // adayı almak "hery poter" → "hero peter" gibi anlamsız sonuç veriyordu.
+    let mut best: Option<(i64, String)> = None;
+    for cand in spell.candidates(query.trim(), 24) {
+        let hits = store.count_fts_matches(&cand).await;
+        if hits > 0 && best.as_ref().is_none_or(|(b, _)| hits > *b) {
+            best = Some((hits, cand));
+        }
+    }
+    let Some((_, fixed)) = best else {
+        return Ok(out);
+    };
+    let retry = search_once(
+        store, slot, &fixed, mode, limit, offset, sort, desc, filter, show_weak,
+    )
+    .await?;
+    // Düzeltilmiş sorgu da karşılıksızsa orijinal "bulunamadı" sonucunu koru.
+    if retry.weak || retry.rows.is_empty() {
+        return Ok(out);
+    }
+    Ok(SearchOutcome {
+        corrected: Some(fixed),
+        ..retry
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn search_once(
     store: &Store,
     slot: &SemanticSlot,
     query: &str,
@@ -103,12 +163,14 @@ pub async fn search(
             rows,
             used: SearchMode::Fts,
             weak: false,
+            corrected: None,
         });
     }
     // Sorgu anlama: dolgu temizliği, kategori niyeti, yıl aralığı (bkz.
     // `dragnet_semantic::query`). FTS-yalnız modda da dolgu temizliği uygulanır (dolgu FTS'i
     // de bozar) — niyet artırması yalnız hibrit yolda (saf FTS sözleşmesi değişmesin).
     let plan = dragnet_semantic::query::understand(q);
+    let corrected = None;
     let boost = Boost {
         // Kullanıcı kategori seçtiyse ona saygı; yoksa sorgudan çıkarılan.
         category: if filter.category.is_some() {
@@ -136,6 +198,7 @@ pub async fn search(
             rows,
             used: SearchMode::Fts,
             weak: false,
+            corrected: None,
         });
     };
     // Sorgu embed'i CPU-yoğun (10–60 ms) → blocking havuzunda.
@@ -205,6 +268,7 @@ pub async fn search(
                             rows: Vec::new(),
                             used,
                             weak: true,
+                            corrected,
                         });
                     }
                 }
@@ -237,6 +301,7 @@ pub async fn search(
         rows,
         used,
         weak: false,
+        corrected,
     })
 }
 

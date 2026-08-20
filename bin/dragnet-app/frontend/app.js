@@ -441,6 +441,7 @@ async function loadMore() {
     // Güven kapısı (F4): cross-encoder hiçbir adayı alakalı bulmadıysa liste bilerek boş
     // gelir — 30 alakasız satır göstermek yerine durumu söyleyip seçenek sunuyoruz.
     browse.weak = !!r.weak;
+    browse.corrected = r.corrected || "";
     if (browse.q && r.mode) {
       browse.lastMode = r.mode;
       const badge = $("sem-badge");
@@ -468,6 +469,8 @@ async function loadMore() {
     }
     $("result-count").innerHTML = browse.offset > 0
       ? `${nf(browse.offset)} sonuç${browse.hasMore ? "+" : ""}${browse.q ? "" : " (gözat)"}` +
+        // Yazım düzeltme (F4-2): ne arandığını göster — kullanıcı düzeltmeyi görmeli.
+        (browse.corrected ? ` · <span title="Sorgunuz indeksin sözlüğüne göre düzeltildi">“<b>${esc(browse.corrected)}</b>” olarak arandı</span>` : "") +
         // Sorgu varken alaka dışı sıralama seçiliyse hatırlat: alakalılar listenin
         // ortasına düşebilir (Faz E kullanıcı geri bildirimi).
         (browse.q && browse.sort ? ` · <a href="#" id="sort-reset" title="Sıralamayı kaldır, alaka sırasına dön">alaka sırasına dön</a>` : "")
