@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fetch_workers: cfg.fetch_workers,
         fetch_peer_concurrency: cfg.fetch_peer_concurrency,
         seed_infohashes: cfg.seed_infohashes.clone(),
+        harvester_instances: 1,
         db_max_bytes: (cfg.db_max_gb.max(0.0) * 1_073_741_824.0) as u64,
         disk_reserve_bytes: (cfg.disk_reserve_gb.max(0.0) * 1_073_741_824.0) as u64,
     })

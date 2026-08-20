@@ -720,6 +720,7 @@ async function loadSettings() {
     $("set-port").value = s.harvester_port;
     $("set-autostart").checked = s.autostart;
     $("set-autoscan").checked = s.auto_scan;
+    $("set-nodes").value = s.harvester_instances ?? 1;
     $("set-dbmax").value = s.db_max_gb ?? 0;
     $("set-diskres").value = s.disk_reserve_gb ?? 5;
     $("set-sem").checked = !!s.semantic_enabled;
@@ -740,6 +741,7 @@ $("btn-save").addEventListener("click", async () => {
   s.autostart = $("set-autostart").checked;
   s.auto_scan = $("set-autoscan").checked;
   s.block_keywords = blockKw.slice();
+  s.harvester_instances = Math.min(8, Math.max(1, Number($("set-nodes").value) || 1));
   s.db_max_gb = Number($("set-dbmax").value) || 0;
   s.disk_reserve_gb = Number($("set-diskres").value) || 0;
   s.semantic_enabled = $("set-sem").checked;

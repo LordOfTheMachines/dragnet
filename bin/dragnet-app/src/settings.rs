@@ -42,6 +42,11 @@ pub struct Settings {
     /// Model dizini (boş = exe yanında `models`). Kısa/düz bir yol olmalı.
     #[serde(default)]
     pub semantic_models_dir: String,
+    /// Kaç DHT düğüm kimliğiyle dinlensin (1-8). BEP-42 bir IP için 8 geçerli kimliğe
+    /// izin verir; her kimlik `harvester_port + i` portunda dinler. Pasif hasat kimlik
+    /// sayısıyla ölçeklenir — ama her portun modemde yönlendirilmesi gerekir.
+    #[serde(default = "default_instances")]
+    pub harvester_instances: usize,
     /// Veritabanı bütçesi (GB; 0 = sınırsız). Aşılınca **büyüme durur**, arama sürer.
     #[serde(default)]
     pub db_max_gb: f64,
@@ -52,6 +57,12 @@ pub struct Settings {
 
 /// Varsayılan disk rezervi: 5 GB. Crawler süresiz büyür; diski tamamen doldurup
 /// sistemi zora sokmasın (F8-4).
+/// Varsayılan düğüm kimliği sayısı: 1 (tek port). Kullanıcı modeminde ek portları
+/// yönlendirdiyse artırabilir.
+fn default_instances() -> usize {
+    1
+}
+
 fn default_disk_reserve() -> f64 {
     5.0
 }
@@ -83,6 +94,7 @@ impl Default for Settings {
             block_keywords: Vec::new(),
             semantic_enabled: false,
             semantic_tier: default_tier(),
+            harvester_instances: default_instances(),
             db_max_gb: 0.0,
             disk_reserve_gb: default_disk_reserve(),
             semantic_device: default_device(),
@@ -150,6 +162,7 @@ impl Settings {
             fetch_workers: self.fetch_workers,
             fetch_peer_concurrency: self.fetch_peer_concurrency,
             seed_infohashes: self.seed_infohashes.clone(),
+            harvester_instances: self.harvester_instances.clamp(1, 8),
             db_max_bytes: self.storage_limits().0,
             disk_reserve_bytes: self.storage_limits().1,
         }

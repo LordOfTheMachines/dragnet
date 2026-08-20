@@ -198,12 +198,20 @@ pub struct Sighting {
 pub struct Harvester {
     /// Benzersiz infohash akışı (sınırlı kanal).
     pub infohashes: mpsc::Receiver<Sighting>,
+    /// Aynı kanalın yazan ucu (ek kimliklerin akışını buraya aktarmak için).
+    sink: mpsc::Sender<Sighting>,
     stats: Arc<Stats>,
     tasks: Vec<JoinHandle<()>>,
     local_addr: SocketAddr,
 }
 
 impl Harvester {
+    /// Bu hasatçının infohash kanalına yazan uç. Çoklu kimlik çalıştırıldığında ek
+    /// kimliklerin akışını tek bir tüketiciye aktarmak için kullanılır (F9).
+    pub fn sink(&self) -> mpsc::Sender<Sighting> {
+        self.sink.clone()
+    }
+
     /// Sayaçların paylaşımlı görünümü.
     pub fn stats(&self) -> Arc<Stats> {
         Arc::clone(&self.stats)
@@ -345,6 +353,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
 
     Ok(Harvester {
         infohashes: rx,
+        sink: shared.sink.clone(),
         stats,
         tasks,
         local_addr,
@@ -663,6 +672,28 @@ async fn rotate_loop(shared: Arc<Shared>, interval: Duration) {
 /// `get_peers` yanıtı için basit, adrese bağlı token üretir (doğrulamıyoruz).
 fn token_for(addr: SocketAddrV4) -> [u8; 4] {
     addr.ip().octets()
+}
+
+impl StatsSnapshot {
+    /// İki sayaç görüntüsünü toplar. Çoklu düğüm kimliği (BEP-42 bir IP için 8 geçerli
+    /// kimliğe izin verir) çalıştırıldığında panoda tek bir toplam gösterilir.
+    pub fn merge(self, o: Self) -> Self {
+        Self {
+            received_packets: self.received_packets + o.received_packets,
+            queries_seen: self.queries_seen + o.queries_seen,
+            get_peers_seen: self.get_peers_seen + o.get_peers_seen,
+            announce_seen: self.announce_seen + o.announce_seen,
+            responses_seen: self.responses_seen + o.responses_seen,
+            nodes_learned: self.nodes_learned + o.nodes_learned,
+            unique_infohashes: self.unique_infohashes + o.unique_infohashes,
+            duplicates: self.duplicates + o.duplicates,
+            dropped_channel_full: self.dropped_channel_full + o.dropped_channel_full,
+            queries_sent: self.queries_sent + o.queries_sent,
+            samples_seen: self.samples_seen + o.samples_seen,
+            rate_limited: self.rate_limited + o.rate_limited,
+            peer_hints: self.peer_hints + o.peer_hints,
+        }
+    }
 }
 
 #[cfg(test)]

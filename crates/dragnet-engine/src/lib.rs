@@ -41,6 +41,10 @@ pub struct EngineConfig {
     /// yoksa uygulama tarafındaki sınır yazan yolu (sighting/metadata) etkilemez.
     pub db_max_bytes: u64,
     pub disk_reserve_bytes: u64,
+    /// Çoklu düğüm kimliği (F9): aynı anda kaç DHT kimliğiyle dinlensin (1-8).
+    /// BEP-42 bir IP için 8 geçerli kimliğe izin verir; her kimlik ayrı UDP portunda
+    /// (`harvester_port` + i) dinler ve pasif hasat kimlik sayısıyla ölçeklenir.
+    pub harvester_instances: usize,
 }
 
 impl Default for EngineConfig {
@@ -54,6 +58,7 @@ impl Default for EngineConfig {
             seed_infohashes: Vec::new(),
             db_max_bytes: 0,
             disk_reserve_bytes: 0,
+            harvester_instances: 1,
         }
     }
 }
@@ -85,7 +90,7 @@ pub struct EngineSnapshot {
 /// Çalışan Dragnet çekirdeği. Bırakılınca tüm arka plan görevleri durur.
 pub struct Engine {
     store: Store,
-    harvester_stats: Arc<dragnet_dht::Stats>,
+    harvester_stats: Vec<Arc<dragnet_dht::Stats>>,
     fetch_stats: Arc<dragnet_meta::FetchStats>,
     harvester_addr: SocketAddr,
     fetcher: Arc<MetadataFetcher>,
@@ -102,18 +107,72 @@ impl Engine {
 
         // ÖNCE harvester (yönlendirilmiş sabit portu — varsayılan 6881 — o almalı: pasif hasat
         // gelen trafiğe bağlıdır); mainline istemcisi 6881 doluysa kendiliğinden efemer porta düşer.
-        let mut harvester = dragnet_dht::spawn(HarvesterConfig {
-            port: config.harvester_port,
-            max_queries_per_sec: config.harvester_max_queries_per_sec,
-            ..Default::default()
-        })
-        .await?;
+        // ÇOKLU DÜĞÜM KİMLİĞİ (F9): BEP-42 bir IP için 8 geçerli kimliğe izin verir
+        // (kimliğin ilk 21 biti IP + 3 bitlik rastgele bileşenden türetilir). Her kimlik
+        // ayrı bir UDP portunda dinler; ağın farklı bölgelerinden trafik alırız ve pasif
+        // hasat kimlik sayısıyla ölçeklenir. Portlar: `harvester_port`, +1, +2, …
+        // (modemde hepsinin yönlendirilmesi gerekir; yönlendirilmeyenler yine aktif
+        // hasat—BEP-51—yapar, yalnız gelen sorgu almazlar).
+        let instances = config.harvester_instances.clamp(1, 8);
+        let mut harvesters = Vec::with_capacity(instances);
+        for i in 0..instances {
+            let port = if config.harvester_port == 0 {
+                0
+            } else {
+                config.harvester_port.saturating_add(i as u16)
+            };
+            match dragnet_dht::spawn(HarvesterConfig {
+                port,
+                // Giden sorgu bütçesi kimlikler ARASINDA BÖLÜŞÜLÜR: ölçümde her kimliğe
+                // tam bütçe verince (4 × 50/sn) toplam DHT trafiği metadata çekiminin
+                // peer aramalarıyla yarıştı ve isim üretimi saatte 325 → 171'e düştü.
+                // Çoklu kimliğin amacı giden trafiği değil, **gelen** trafiği artırmaktır.
+                max_queries_per_sec: config.harvester_max_queries_per_sec / instances.max(1) as f64,
+                ..Default::default()
+            })
+            .await
+            {
+                Ok(h) => harvesters.push(h),
+                // Port doluysa (ör. qBittorrent) o kimliği atla; tek bir port hatası
+                // taramayı düşürmemeli.
+                Err(e) => warn!(port, error = %e, "ek harvester başlatılamadı, atlanıyor"),
+            }
+        }
+        if harvesters.is_empty() {
+            harvesters.push(
+                dragnet_dht::spawn(HarvesterConfig {
+                    port: config.harvester_port,
+                    max_queries_per_sec: config.harvester_max_queries_per_sec,
+                    ..Default::default()
+                })
+                .await?,
+            );
+        }
+        info!(
+            instances = harvesters.len(),
+            "harvester kimlikleri başlatıldı"
+        );
+        let mut harvester = harvesters.remove(0);
 
         let fetcher = Arc::new(MetadataFetcher::new(FetchConfig {
             concurrency: config.fetch_peer_concurrency,
             ..Default::default()
         })?);
-        let harvester_stats = harvester.stats();
+        // Tüm kimliklerin sayaçları toplanarak raporlanır; ek kimliklerin infohash
+        // akışları birincil kanala aktarılır (tüketici tarafı değişmez).
+        let mut harvester_stats = vec![harvester.stats()];
+        let extra_sink = harvester.sink();
+        for mut h in harvesters {
+            harvester_stats.push(h.stats());
+            let sink = extra_sink.clone();
+            tokio::spawn(async move {
+                while let Some(s) = h.infohashes.recv().await {
+                    if sink.send(s).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
         let fetch_stats = fetcher.stats();
         let harvester_addr = harvester.local_addr();
         info!(addr = %harvester_addr, "harvester çalışıyor");
@@ -306,7 +365,12 @@ impl Engine {
     /// Anlık durum (harvester sayaçları + indeks büyüklüğü).
     pub async fn snapshot(&self) -> EngineSnapshot {
         EngineSnapshot {
-            harvester: self.harvester_stats.snapshot(),
+            harvester: self
+                .harvester_stats
+                .iter()
+                .map(|s| s.snapshot())
+                .reduce(|a, b| a.merge(b))
+                .unwrap_or_else(|| dragnet_dht::Stats::default().snapshot()),
             fetch: self.fetch_stats.snapshot(),
             queue: self
                 .store

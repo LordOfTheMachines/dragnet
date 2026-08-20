@@ -202,6 +202,12 @@
           </div>
           <p class="sethelp">Varsayılan 6881. Modemde bu portu (UDP) bu bilgisayara yönlendirin — pasif hasat için şart. qBittorrent aynı portu kullanıyorsa birini değiştirin; port doluysa Dragnet efemer porta düşer (pano "DHT erişilebilirliği" kartına bakın).</p>
 
+          <div class="setrow">
+            <div class="setlab"><span>DHT düğüm kimliği sayısı</span><em>1-8 · her biri ayrı port</em></div>
+            <input id="set-nodes" type="number" min="1" max="8" />
+          </div>
+          <p class="sethelp">BEP-42 bir IP için 8 geçerli kimliğe izin verir. Her kimlik <b>harvester portu + sıra</b> (ör. 6881, 6882, …) üzerinde dinler; pasif hasat kimlik sayısıyla ölçeklenir. <b>Modemde her portu yönlendirin</b> — yönlendirilmeyen kimlikler yalnız aktif hasat (BEP-51) yapar. Değişiklik taramayı yeniden başlatır.</p>
+
           <div class="setsep">Depolama</div>
           <div class="setrow">
             <div class="setlab"><span>Veritabanı bütçesi</span><em>GB · 0 = sınırsız</em></div>
