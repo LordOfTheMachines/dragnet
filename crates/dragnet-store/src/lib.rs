@@ -941,7 +941,7 @@ impl Store {
         limit: i64,
     ) -> Result<dragnet_core::spell::SpellIndex, StoreError> {
         let rows = sqlx::query(
-            "SELECT term, doc FROM torrents_vocab WHERE doc >= 2 AND length(term) >= 4
+            "SELECT term, doc FROM torrents_vocab WHERE doc >= 1 AND length(term) >= 4
              ORDER BY doc DESC LIMIT ?1",
         )
         .bind(limit)

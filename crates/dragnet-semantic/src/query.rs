@@ -21,6 +21,16 @@ pub struct QueryPlan {
     pub year_range: Option<(u16, u16)>,
     /// Sorgudaki açık yıl (ör. "matrix 1999").
     pub year: Option<u16>,
+    /// Sorgu yalnız kategori niyetinden ibaret ("oyunlar", "filmler", "tüm müzikler").
+    /// Bu bir arama değil **gözatma** isteğidir: o kategorideki her şey listelenmeli.
+    /// (Kullanıcı geri bildirimi: "oyunlar" sorgusu adında "oyun" geçenleri getiriyordu,
+    /// oysa beklenen oyun kategorisinin tamamı.)
+    pub category_only: bool,
+    /// Sorguda **tanıdık** bir sinyal bulundu mu: TR→EN sözlük eşleşmesi, kategori niyeti
+    /// ya da yıl. Tek kelimelik, sözlükte olmayan ve tanınmayan sorgular ("mtrix") büyük
+    /// olasılıkla yazım hatasıdır ya da korpusta karşılığı yoktur; arama yolu bunlara
+    /// alakasız sonuç döndürmek yerine "bulunamadı" der.
+    pub recognized: bool,
 }
 
 /// Dolgu kelimeleri/ifadeler (küçük harf, Türkçe ekleriyle). Çok kelimeli olanlar önce.
@@ -121,6 +131,24 @@ const ALIAS_PHRASES: &[(&str, &str)] = &[
     ("narnia günlükleri", "chronicles of narnia"),
     ("esaretin bedeli", "the shawshank redemption"),
     ("canavarlar şirketi", "monsters inc"),
+    // Kavram → korpustaki örnekler (kullanıcı geri bildirimi: "işletim sistemi" sorgusu
+    // adında "windows" geçen her şeyi getiriyordu; model ubuntu'nun bir işletim sistemi
+    // olduğunu bilmiyor). Kavramı hem İngilizce karşılığıyla hem yaygın örnekleriyle
+    // genişletiyoruz.
+    (
+        "işletim sistemi",
+        "operating system linux ubuntu debian iso",
+    ),
+    (
+        "isletim sistemi",
+        "operating system linux ubuntu debian iso",
+    ),
+    ("linux dağıtımı", "linux distribution ubuntu debian iso"),
+    ("ofis programı", "office"),
+    ("ofis yazılımı", "office"),
+    ("antivirüs", "antivirus security"),
+    ("görüntü işleme", "photoshop image editing"),
+    ("video düzenleme", "video editing premiere resolve"),
     // Tür/tema
     ("bilim kurgu", "sci-fi science fiction"),
     ("çizgi film", "cartoon animation"),
@@ -319,15 +347,23 @@ pub fn understand(query: &str) -> QueryPlan {
     for (tr, en) in ALIAS_PHRASES {
         if text.contains(tr) {
             text = text.replace(tr, en);
+            plan.recognized = true;
         }
     }
     if ALIAS_WORDS.iter().any(|(tr, _)| text.contains(tr)) {
         text = text
             .split_whitespace()
-            .map(|w| alias_of(w).unwrap_or(w).to_string())
+            .map(|w| match alias_of(w) {
+                Some(en) => {
+                    plan.recognized = true;
+                    en.to_string()
+                }
+                None => w.to_string(),
+            })
             .collect::<Vec<_>>()
             .join(" ");
     }
+    plan.recognized |= plan.year.is_some() || plan.year_range.is_some();
 
     // Çok kelimeli dolgu ifadeleri.
     for ph in FILLER_PHRASES.iter().filter(|p| p.contains(' ')) {
@@ -356,6 +392,15 @@ pub fn understand(query: &str) -> QueryPlan {
             })
             .map(|(_, c)| *c)
     };
+    // Sorgu **yalnız** kategori kelimelerinden ibaretse ("oyunlar", "tüm filmler"): bu bir
+    // arama değil gözatma isteğidir; arama yolu kategori filtresiyle listeleme yapar.
+    if !words.is_empty() && words.iter().all(|w| cat_of(w).is_some()) {
+        plan.category = words.iter().find_map(|w| cat_of(w));
+        plan.category_only = true;
+        plan.semantic_text = words.join(" ");
+        plan.fts_text = plan.semantic_text.clone();
+        return plan;
+    }
     // Kategori kelimesi SEMANTİK metinde KALIR (dokümanlar "— game/movie…" içerdiğinden
     // hizalamaya yardım eder; ölçüm: "harry potter filmi" > "harry potter"), FTS metninden
     // çıkar (adlarda "oyunları" geçmez, gürültü olur).
@@ -369,6 +414,7 @@ pub fn understand(query: &str) -> QueryPlan {
             if is_last || is_first_plural_en {
                 if let Some(cat) = cat_of(w) {
                     plan.category = Some(cat);
+                    plan.recognized = true;
                     is_cat = true;
                 }
             }
@@ -430,10 +476,18 @@ mod tests {
 
     #[test]
     fn keeps_meaningful_words() {
-        // Tek kelime: kategori kelimesi metinde kalır.
+        // Tek kelime kategori: gözatma isteği (F4-3) — kategori filtresiyle listelenir.
         let p = understand("oyunlar");
         assert_eq!(p.semantic_text, "oyunlar");
-        assert_eq!(p.category, None);
+        assert_eq!(p.category, Some("game"));
+        assert!(p.category_only);
+        // Çoklu kategori kelimesi de gözatmadır ("tüm filmler" → dolgu + kategori).
+        let p = understand("tüm filmler");
+        assert_eq!(p.category, Some("video"));
+        assert!(p.category_only);
+        // Kategori + başka kelime → normal arama.
+        let p = understand("zombi oyunları");
+        assert!(!p.category_only);
         // Ortadaki kategori kelimesi başlığın parçasıdır.
         let p = understand("game of thrones");
         assert_eq!(p.semantic_text, "game thrones");

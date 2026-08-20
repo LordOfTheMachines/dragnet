@@ -61,6 +61,25 @@ pub struct SearchOutcome {
     pub corrected: Option<String>,
 }
 
+/// Yazım düzeltme adaylarından korpusta **gerçekten geçeni** seçer: kelime kelime en sık
+/// adayı almak "hery poter" → "hero peter" gibi anlamsız sonuç veriyordu; kombinasyonlar
+/// FTS eşleşme sayısıyla doğrulanır ve en çok eşleşen kazanır ("harry potter").
+async fn best_candidate(
+    store: &Store,
+    spell: &dragnet_core::spell::SpellIndex,
+    query: &str,
+) -> Option<String> {
+    // Adaylar zaten (mesafe, sonra frekans) sırasında: korpusta karşılığı olan İLK aday
+    // seçilir. "En çok eşleşen"i seçmek yanlıştı — "mtrix" için nadir ama doğru "matrix"
+    // yerine sık geçen ama uzak bir terim kazanabiliyordu.
+    for cand in spell.candidates(query, 24) {
+        if store.count_fts_matches(&cand).await > 0 {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 /// Adlarda sorgu kelimelerinden biri geçiyor mu? (Sözcüksel kanıt: geçiyorsa sonuçlar
 /// zayıf sayılmaz — kullanıcı yazdığı kelimeyi sonuçta görüyordur.)
 fn has_lexical_evidence(names: &[String], query: &str) -> bool {
@@ -100,27 +119,63 @@ pub async fn search(
     filter: &Filter,
     show_weak: bool,
 ) -> Result<SearchOutcome, StoreError> {
+    // Kısa sorguda (≤2 kelime) hiçbir kelime indeksin sözlüğünde yoksa ve sorgu hiçbir
+    // kayıtla eşleşmiyorsa, arama yapmadan önce yazımı düzelt: "mtrix" gibi tek kelimelik
+    // hatalar zayıf da olsa sonuç döndürdüğü için güven kapısına takılmıyor, dolayısıyla
+    // aşağıdaki "bulunamadı → düzelt" yolu devreye girmiyordu. Uzun doğal dil sorgularına
+    // dokunulmaz: Türkçe kelimeler korpusta zaten yoktur, düzeltmek onları bozar.
+    let mut query = query;
+    let mut pre_fix: Option<String> = None;
+    let toks: Vec<&str> = query.split_whitespace().collect();
+    if (1..=2).contains(&toks.len()) {
+        if let Some(spell) = store.spell().await {
+            let all_unknown = toks
+                .iter()
+                .all(|t| t.chars().count() >= 4 && !spell.contains(t));
+            if all_unknown && store.count_fts_matches(query).await == 0 {
+                match best_candidate(store, &spell, query).await {
+                    Some(fixed) => {
+                        pre_fix = Some(fixed);
+                        query = pre_fix.as_deref().unwrap_or(query);
+                    }
+                    // Tek kelimelik, sözlükte olmayan, düzeltilemeyen ve tanıdık bir
+                    // sinyal taşımayan sorgu ("mtrix"): korpusta karşılığı yok demektir.
+                    // Cross-encoder böyle sorgularda yanıltıcı olabiliyor (ölçüm: "mtrix"
+                    // için "Metro Simulator 2" −1.98 ile kapıdan geçiyordu).
+                    None if toks.len() == 1
+                        && !dragnet_semantic::query::understand(query).recognized =>
+                    {
+                        return Ok(SearchOutcome {
+                            rows: Vec::new(),
+                            used: if mode == SearchMode::Fts {
+                                SearchMode::Fts
+                            } else {
+                                SearchMode::Hybrid
+                            },
+                            weak: true,
+                            corrected: None,
+                        });
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
     let out = search_once(
         store, slot, query, mode, limit, offset, sort, desc, filter, show_weak,
     )
     .await?;
     if !out.weak {
-        return Ok(out);
+        return Ok(SearchOutcome {
+            corrected: pre_fix.or(out.corrected),
+            ..out
+        });
     }
     // Sonuç yok → "bunu mu demek istediniz": düzeltilmiş sorguyu bir kez dene.
     let Some(spell) = store.spell().await else {
         return Ok(out);
     };
-    // Aday kombinasyonlarından korpusta **gerçekten geçeni** seç: kelime kelime en sık
-    // adayı almak "hery poter" → "hero peter" gibi anlamsız sonuç veriyordu.
-    let mut best: Option<(i64, String)> = None;
-    for cand in spell.candidates(query.trim(), 24) {
-        let hits = store.count_fts_matches(&cand).await;
-        if hits > 0 && best.as_ref().is_none_or(|(b, _)| hits > *b) {
-            best = Some((hits, cand));
-        }
-    }
-    let Some((_, fixed)) = best else {
+    let Some(fixed) = best_candidate(store, &spell, query.trim()).await else {
         return Ok(out);
     };
     let retry = search_once(
@@ -170,6 +225,26 @@ async fn search_once(
     // `dragnet_semantic::query`). FTS-yalnız modda da dolgu temizliği uygulanır (dolgu FTS'i
     // de bozar) — niyet artırması yalnız hibrit yolda (saf FTS sözleşmesi değişmesin).
     let plan = dragnet_semantic::query::understand(q);
+    // Kategori-yalnız sorgu ("oyunlar", "tüm filmler") bir gözatma isteğidir: adında o
+    // kelime geçenleri değil, **o kategorideki her şeyi** listele (kullanıcı geri bildirimi).
+    if plan.category_only && filter.category.is_none() {
+        if let Some(cat) = plan.category {
+            let mut f = filter.clone();
+            f.category = Some(cat.to_string());
+            let sk = if matches!(sort, SortKey::Relevance) {
+                SortKey::Seen
+            } else {
+                sort
+            };
+            let rows = store.list_paged(limit, offset, sk, desc, &f).await?;
+            return Ok(SearchOutcome {
+                rows,
+                used: SearchMode::Fts,
+                weak: false,
+                corrected: None,
+            });
+        }
+    }
     let corrected = None;
     let boost = Boost {
         // Kullanıcı kategori seçtiyse ona saygı; yoksa sorgudan çıkarılan.
