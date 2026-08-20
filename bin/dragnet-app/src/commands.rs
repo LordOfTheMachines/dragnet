@@ -330,6 +330,19 @@ pub async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Res
     }
     let _ = autostart::set(settings.autostart);
 
+    // Depolama sınırlarını ANINDA uygula ve basıncı hemen ölç (F8-4). Eskiden yalnız
+    // açılışta uygulanıyordu: kullanıcı bütçeyi düşürüp kaydedince hiçbir şey olmuyordu.
+    let (db_max, reserve) = settings.storage_limits();
+    state.store.set_limits(db_max, reserve);
+    let p = state.store.refresh_pressure();
+    tracing::info!(
+        db_max,
+        reserve,
+        db_bytes = p.db_bytes,
+        paused = p.paused,
+        "depolama sınırları uygulandı"
+    );
+
     // Semantik ayarları anında uygula (aç/kapa/kademe değişimi; yeniden başlatma yok).
     state.semantic.apply(state.store.clone(), &settings).await;
 

@@ -85,6 +85,15 @@ async function pollStats() {
 function renderStorage(st) {
   const el = $("storage-warn");
   if (!el) return;
+  // Ayarlar sayfasındaki canlı durum satırı: kullanıcı bütçeyi değiştirirken ne olduğunu
+  // görebilsin (ölçüm 30 sn'de bir yenilenir, kaydedince anında).
+  const now = $("storage-now");
+  if (now && st) {
+    now.innerHTML =
+      `Şu an: veritabanı <b>${humanSize(st.db_bytes || 0)}</b>` +
+      (st.free_bytes != null ? ` · diskte boş <b>${humanSize(st.free_bytes)}</b>` : "") +
+      ` · durum <b>${st.paused ? (st.reason === "disk" ? "duraklatıldı (disk)" : "duraklatıldı (bütçe)") : "büyüyor"}</b>`;
+  }
   if (!st || !st.paused) { el.classList.add("hidden"); return; }
   const why = st.reason === "disk"
     ? `diskte boş alan rezervin altına indi (kalan ${humanSize(st.free_bytes || 0)})`

@@ -29,6 +29,11 @@ pub struct Config {
     /// Başlangıçta çekilip indekslenecek infohash'ler (40-hex). İndeksi ısıtmak
     /// veya bilinen torrent'leri sabitlemek için. Varsayılan: boş.
     pub seed_infohashes: Vec<String>,
+    /// Depolama büyüme freni (F8-4): veritabanı bütçesi (GB; 0 = sınırsız). Aşılınca
+    /// yazma durur, mevcut indeks aranmaya devam eder.
+    pub db_max_gb: f64,
+    /// Diskte bırakılacak boş alan (GB; 0 = kapalı). Varsayılan 5.
+    pub disk_reserve_gb: f64,
     /// Semantik (anlamsal) arama — opt-in (Faz D). Açıksa model bir kez indirilir,
     /// indeks arka planda kurulur, `/search` varsayılan olarak hibrit çalışır.
     pub semantic_enabled: bool,
@@ -53,6 +58,8 @@ impl Default for Config {
             fetch_workers: 12,
             fetch_peer_concurrency: 12,
             seed_infohashes: Vec::new(),
+            db_max_gb: 0.0,
+            disk_reserve_gb: 5.0,
             semantic_enabled: false,
             semantic_tier: "auto".to_string(),
             semantic_device: "auto".to_string(),

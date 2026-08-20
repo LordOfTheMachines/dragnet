@@ -173,30 +173,44 @@
     <section id="view-settings" class="view hidden">
       <div class="grid2">
         <div class="card settings">
-          <h3>Tarama</h3>
-          <label>Harvester hız limiti (sorgu/sn)
+          <div class="card-head"><h3>Tarama</h3><span class="muted small">DHT hasat ve metadata çekimi</span></div>
+
+          <div class="setrow">
+            <div class="setlab"><span>Harvester hız limiti</span><em>sorgu/sn</em></div>
             <input id="set-rate" type="number" min="5" max="500" />
-            <small>İnternet yavaşlıyorsa düşür (20–40). Port-forward + iyi bağlantıda artır.</small>
-          </label>
-          <label>Fetch işçileri (aynı anda metadata)
+          </div>
+          <p class="sethelp">İnternet yavaşlıyorsa düşürün (20–40). Port yönlendirmesi ve iyi bağlantıda artırabilirsiniz.</p>
+
+          <div class="setrow">
+            <div class="setlab"><span>Fetch işçileri</span><em>aynı anda metadata</em></div>
             <input id="set-workers" type="number" min="1" max="64" />
-            <small>Varsayılan 12. Daha hızlı isim çekmek için artır (ör. 24); internet yavaşlarsa düşür. Toplam eşzamanlı bağlantı ≈ işçi × peer.</small>
-          </label>
-          <label>Fetch başına eşzamanlı peer
+          </div>
+          <p class="sethelp">Varsayılan 12. Daha hızlı isim çekmek için artırın (ör. 24); internet yavaşlarsa düşürün. Toplam eşzamanlı bağlantı ≈ işçi × peer.</p>
+
+          <div class="setrow">
+            <div class="setlab"><span>Fetch başına peer</span><em>eşzamanlı</em></div>
             <input id="set-peers" type="number" min="1" max="30" />
-          </label>
-          <label>Harvester UDP portu (0 = otomatik)
+          </div>
+
+          <div class="setrow">
+            <div class="setlab"><span>Harvester UDP portu</span><em>0 = otomatik</em></div>
             <input id="set-port" type="number" min="0" max="65535" />
-            <small>Varsayılan 6881. Modemde bu portu (UDP) bu bilgisayara yönlendirin — pasif hasat için şart. qBittorrent aynı portu kullanıyorsa birini değiştirin; port doluysa Dragnet efemer porta düşer (pano "DHT erişilebilirliği" kartına bakın).</small>
-          </label>
-          <label>Veritabanı bütçesi (GB, 0 = sınırsız)
-            <input id="set-dbmax" type="number" min="0" max="10000" step="1" />
-            <small>Aşılınca <b>büyüme durur</b> (yeni kayıt/metadata/vektör yazılmaz); mevcut indeks aranmaya devam eder. Basınç geçince kendiliğinden sürer.</small>
-          </label>
-          <label>Diskte bırakılacak boş alan (GB)
-            <input id="set-diskres" type="number" min="0" max="10000" step="1" />
-            <small>Varsayılan 5 GB. Crawler süresiz büyür; disk dolup sistemi zora sokmasın.</small>
-          </label>
+          </div>
+          <p class="sethelp">Varsayılan 6881. Modemde bu portu (UDP) bu bilgisayara yönlendirin — pasif hasat için şart. qBittorrent aynı portu kullanıyorsa birini değiştirin; port doluysa Dragnet efemer porta düşer (pano "DHT erişilebilirliği" kartına bakın).</p>
+
+          <div class="setsep">Depolama</div>
+          <div class="setrow">
+            <div class="setlab"><span>Veritabanı bütçesi</span><em>GB · 0 = sınırsız</em></div>
+            <input id="set-dbmax" type="number" min="0" max="10000" step="0.1" />
+          </div>
+          <div class="setrow">
+            <div class="setlab"><span>Diskte bırakılacak boş alan</span><em>GB</em></div>
+            <input id="set-diskres" type="number" min="0" max="10000" step="0.1" />
+          </div>
+          <p class="sethelp">Sınır aşılınca <b>büyüme durur</b>: yeni kayıt, metadata ve vektör yazılmaz — mevcut indeks aranmaya devam eder, basınç geçince kendiliğinden sürer. Panoda uyarı şeridi çıkar.</p>
+          <div id="storage-now" class="setnote"></div>
+
+          <div class="setsep">Başlangıç</div>
           <label class="chk"><input id="set-autostart" type="checkbox" /> Windows'ta başlangıçta başlat</label>
           <label class="chk"><input id="set-autoscan" type="checkbox" /> Açılışta taramayı otomatik başlat</label>
         </div>
@@ -211,7 +225,7 @@
             embedding modeli. Tamamen <b>çevrimdışı</b> çalışır; model bir kez indirilir. Açılınca indeks arka planda kurulur.
           </p>
           <label class="chk"><input id="set-sem" type="checkbox" /> Semantik aramayı etkinleştir (FTS ile hibrit)</label>
-          <label>Kademe (hız ↔ kalite)
+          <label class="fieldlab">Kademe (hız ↔ kalite)
             <select id="set-sem-tier">
               <option value="auto">Otomatik — donanıma göre (GPU/çekirdek sayısı)</option>
               <option value="light">Hafif — potion-multilingual (statik; anında indeksleme, ~500 MB)</option>
@@ -221,7 +235,7 @@
             <small>Kademe değişince indeks yeniden kurulur.</small>
           </label>
           <label class="chk" title="bge-reranker-v2-m3 (~570 MB, CPU): ilk 30 adayı sorguyla birlikte puanlar; daha isabetli sıralama, sorgu başına ~0,25 s"><input id="set-sem-rerank" type="checkbox" checked /> Yeniden sıralayıcı (cross-encoder, +570 MB, daha isabetli)</label>
-          <label>Cihaz
+          <label class="fieldlab">Cihaz
             <select id="set-sem-device">
               <option value="auto">Otomatik (GPU varsa DirectML, yoksa CPU)</option>
               <option value="gpu">GPU (DirectML)</option>

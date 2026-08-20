@@ -148,6 +148,8 @@ impl Settings {
             fetch_workers: self.fetch_workers,
             fetch_peer_concurrency: self.fetch_peer_concurrency,
             seed_infohashes: self.seed_infohashes.clone(),
+            db_max_bytes: self.storage_limits().0,
+            disk_reserve_bytes: self.storage_limits().1,
         }
     }
 
@@ -156,6 +158,15 @@ impl Settings {
         self.api_bind
             .parse()
             .map_err(|e| format!("geçersiz api_bind: {e}"))
+    }
+
+    /// Depolama sınırları (bayt): (veritabanı bütçesi, disk rezervi). 0 = sınırsız.
+    pub fn storage_limits(&self) -> (u64, u64) {
+        const GB: f64 = 1_073_741_824.0;
+        (
+            (self.db_max_gb.max(0.0) * GB) as u64,
+            (self.disk_reserve_gb.max(0.0) * GB) as u64,
+        )
     }
 
     /// Sorgu deposu için mutlak db yolu.

@@ -36,6 +36,11 @@ pub struct EngineConfig {
     pub fetch_workers: usize,
     pub fetch_peer_concurrency: usize,
     pub seed_infohashes: Vec<String>,
+    /// Depolama büyüme freni (F8-4), bayt: veritabanı bütçesi ve disk rezervi (0 = kapalı).
+    /// Motor kendi `Store` örneğini açtığı için sınırlar buradan geçirilmelidir —
+    /// yoksa uygulama tarafındaki sınır yazan yolu (sighting/metadata) etkilemez.
+    pub db_max_bytes: u64,
+    pub disk_reserve_bytes: u64,
 }
 
 impl Default for EngineConfig {
@@ -47,6 +52,8 @@ impl Default for EngineConfig {
             fetch_workers: 12,
             fetch_peer_concurrency: 12,
             seed_infohashes: Vec::new(),
+            db_max_bytes: 0,
+            disk_reserve_bytes: 0,
         }
     }
 }
@@ -89,6 +96,9 @@ impl Engine {
     /// Boru hattını başlatır (store aç, harvester + fetcher havuzu + API spawn et).
     pub async fn start(config: EngineConfig) -> Result<Engine, EngineError> {
         let store = Store::open(&config.db_path).await?;
+        // F8-4: sınırları uygula ve ilk ölçümü hemen yap (yazan yollar bunu kontrol eder).
+        store.set_limits(config.db_max_bytes, config.disk_reserve_bytes);
+        store.refresh_pressure();
 
         // ÖNCE harvester (yönlendirilmiş sabit portu — varsayılan 6881 — o almalı: pasif hasat
         // gelen trafiğe bağlıdır); mainline istemcisi 6881 doluysa kendiliğinden efemer porta düşer.
@@ -140,6 +150,18 @@ impl Engine {
                 }
                 None => warn!(hex, "geçersiz seed infohash (40-hex olmalı), atlanıyor"),
             }
+        }
+
+        // F8-4: depolama basıncını periyodik ölç (motorun kendi Store örneği için).
+        {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    ticker.tick().await;
+                    store.refresh_pressure();
+                }
+            }));
         }
 
         // Canlılık kontrolü (nazik): indekslenen torrent'leri periyodik DHT scrape

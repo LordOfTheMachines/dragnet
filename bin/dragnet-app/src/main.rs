@@ -64,11 +64,8 @@ fn main() {
             };
 
             // Depolama büyüme freni (F8-4): sınırlar ayarlardan; basınç 30 sn'de bir ölçülür.
-            const GB: f64 = 1_073_741_824.0;
-            store.set_limits(
-                (settings.db_max_gb.max(0.0) * GB) as u64,
-                (settings.disk_reserve_gb.max(0.0) * GB) as u64,
-            );
+            let (db_max, reserve) = settings.storage_limits();
+            store.set_limits(db_max, reserve);
             store.refresh_pressure();
             {
                 let st = store.clone();
