@@ -6,6 +6,7 @@
 
 pub mod parse;
 pub mod rank;
+pub mod spell;
 
 use std::fmt;
 

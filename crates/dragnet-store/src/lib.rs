@@ -9,6 +9,8 @@
 //! kullanılır, dolayısıyla `DATABASE_URL` gerekmez.
 
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
@@ -170,7 +172,19 @@ pub struct Overview {
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    /// Yazım düzeltme dizini önbelleği (F4-2): FTS sözlüğünden kurulur, indeks büyüdükçe
+    /// eskir — `SPELL_TTL` sonunda yeniden kurulur. `None` = henüz kurulmadı.
+    spell: SpellCache,
 }
+
+/// Önbellekteki yazım dizini ve kurulma anı (TTL kontrolü için).
+type SpellCache = Arc<tokio::sync::RwLock<Option<(Arc<dragnet_core::spell::SpellIndex>, Instant)>>>;
+
+/// Yazım sözlüğünün tazelenme aralığı: indeksleme sürerken yeni adlar sözlüğe girsin,
+/// ama her sorguda yeniden kurulmasın (4k ad ≈ 30k terim, kurulum birkaç ms).
+const SPELL_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// Sözlüğe alınacak en sık geçen terim sayısı (bellek: terim başına ~40 bayt).
+const SPELL_TERMS: i64 = 300_000;
 
 impl Store {
     /// Bir dosya yolundan depo açar (yoksa oluşturur) ve şemayı hazırlar.
@@ -187,7 +201,10 @@ impl Store {
             .max_connections(5)
             .connect_with(opts)
             .await?;
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            spell: Arc::new(tokio::sync::RwLock::new(None)),
+        };
         store.migrate().await?;
         Ok(store)
     }
@@ -200,7 +217,10 @@ impl Store {
             .max_connections(1)
             .connect_with(opts)
             .await?;
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            spell: Arc::new(tokio::sync::RwLock::new(None)),
+        };
         store.migrate().await?;
         Ok(store)
     }
@@ -327,6 +347,15 @@ impl Store {
             .await?;
         sqlx::query(
             "CREATE VIRTUAL TABLE IF NOT EXISTS torrents_fts USING fts5(name, infohash UNINDEXED);",
+        )
+        .execute(&self.pool)
+        .await?;
+        // F4-2: FTS sözlüğü (terim + kaç dokümanda geçtiği). Veri kopyalamaz, indeksin
+        // üstünde bir görünümdür; yazım düzeltme adayları buradan gelir (bkz.
+        // `dragnet_core::spell`) — harici sözlük yok, korpusta olmayan bir kelimeye
+        // yönlendirme yapılmaz.
+        sqlx::query(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS torrents_vocab USING fts5vocab(torrents_fts, row);",
         )
         .execute(&self.pool)
         .await?;
@@ -874,6 +903,60 @@ impl Store {
     }
 
     /// Metadata'sı çekilmiş (aranabilir) torrent sayısı.
+    /// FTS sözlüğünden yazım düzeltme dizini kurar (F4-2). Yalnız harf içeren, en az
+    /// `min_len` uzunluğunda ve en az iki dokümanda geçen terimler alınır: tek seferlik
+    /// çöp adlar (rastgele karakter dizileri) düzeltme hedefi olmasın. Sürüm etiketleri
+    /// (1080p, x264…) rakam içerdiği için zaten elenir.
+    /// Bir FTS sorgusunun kaç kayıtla eşleştiği (yazım düzeltme adaylarını doğrulamak
+    /// için: "harry potter" > 0, "hero peter" = 0). Geçersiz sorguda 0.
+    pub async fn count_fts_matches(&self, query: &str) -> i64 {
+        let q = to_fts_query(query);
+        if q.is_empty() {
+            return 0;
+        }
+        sqlx::query("SELECT COUNT(*) AS n FROM torrents_fts WHERE torrents_fts MATCH ?1")
+            .bind(&q)
+            .fetch_one(&self.pool)
+            .await
+            .map(|r| r.get::<i64, _>("n"))
+            .unwrap_or(0)
+    }
+
+    /// Önbellekli yazım düzeltme dizini. İlk çağrıda kurulur, `SPELL_TTL` sonunda
+    /// tazelenir; hata olursa `None` döner (arama düzeltmesiz sürer).
+    pub async fn spell(&self) -> Option<Arc<dragnet_core::spell::SpellIndex>> {
+        if let Some((idx, at)) = self.spell.read().await.as_ref() {
+            if at.elapsed() < SPELL_TTL {
+                return Some(Arc::clone(idx));
+            }
+        }
+        let built = Arc::new(self.spell_index(SPELL_TERMS).await.ok()?);
+        debug!(terms = built.len(), "yazım sözlüğü kuruldu");
+        *self.spell.write().await = Some((Arc::clone(&built), Instant::now()));
+        Some(built)
+    }
+
+    pub async fn spell_index(
+        &self,
+        limit: i64,
+    ) -> Result<dragnet_core::spell::SpellIndex, StoreError> {
+        let rows = sqlx::query(
+            "SELECT term, doc FROM torrents_vocab WHERE doc >= 2 AND length(term) >= 4
+             ORDER BY doc DESC LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let terms = rows.into_iter().filter_map(|r| {
+            let t: String = r.get("term");
+            let d: i64 = r.get("doc");
+            t.chars()
+                .all(|c| c.is_alphabetic())
+                .then_some((t, d.max(0) as u32))
+        });
+        Ok(dragnet_core::spell::SpellIndex::build(terms))
+    }
+
     pub async fn count_fetched(&self) -> Result<i64, StoreError> {
         let row =
             sqlx::query("SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'fetched'")
