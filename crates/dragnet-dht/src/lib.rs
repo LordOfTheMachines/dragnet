@@ -25,7 +25,9 @@
 //! kimlik uzayında farklı bölgelerin trafiğini görürüz ("horizontal crawling").
 
 mod dedup;
-mod krpc;
+/// KRPC (BEP-5) paket kurucu/çözücüleri. Uygulama tarafı UDP sağlık yoklaması için
+/// `build_find_node`'u kullanır (bkz. dragnet-app: ağ sağlığı kartı).
+pub mod krpc;
 mod ratelimit;
 
 use std::collections::{HashMap, VecDeque};

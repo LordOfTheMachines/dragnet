@@ -259,30 +259,167 @@ pub async fn dashboard(
 /// Ağ sağlığı: birkaç hedefe TCP bağlantı gecikmesi (ICMP admin gerektirdiğinden TCP).
 #[tauri::command]
 pub async fn network_health() -> Result<Value, String> {
-    const TARGETS: [(&str, &str); 3] = [
-        ("Google", "google.com:443"),
-        ("Cloudflare", "1.1.1.1:443"),
+    // Hedefler Dragnet'in gerçekten ihtiyaç duyduğu şeyleri ölçer: DNS sunucularına TCP
+    // gecikmesi (genel internet sağlığı) ve **DHT bootstrap düğümüne UDP** (asıl kritik
+    // yol — Dragnet TCP değil UDP ile çalışır; bazı ağlarda 443 açıkken UDP kapalıdır).
+    // Not: tek hedefin başarısızlığı ağın bozuk olduğu anlamına gelmez; ISS'ler belirli
+    // adresleri (ör. 1.1.1.1) engelleyebilir — bu yüzden hata sebebi ayrı raporlanır.
+    const TCP_TARGETS: [(&str, &str); 4] = [
+        ("Google DNS", "8.8.8.8:53"),
+        ("Cloudflare DNS", "1.1.1.1:53"),
+        ("Quad9 DNS", "9.9.9.9:53"),
         ("GitHub", "github.com:443"),
     ];
     let mut probes = Vec::new();
-    for (name, addr) in TARGETS {
-        let (ms, ok) = tauri::async_runtime::spawn_blocking(move || probe(addr))
+    for (name, addr) in TCP_TARGETS {
+        let r = tauri::async_runtime::spawn_blocking(move || probe(addr))
             .await
-            .unwrap_or((0, false));
-        probes.push(json!({ "name": name, "target": addr, "ms": ms, "ok": ok }));
+            .unwrap_or(Probe::fail("görev çöktü"));
+        probes.push(json!({
+            "name": name, "target": addr, "ms": r.ms, "ok": r.ok,
+            "jitter": r.jitter, "loss": r.loss, "error": r.error,
+        }));
     }
-    Ok(json!({ "probes": probes }))
+    // DHT (UDP) yoklaması: bootstrap düğümüne `find_node` gönderip yanıt bekle.
+    let dht = tauri::async_runtime::spawn_blocking(dht_udp_probe)
+        .await
+        .unwrap_or(Probe::fail("görev çöktü"));
+    Ok(json!({
+        "probes": probes,
+        "dht": { "name": "DHT bootstrap (UDP)", "target": "router.bittorrent.com:6881",
+                 "ms": dht.ms, "ok": dht.ok, "error": dht.error },
+    }))
 }
 
-fn probe(addr: &str) -> (u64, bool) {
+/// Bir yoklamanın sonucu: en iyi gecikme, kararsızlık (jitter), kayıp oranı ve hata.
+struct Probe {
+    ms: u64,
+    ok: bool,
+    jitter: u64,
+    loss: u8,
+    error: &'static str,
+}
+
+impl Probe {
+    fn fail(error: &'static str) -> Self {
+        Self {
+            ms: 0,
+            ok: false,
+            jitter: 0,
+            loss: 100,
+            error,
+        }
+    }
+}
+
+/// TCP bağlanma gecikmesi: 3 deneme; en iyi süre, kararsızlık ve kayıp oranı.
+/// DNS çözümü ile bağlantı hatası ayrı raporlanır — "erişilemedi" tek başına
+/// hangisinin bozuk olduğunu söylemiyordu (kullanıcı geri bildirimi).
+fn probe(addr: &str) -> Probe {
     use std::net::ToSocketAddrs;
+    let Some(sa) = addr.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
+        return Probe::fail("ad çözülemedi (DNS)");
+    };
+    let mut times = Vec::new();
+    let mut fails = 0;
+    for _ in 0..3 {
+        let start = Instant::now();
+        match TcpStream::connect_timeout(&sa, Duration::from_millis(1500)) {
+            Ok(_) => times.push(start.elapsed().as_millis() as u64),
+            Err(_) => fails += 1,
+        }
+    }
+    if times.is_empty() {
+        return Probe::fail("bağlantı kurulamadı (engelli ya da zaman aşımı)");
+    }
+    let best = *times.iter().min().unwrap_or(&0);
+    let worst = *times.iter().max().unwrap_or(&0);
+    Probe {
+        ms: best,
+        ok: true,
+        jitter: worst.saturating_sub(best),
+        loss: (fails * 100 / 3) as u8,
+        error: "",
+    }
+}
+
+/// DHT bootstrap düğümüne UDP `find_node` gönderip yanıt süresini ölçer. Dragnet'in
+/// asıl taşıyıcısı UDP olduğu için bu, TCP yoklamalarından daha anlamlıdır.
+fn dht_udp_probe() -> Probe {
+    use std::net::{ToSocketAddrs, UdpSocket};
+    let Some(sa) = "router.bittorrent.com:6881"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+    else {
+        return Probe::fail("ad çözülemedi (DNS)");
+    };
+    let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
+        return Probe::fail("UDP soketi açılamadı");
+    };
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(2500)));
+    let id = [0x42u8; 20];
+    let pkt = dragnet_dht::krpc::build_find_node(b"dg", &id, &id);
     let start = Instant::now();
-    match addr.to_socket_addrs().ok().and_then(|mut a| a.next()) {
-        Some(sa) => match TcpStream::connect_timeout(&sa, Duration::from_secs(2)) {
-            Ok(_) => (start.elapsed().as_millis() as u64, true),
-            Err(_) => (start.elapsed().as_millis() as u64, false),
+    if sock.send_to(&pkt, sa).is_err() {
+        return Probe::fail("UDP gönderilemedi (güvenlik duvarı?)");
+    }
+    let mut buf = [0u8; 1500];
+    match sock.recv_from(&mut buf) {
+        Ok(_) => Probe {
+            ms: start.elapsed().as_millis() as u64,
+            ok: true,
+            jitter: 0,
+            loss: 0,
+            error: "",
         },
-        None => (0, false),
+        Err(_) => Probe::fail("yanıt yok (UDP engelli olabilir)"),
+    }
+}
+
+/// İndirme hızı testi (kullanıcı isteğiyle çalışır): sırayla birkaç genel test
+/// sunucusundan ~8 MB indirir, ilk yanıt vereni kullanır. Sonuç Mbit/sn.
+#[tauri::command]
+pub async fn speed_test() -> Result<Value, String> {
+    const URLS: [(&str, &str); 3] = [
+        (
+            "Cloudflare",
+            "https://speed.cloudflare.com/__down?bytes=8000000",
+        ),
+        ("Hetzner", "https://speed.hetzner.de/10MB.bin"),
+        ("OVH", "https://proof.ovh.net/files/10Mb.dat"),
+    ];
+    let res = tauri::async_runtime::spawn_blocking(|| {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(25))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mut last_err = String::from("bilinmiyor");
+        for (name, url) in URLS {
+            let start = Instant::now();
+            match client.get(url).send().and_then(|r| r.error_for_status()) {
+                Ok(resp) => match resp.bytes() {
+                    Ok(body) => {
+                        let secs = start.elapsed().as_secs_f64().max(0.001);
+                        let mbps = (body.len() as f64 * 8.0) / secs / 1_000_000.0;
+                        return Ok(json!({
+                            "ok": true, "server": name, "bytes": body.len(),
+                            "seconds": (secs * 10.0).round() / 10.0,
+                            "mbps": (mbps * 10.0).round() / 10.0,
+                        }));
+                    }
+                    Err(e) => last_err = e.to_string(),
+                },
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        Err(last_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match res {
+        Ok(v) => Ok(v),
+        Err(e) => Ok(json!({ "ok": false, "error": e })),
     }
 }
 

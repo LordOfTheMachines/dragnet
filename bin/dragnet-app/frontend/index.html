@@ -84,9 +84,13 @@
       <div class="card">
         <div class="card-head">
           <h3>Ağ sağlığı</h3>
-          <button id="btn-net" class="btn small ghost">Ölç</button>
+          <div style="display:flex; gap:8px">
+            <button id="btn-net" class="btn small ghost">Gecikme ölç</button>
+            <button id="btn-speed" class="btn small ghost">Hız testi</button>
+          </div>
         </div>
-        <table class="tbl"><tbody id="tbl-net"><tr><td class="muted">"Ölç" ile gecikme testi</td></tr></tbody></table>
+        <table class="tbl"><tbody id="tbl-net"><tr><td class="muted">"Gecikme ölç" ile TCP/UDP yoklaması, "Hız testi" ile indirme hızı ölçülür.</td></tr></tbody></table>
+        <div id="net-detail" class="muted small" style="margin-top:8px"></div>
       </div>
     </section>
 

@@ -142,6 +142,21 @@ function renderReach(s, on) {
     detail = "İlk 3 dakika bekleniyor: port dışarıdan açıksa gelen sorgu sayısı hızla artmalı.";
   }
   if (dc.firewalled === false && dc.public) detail += ` mainline istemcisi (port ${dc.port}) dış adresi ${dc.public} olarak görüyor ve NAT arkasında değil.`;
+  // CGNAT teşhisi: ISS operatör-NAT'ı (100.64/10) ya da özel adres kullanıyorsa modemdeki
+  // port yönlendirmesi hiçbir işe yaramaz — dışarıdan gelen bağlantı size ulaşamaz.
+  const pub = dc.public ? String(dc.public).split(":")[0] : "";
+  const o = pub.split(".").map(Number);
+  if (o.length === 4 && o.every((x) => Number.isFinite(x))) {
+    const cgnat = o[0] === 100 && o[1] >= 64 && o[1] < 128;
+    const priv = o[0] === 10 || (o[0] === 172 && o[1] >= 16 && o[1] < 32) || (o[0] === 192 && o[1] === 168);
+    if (cgnat || priv) {
+      detail += ` ⚠ Dış adresiniz (${pub}) ${cgnat ? "operatör NAT (CGNAT) aralığında" : "özel ağ aralığında"}: ` +
+        `ISS size kendi genel IP'nizi vermiyor, bu yüzden modemde port yönlendirmesi işe yaramaz. ` +
+        `Sabit/genel IP talep edebilir ya da pasif hasat yerine aktif hasata (BEP-51) güvenebilirsiniz.`;
+    } else {
+      detail += ` Dış adresiniz (${pub}) genel bir IP — port yönlendirmesi anlamlı.`;
+    }
+  }
   pill.className = "pill " + cls; txt.textContent = label; $("reach-detail").textContent = detail;
 }
 
@@ -415,16 +430,50 @@ function renderCats(ov) {
 }
 
 // --- Network health ---
+// Ağ sağlığı: her hedef 3 kez yoklanır (en iyi süre + kararsızlık + kayıp); ayrıca
+// **UDP/DHT** yoklaması yapılır — Dragnet'in taşıyıcısı UDP olduğu için asıl kritik
+// olan odur. Tek bir hedefin erişilemez olması ağın bozuk olduğu anlamına gelmez
+// (ISS'ler 1.1.1.1 gibi adresleri engelleyebilir), bu yüzden sebep de yazılır.
+function netRow(p, note) {
+  const val = p.ok
+    ? `${p.ms} ms` + (p.jitter ? ` <span class="muted">±${p.jitter}</span>` : "") +
+      (p.loss ? ` <span class="dead">%${p.loss} kayıp</span>` : "")
+    : `<span class="dead">${esc(p.error || "erişilemedi")}</span>`;
+  return `<tr><td><span class="dot ${p.ok ? "ok" : ""}"></span>${esc(p.name)}` +
+    (note ? ` <span class="muted small">${note}</span>` : "") +
+    `</td><td class="r num">${val}</td></tr>`;
+}
 async function loadNetwork() {
   $("tbl-net").innerHTML = `<tr><td class="muted">Ölçülüyor…</td></tr>`;
+  $("net-detail").textContent = "";
   try {
     const r = await invoke("network_health");
-    $("tbl-net").innerHTML = r.probes.map((p) => `
-      <tr><td><span class="dot ${p.ok ? "ok" : ""}"></span>${esc(p.name)}</td>
-        <td class="r num">${p.ok ? p.ms + " ms" : "erişilemedi"}</td></tr>`).join("");
+    const rows = r.probes.map((p) => netRow(p)).join("") +
+      netRow(r.dht, "Dragnet bu yolu kullanır");
+    $("tbl-net").innerHTML = rows;
+    const okCount = r.probes.filter((p) => p.ok).length;
+    $("net-detail").textContent = r.dht && r.dht.ok
+      ? `DHT bootstrap düğümü UDP üzerinden ${r.dht.ms} ms'de yanıt verdi — hasat için gereken yol açık. ` +
+        `TCP hedeflerinin ${okCount}/${r.probes.length} tanesi erişilebilir; bazı adresler ISS tarafından engellenmiş olabilir, bu Dragnet'i etkilemez.`
+      : `UDP/DHT yoklaması başarısız — hasat çalışmaz. Güvenlik duvarı ya da ISS UDP'yi engelliyor olabilir.`;
   } catch (e) { $("tbl-net").innerHTML = `<tr><td class="muted">Hata</td></tr>`; }
 }
 $("btn-net").addEventListener("click", loadNetwork);
+
+async function runSpeedTest() {
+  const btn = $("btn-speed");
+  btn.disabled = true; btn.textContent = "Ölçülüyor…";
+  $("net-detail").textContent = "İndirme hızı ölçülüyor (birkaç MB indirilir)…";
+  try {
+    const r = await invoke("speed_test");
+    $("net-detail").innerHTML = r.ok
+      ? `İndirme hızı: <b>${r.mbps} Mbit/sn</b> (${humanSize(r.bytes)} / ${r.seconds} sn · ${esc(r.server)}). ` +
+        `Kıyas: metadata çekimi bant genişliğinden çok <b>gecikme ve peer erişilebilirliğinden</b> etkilenir.`
+      : `Hız testi başarısız: ${esc(r.error || "bilinmiyor")}`;
+  } catch (e) { $("net-detail").textContent = "Hız testi çalıştırılamadı."; }
+  finally { btn.disabled = false; btn.textContent = "Hız testi"; }
+}
+$("btn-speed").addEventListener("click", runSpeedTest);
 
 // --- Gözat & Ara (tek sıralanabilir, sayfalı tablo) ---
 const browse = { q: "", cat: "all", sort: "", desc: true, offset: 0, PAGE: 60, hasMore: true, loading: false, loaded: false, mode: "auto", lastMode: "", weak: false, showWeak: false };

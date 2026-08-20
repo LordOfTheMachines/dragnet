@@ -1345,6 +1345,7 @@ dependencies = [
  "base64 0.22.1",
  "dragnet-api",
  "dragnet-core",
+ "dragnet-dht",
  "dragnet-engine",
  "dragnet-semantic",
  "dragnet-store",
