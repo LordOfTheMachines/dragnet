@@ -109,7 +109,19 @@ pub fn doc_text_with_files(
         let norm = normalize_name(base);
         let norm = norm.trim();
         // Ad zaten dosya adını içeriyorsa (tek dosyalı torrent) tekrar etme.
-        if norm.is_empty() || s.contains(norm) || !seen.insert(norm.to_string()) {
+        if norm.is_empty() || s.contains(norm) {
+            continue;
+        }
+        // Bölüm/parça numarası dışında aynı olan dosyalar tek kez yazılır: bir dizinin
+        // 40 bölümü ("… S01E02 mkv", "… S01E03 mkv") 400 karakterlik bütçeyi tekrarla
+        // doldurup gerçek bilgiye (altyazı dili, ek içerik, kurulum dosyası) yer
+        // bırakmıyordu. İmza: rakamlar atılmış küçük harfli biçim.
+        let sig: String = norm
+            .chars()
+            .filter(|c| !c.is_ascii_digit())
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        if !seen.insert(sig) {
             continue;
         }
         if extra.len() + norm.len() + 1 > max_chars {
@@ -141,5 +153,49 @@ mod doc_tests {
             d.contains("Heroes of Might & Magic III") && d.ends_with("— game"),
             "{d}"
         );
+    }
+}
+
+#[cfg(test)]
+mod file_doc_tests {
+    use super::*;
+
+    fn f(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn dizi_bolumleri_tek_kez_yazilir() {
+        let files = f(&[
+            "The Pact.S01/The.Pact.S01E01.avi",
+            "The Pact.S01/The.Pact.S01E02.avi",
+            "The Pact.S01/The.Pact.S01E03.avi",
+            "The Pact.S01/Subs/Turkish.srt",
+        ]);
+        let d = doc_text_with_files("The Pact.S01.400p.Novamedia", "video", &files, 400);
+        // Bölümler tek imzaya indirgenir, altyazı bilgisi yer bulur.
+        assert_eq!(d.matches("The Pact S01E").count(), 1, "{d}");
+        assert!(d.contains("Turkish srt"), "{d}");
+    }
+
+    #[test]
+    fn bilgi_tasiyan_dosyalar_korunur() {
+        let files = f(&[
+            "setup/Photoshop_2024_installer.exe",
+            "setup/crack/keygen.exe",
+            "readme.txt",
+        ]);
+        let d = doc_text_with_files("07-coyotes", "other", &files, 400);
+        assert!(d.contains("Photoshop 2024 installer exe"), "{d}");
+        assert!(d.contains("keygen exe"), "{d}");
+    }
+
+    #[test]
+    fn butce_asilinca_durur() {
+        let files: Vec<String> = (0..200)
+            .map(|i| format!("Uniq{}Name{}File.mkv", i, i * 7))
+            .collect();
+        let d = doc_text_with_files("Karisik", "video", &files, 120);
+        assert!(d.len() < 260, "bütçe aşıldı: {}", d.len());
     }
 }

@@ -9,7 +9,7 @@
 //! kullanılır, dolayısıyla `DATABASE_URL` gerekmez.
 
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Instant;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -175,6 +175,25 @@ pub struct Store {
     /// Yazım düzeltme dizini önbelleği (F4-2): FTS sözlüğünden kurulur, indeks büyüdükçe
     /// eskir — `SPELL_TTL` sonunda yeniden kurulur. `None` = henüz kurulmadı.
     spell: SpellCache,
+    /// Depolama basıncı durumu (F8-4). Yazan yollar bunu kontrol eder; ölçüm engine
+    /// tarafından periyodik yenilenir (`refresh_pressure`).
+    pressure: Arc<StdRwLock<Pressure>>,
+    /// Veritabanı dosyasının yolu (boyut ölçümü için; bellek-içi depoda boş).
+    db_path: String,
+    /// (bütçe, disk rezervi) bayt — 0 = sınırsız.
+    limits: Arc<StdRwLock<(u64, u64)>>,
+}
+
+/// Depolama basıncı (F8-4): veritabanı boyutu + boş disk. `paused` ise **büyüme durur**
+/// (yeni sighting/metadata/embedding yazılmaz) ama mevcut indeks aranmaya devam eder.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Pressure {
+    pub db_bytes: u64,
+    /// Diskte kalan boş alan (Windows'ta ölçülür; diğer platformlarda `None`).
+    pub free_bytes: Option<u64>,
+    pub paused: bool,
+    /// Duraklama sebebi: "budget" (DB bütçesi) / "disk" (boş alan rezervi) / "".
+    pub reason: &'static str,
 }
 
 /// Önbellekteki yazım dizini ve kurulma anı (TTL kontrolü için).
@@ -205,12 +224,85 @@ impl Store {
             .max_connections(5)
             .connect_with(opts)
             .await?;
-        let store = Self {
-            pool,
-            spell: Arc::new(tokio::sync::RwLock::new(None)),
-        };
+        let store = Self::with_pool(pool, path.to_string());
         store.migrate().await?;
         Ok(store)
+    }
+
+    fn with_pool(pool: SqlitePool, db_path: String) -> Self {
+        Self {
+            pool,
+            spell: Arc::new(tokio::sync::RwLock::new(None)),
+            pressure: Arc::new(StdRwLock::new(Pressure::default())),
+            db_path,
+            limits: Arc::new(StdRwLock::new((0, 0))),
+        }
+    }
+
+    /// Depolama sınırlarını ayarlar (bayt; 0 = sınırsız): veritabanı bütçesi ve diskte
+    /// bırakılacak boş alan rezervi. Aşılırsa **büyüme durur**, arama sürer (F8-4).
+    pub fn set_limits(&self, db_max_bytes: u64, disk_reserve_bytes: u64) {
+        *self.limits.write().unwrap_or_else(|p| p.into_inner()) =
+            (db_max_bytes, disk_reserve_bytes);
+    }
+
+    /// Anlık depolama basıncı (son ölçüm).
+    pub fn pressure(&self) -> Pressure {
+        *self.pressure.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Büyüme duraklatıldı mı? Yazan yollar bunu kontrol eder.
+    pub fn growth_paused(&self) -> bool {
+        self.pressure().paused
+    }
+
+    /// Basıncı yeniden ölçer (engine periyodik çağırır; ucuz: dosya boyutu + disk sorgusu).
+    /// WAL ve shm dosyaları da sayılır — asıl büyüme orada birikir.
+    pub fn refresh_pressure(&self) -> Pressure {
+        let (budget, reserve) = *self.limits.read().unwrap_or_else(|p| p.into_inner());
+        let mut db_bytes = 0u64;
+        if !self.db_path.is_empty() {
+            for suffix in ["", "-wal", "-shm"] {
+                if let Ok(m) = std::fs::metadata(format!("{}{suffix}", self.db_path)) {
+                    db_bytes += m.len();
+                }
+            }
+        }
+        let free_bytes = free_disk_bytes(&self.db_path);
+        let mut reason = "";
+        let mut paused = false;
+        if budget > 0 && db_bytes >= budget {
+            paused = true;
+            reason = "budget";
+        } else if reserve > 0 && free_bytes.is_some_and(|f| f < reserve) {
+            paused = true;
+            reason = "disk";
+        }
+        let p = Pressure {
+            db_bytes,
+            free_bytes,
+            paused,
+            reason,
+        };
+        let prev = self.pressure();
+        if prev.paused != paused {
+            if paused {
+                tracing::warn!(
+                    db_bytes,
+                    ?free_bytes,
+                    reason,
+                    "depolama basıncı: büyüme duraklatıldı (arama sürüyor)"
+                );
+            } else {
+                tracing::info!(
+                    db_bytes,
+                    ?free_bytes,
+                    "depolama basıncı geçti: büyüme sürüyor"
+                );
+            }
+        }
+        *self.pressure.write().unwrap_or_else(|p| p.into_inner()) = p;
+        p
     }
 
     /// Test için paylaşımlı bellek-içi (in-memory) depo.
@@ -221,10 +313,7 @@ impl Store {
             .max_connections(1)
             .connect_with(opts)
             .await?;
-        let store = Self {
-            pool,
-            spell: Arc::new(tokio::sync::RwLock::new(None)),
-        };
+        let store = Self::with_pool(pool, String::new());
         store.migrate().await?;
         Ok(store)
     }
@@ -453,6 +542,11 @@ impl Store {
         repeats: i64,
     ) -> Result<String, StoreError> {
         let hex = infohash.to_hex();
+        // F8-4: depolama basıncı varsa YENİ kayıt açma (mevcutların güncellenmesi de
+        // büyüme demektir; en güvenlisi tamamen duraklatmak). Arama etkilenmez.
+        if self.growth_paused() {
+            return Ok(hex);
+        }
         let hot_i = if hot { 1i64 } else { 0 };
         let repeats = repeats.max(1);
         let row = sqlx::query(
@@ -566,6 +660,9 @@ impl Store {
     /// Fetcher yolu: çekilmiş metadata'yı yazar. Idempotent — tekrar çağrılırsa
     /// alanları tazeler, `seen_count`'u artırır, dosya listesini ve FTS'i yeniler.
     pub async fn upsert_torrent(&self, rec: &TorrentRecord) -> Result<(), StoreError> {
+        if self.growth_paused() {
+            return Ok(()); // F8-4: büyüme duraklatıldı.
+        }
         let hex = rec.infohash.to_hex();
         let mut tx = self.pool.begin().await?;
 
@@ -1086,7 +1183,9 @@ impl Store {
         model_id: &str,
         rows: &[(InfoHash, Vec<i8>, f32)],
     ) -> Result<(), StoreError> {
-        if rows.is_empty() {
+        // F8-4: vektör yazımı da büyümedir; basınç altında duraklatılır (mevcut indeks
+        // RAM'de kalır ve aranmaya devam eder).
+        if rows.is_empty() || self.growth_paused() {
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
@@ -1387,6 +1486,41 @@ fn to_fts_query(input: &str) -> String {
         }
     }
     terms.join(" ")
+}
+
+/// Verilen yolun bulunduğu diskteki boş alan (bayt). Windows'ta `GetDiskFreeSpaceExW`
+/// (çağıran kullanıcının kotasına göre kullanılabilir alan); diğer platformlarda `None`
+/// — orada yalnız veritabanı bütçesi uygulanır.
+#[cfg(windows)]
+fn free_disk_bytes(path: &str) -> Option<u64> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    if path.is_empty() {
+        return None;
+    }
+    let dir = std::path::Path::new(path).parent()?.to_path_buf();
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        dir
+    };
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut avail: u64 = 0;
+    // SAFETY: geçerli, NUL sonlu geniş karakter yolu; çıktı yerel değişkene yazılır.
+    unsafe {
+        GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut avail), None, None).ok()?;
+    }
+    Some(avail)
+}
+
+#[cfg(not(windows))]
+fn free_disk_bytes(_path: &str) -> Option<u64> {
+    None
 }
 
 #[cfg(test)]

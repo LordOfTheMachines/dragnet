@@ -27,6 +27,7 @@
   <main>
     <!-- PANO -->
     <section id="view-dashboard" class="view">
+      <div id="storage-warn" class="warnbar hidden"></div>
       <div class="tiles">
         <div class="tile"><div class="tval" id="t-fetched">0</div><div class="tlabel">İndekslenen (adlı)</div></div>
         <div class="tile"><div class="tval" id="t-total">0</div><div class="tlabel">Bilinen infohash</div></div>
@@ -187,6 +188,14 @@
           <label>Harvester UDP portu (0 = otomatik)
             <input id="set-port" type="number" min="0" max="65535" />
             <small>Varsayılan 6881. Modemde bu portu (UDP) bu bilgisayara yönlendirin — pasif hasat için şart. qBittorrent aynı portu kullanıyorsa birini değiştirin; port doluysa Dragnet efemer porta düşer (pano "DHT erişilebilirliği" kartına bakın).</small>
+          </label>
+          <label>Veritabanı bütçesi (GB, 0 = sınırsız)
+            <input id="set-dbmax" type="number" min="0" max="10000" step="1" />
+            <small>Aşılınca <b>büyüme durur</b> (yeni kayıt/metadata/vektör yazılmaz); mevcut indeks aranmaya devam eder. Basınç geçince kendiliğinden sürer.</small>
+          </label>
+          <label>Diskte bırakılacak boş alan (GB)
+            <input id="set-diskres" type="number" min="0" max="10000" step="1" />
+            <small>Varsayılan 5 GB. Crawler süresiz büyür; disk dolup sistemi zora sokmasın.</small>
           </label>
           <label class="chk"><input id="set-autostart" type="checkbox" /> Windows'ta başlangıçta başlat</label>
           <label class="chk"><input id="set-autoscan" type="checkbox" /> Açılışta taramayı otomatik başlat</label>

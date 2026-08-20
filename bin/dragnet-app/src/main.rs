@@ -63,6 +63,23 @@ fn main() {
                 }
             };
 
+            // Depolama büyüme freni (F8-4): sınırlar ayarlardan; basınç 30 sn'de bir ölçülür.
+            const GB: f64 = 1_073_741_824.0;
+            store.set_limits(
+                (settings.db_max_gb.max(0.0) * GB) as u64,
+                (settings.disk_reserve_gb.max(0.0) * GB) as u64,
+            );
+            store.refresh_pressure();
+            {
+                let st = store.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        st.refresh_pressure();
+                    }
+                });
+            }
+
             // Semantik yönetici: yuva API ve arama komutuyla paylaşılır; ayar açıksa
             // arka planda kurulur (indirme/yükleme UI'yı bloklamaz).
             let semantic = std::sync::Arc::new(semantic::SemanticManager::new());

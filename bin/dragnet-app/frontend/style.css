@@ -231,3 +231,6 @@ input[type=text]:focus, input[type=number]:focus { outline: none; border-color: 
 .tree .tmeta { color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .fileslink { cursor: pointer; }
 .fileslink:hover { color: var(--accent); text-decoration: underline; }
+
+/* Depolama basıncı uyarı şeridi (F8-4) */
+.warnbar { background: rgba(240,180,41,.12); border: 1px solid rgba(240,180,41,.4); color: #f4c766; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; }

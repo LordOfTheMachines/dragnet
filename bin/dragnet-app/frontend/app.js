@@ -74,10 +74,24 @@ async function pollStats() {
     $("status-pill").className = "pill " + (scanning ? "on" : "off");
     $("btn-toggle").textContent = scanning ? "Taramayı Durdur" : "Taramayı Başlat";
     renderSemantic(s.semantic, s.fetched);
+    renderStorage(s.storage);
     renderFetch._hints = s.peer_hints;
     renderFetch(s.fetch, s.queue, scanning);
     renderReach(s, scanning);
   } catch (e) {}
+}
+
+// --- Depolama basıncı uyarısı (F8-4): büyüme duraklatıldıysa üstte şerit ---
+function renderStorage(st) {
+  const el = $("storage-warn");
+  if (!el) return;
+  if (!st || !st.paused) { el.classList.add("hidden"); return; }
+  const why = st.reason === "disk"
+    ? `diskte boş alan rezervin altına indi (kalan ${humanSize(st.free_bytes || 0)})`
+    : `veritabanı bütçesi doldu (${humanSize(st.db_bytes || 0)})`;
+  el.innerHTML = `<b>Büyüme duraklatıldı:</b> ${why}. Arama ve mevcut indeks çalışmaya devam ediyor; ` +
+    `Ayarlar'dan sınırı artırabilir ya da yer açabilirsiniz.`;
+  el.classList.remove("hidden");
 }
 
 // --- DHT erişilebilirliği (port yönlendirme kontrolü) ---
@@ -635,6 +649,8 @@ async function loadSettings() {
     $("set-port").value = s.harvester_port;
     $("set-autostart").checked = s.autostart;
     $("set-autoscan").checked = s.auto_scan;
+    $("set-dbmax").value = s.db_max_gb ?? 0;
+    $("set-diskres").value = s.disk_reserve_gb ?? 5;
     $("set-sem").checked = !!s.semantic_enabled;
     $("set-sem-tier").value = s.semantic_tier || "auto";
     $("set-sem-device").value = s.semantic_device || "auto";
@@ -653,6 +669,8 @@ $("btn-save").addEventListener("click", async () => {
   s.autostart = $("set-autostart").checked;
   s.auto_scan = $("set-autoscan").checked;
   s.block_keywords = blockKw.slice();
+  s.db_max_gb = Number($("set-dbmax").value) || 0;
+  s.disk_reserve_gb = Number($("set-diskres").value) || 0;
   s.semantic_enabled = $("set-sem").checked;
   s.semantic_tier = $("set-sem-tier").value;
   s.semantic_device = $("set-sem-device").value;

@@ -42,6 +42,18 @@ pub struct Settings {
     /// Model dizini (boş = exe yanında `models`). Kısa/düz bir yol olmalı.
     #[serde(default)]
     pub semantic_models_dir: String,
+    /// Veritabanı bütçesi (GB; 0 = sınırsız). Aşılınca **büyüme durur**, arama sürer.
+    #[serde(default)]
+    pub db_max_gb: f64,
+    /// Diskte bırakılacak boş alan rezervi (GB; 0 = kapalı). Altına inilirse büyüme durur.
+    #[serde(default = "default_disk_reserve")]
+    pub disk_reserve_gb: f64,
+}
+
+/// Varsayılan disk rezervi: 5 GB. Crawler süresiz büyür; diski tamamen doldurup
+/// sistemi zora sokmasın (F8-4).
+fn default_disk_reserve() -> f64 {
+    5.0
 }
 
 fn default_tier() -> String {
@@ -69,6 +81,8 @@ impl Default for Settings {
             block_keywords: Vec::new(),
             semantic_enabled: false,
             semantic_tier: default_tier(),
+            db_max_gb: 0.0,
+            disk_reserve_gb: default_disk_reserve(),
             semantic_device: default_device(),
             semantic_rerank: true,
             semantic_models_dir: String::new(),

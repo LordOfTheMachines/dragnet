@@ -220,7 +220,11 @@ fn main() {
             let t = std::time::Instant::now();
             // RRQ=1: yeniden sıralayıcıya genişletilmiş metin yerine kullanıcının ham
             // sorgusu verilir (ölçüm için).
-            let rq = if std::env::var("RRQ").is_ok() { q.to_string() } else { qtext.clone() };
+            let rq = if std::env::var("RRQ").is_ok() {
+                q.to_string()
+            } else {
+                qtext.clone()
+            };
             let scores = rr.score(&rq, &docs).unwrap();
             rr_ms += t.elapsed().as_millis();
             rr_top = scores.iter().copied().fold(f32::MIN, f32::max);

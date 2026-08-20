@@ -60,7 +60,43 @@ pub async fn fetch_info_from_peer(
 /// tipik olarak <2 s. Böylece ölü adresler eşzamanlılık yuvasını uzun tutmaz.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
 
+/// Peer adresi **genel internet** adresi mi? (F8-3, güvenlik)
+///
+/// Peer listeleri güvenilmeyen DHT düğümlerinden gelir: kötü niyetli bir düğüm peer
+/// olarak `192.168.1.1:80` ya da `169.254.x.x` verip bizi **yerel ağa** bağlantı
+/// denemeye zorlayabilir (DHT→LAN SSRF). Bağlanmadan önce adres sınıfı elenir:
+/// özel (RFC1918), loopback, link-local, multicast, broadcast, belgeleme/test
+/// aralıkları, CGNAT (100.64/10) ve 0.0.0.0/8. Ayrıca ayrıcalıklı portlar (<1024)
+/// BitTorrent peer'i olmaz — onlar da elenir.
+pub fn is_public_peer(addr: &SocketAddrV4) -> bool {
+    let ip = *addr.ip();
+    let o = ip.octets();
+    let port = addr.port();
+    let cgnat = o[0] == 100 && (64..128).contains(&o[1]);
+    let benchmark = o[0] == 198 && (18..20).contains(&o[1]); // 198.18/15 (RFC2544)
+    let doc = matches!(
+        (o[0], o[1], o[2]),
+        (192, 0, 2) | (198, 51, 100) | (203, 0, 113)
+    );
+    let reserved = o[0] == 0 || o[0] >= 240; // 0.0.0.0/8 ve 240/4 (+ 255.255.255.255)
+    port >= 1024
+        && !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+        && !ip.is_unspecified()
+        && !cgnat
+        && !benchmark
+        && !doc
+        && !reserved
+}
+
 async fn fetch_inner(addr: SocketAddrV4, infohash: [u8; 20]) -> Result<Vec<u8>, PeerError> {
+    // Güvenilmeyen kaynaktan gelen adrese bağlanmadan önce sınıf kontrolü (F8-3).
+    if !is_public_peer(&addr) {
+        return Err(PeerError::NotPublic);
+    }
     let mut stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
         Ok(s) => s?,
         Err(_) => return Err(PeerError::Timeout),
@@ -388,5 +424,47 @@ mod tests {
         assert_eq!(msg[5], 3);
         let v: serde_bencode::value::Value = serde_bencode::from_bytes(&msg[6..]).unwrap();
         assert_eq!(parse_metadata_msg(&v), Some((0, 2)));
+    }
+}
+
+#[cfg(test)]
+mod public_peer_tests {
+    use super::is_public_peer;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    fn a(ip: [u8; 4], port: u16) -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]), port)
+    }
+
+    #[test]
+    fn yerel_ve_ozel_adresler_reddedilir() {
+        for ip in [
+            [192, 168, 1, 1],     // RFC1918
+            [10, 0, 0, 5],        // RFC1918
+            [172, 16, 0, 9],      // RFC1918
+            [127, 0, 0, 1],       // loopback
+            [169, 254, 3, 4],     // link-local
+            [100, 100, 0, 1],     // CGNAT
+            [224, 0, 0, 1],       // multicast
+            [255, 255, 255, 255], // broadcast
+            [0, 0, 0, 0],         // unspecified
+            [192, 0, 2, 5],       // TEST-NET-1
+            [198, 18, 0, 1],      // benchmark
+            [240, 0, 0, 1],       // reserved
+        ] {
+            assert!(!is_public_peer(&a(ip, 6881)), "kabul edilmemeliydi: {ip:?}");
+        }
+    }
+
+    #[test]
+    fn ayricalikli_port_reddedilir() {
+        assert!(!is_public_peer(&a([8, 8, 8, 8], 80)));
+        assert!(!is_public_peer(&a([8, 8, 8, 8], 22)));
+    }
+
+    #[test]
+    fn genel_adres_kabul_edilir() {
+        assert!(is_public_peer(&a([8, 8, 8, 8], 6881)));
+        assert!(is_public_peer(&a([88, 230, 12, 4], 51413)));
     }
 }

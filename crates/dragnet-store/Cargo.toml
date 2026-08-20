@@ -14,5 +14,12 @@ thiserror = { workspace = true }
 # KULLANMIYORUZ (runtime query), böylece derleme DATABASE_URL gerektirmez.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
+[target.'cfg(windows)'.dependencies]
+# Boş disk alanı ölçümü (depolama büyüme freni, F8-4).
+windows = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tokio = { workspace = true }
+# `whatis` teşhis örneği: embed edilen metni göstermek için (yalnız örnekte kullanılır;
+# kütüphane dragnet-semantic'e bağımlı DEĞİL — katman sırası korunur).
+dragnet-semantic = { path = "../dragnet-semantic" }

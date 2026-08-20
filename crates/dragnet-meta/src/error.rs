@@ -10,6 +10,11 @@ pub enum PeerError {
     #[error("işlem zaman aşımına uğradı")]
     Timeout,
 
+    /// Peer adresi genel internet adresi değil (özel/loopback/link-local/CGNAT…):
+    /// güvenilmeyen DHT düğümlerinin yerel ağa bağlantı denemesi yaptırmasını engeller.
+    #[error("peer adresi genel internet adresi değil")]
+    NotPublic,
+
     #[error("geçersiz handshake (protokol uyuşmuyor)")]
     BadHandshake,
 

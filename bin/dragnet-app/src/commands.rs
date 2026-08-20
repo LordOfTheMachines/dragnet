@@ -119,6 +119,11 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         rate.round() as u64
     };
 
+    let p = state.store.pressure();
+    let storage = json!({
+        "db_bytes": p.db_bytes, "free_bytes": p.free_bytes,
+        "paused": p.paused, "reason": p.reason,
+    });
     Ok(json!({
         "scanning": scanning,
         "fetched": fetched,
@@ -143,6 +148,8 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         })),
         "queue": queue.map(|(p, h, u, r)| json!({ "pending": p, "hot": h, "unreachable": u, "fetched_last_hour": r })),
         "semantic": state.semantic.status_json().await,
+        // Depolama basıncı (F8-4): büyüme duraklatıldıysa UI uyarır.
+        "storage": storage,
     }))
 }
 
