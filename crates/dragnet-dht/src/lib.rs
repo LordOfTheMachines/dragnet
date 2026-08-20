@@ -92,7 +92,10 @@ impl Default for HarvesterConfig {
             crawl_batch: 4,
             id_rotation: Duration::from_secs(600),
             dedup_capacity: 1 << 18,
-            followups_per_sample: 3,
+            // Her BEP-51 örneğinden sonra daha çok doğrudan get_peers: peer ipuçlu (yani
+            // CANLI olduğu bilinen) aday üretmenin en ucuz yolu. Ölçüm: kuyruğun %98'i
+            // soğuk örnekleme, çekim başarısı ~%2; ipuçlu adaylarda peer zaten bilinir.
+            followups_per_sample: 8,
             node_queue_capacity: 8192,
         }
     }

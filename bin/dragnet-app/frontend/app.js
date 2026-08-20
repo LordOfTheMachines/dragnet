@@ -452,10 +452,23 @@ async function loadNetwork() {
       netRow(r.dht, "Dragnet bu yolu kullanır");
     $("tbl-net").innerHTML = rows;
     const okCount = r.probes.filter((p) => p.ok).length;
-    $("net-detail").textContent = r.dht && r.dht.ok
-      ? `DHT bootstrap düğümü UDP üzerinden ${r.dht.ms} ms'de yanıt verdi — hasat için gereken yol açık. ` +
-        `TCP hedeflerinin ${okCount}/${r.probes.length} tanesi erişilebilir; bazı adresler ISS tarafından engellenmiş olabilir, bu Dragnet'i etkilemez.`
-      : `UDP/DHT yoklaması başarısız — hasat çalışmaz. Güvenlik duvarı ya da ISS UDP'yi engelliyor olabilir.`;
+    // Karar CANLI sayaçlara göre verilir: harvester paket alıp gönderiyorsa UDP çalışıyordur.
+    // Sentetik yoklama ISS engeli/sessiz bootstrap yüzünden yanlış negatif verebiliyordu.
+    const L = r.live;
+    if (L && (L.responses > 0 || L.queries_seen > 0)) {
+      $("net-detail").innerHTML =
+        `<b>UDP/DHT çalışıyor</b> — harvester ${nf(L.queries_sent)} sorgu gönderdi, ${nf(L.responses)} yanıt aldı, ` +
+        `dışarıdan ${nf(L.queries_seen)} sorgu geldi (${nf(L.get_peers_seen)} get_peers · ${nf(L.announce_seen)} announce), ` +
+        `${nf(L.samples)} BEP-51 örneği toplandı. ` +
+        (r.dht.ok ? `Bootstrap yoklaması da ${r.dht.ms} ms.` : `(Bootstrap yoklaması yanıt vermedi — bu düğümler sık sessiz kalır, hasadı etkilemiyor.)`) +
+        ` TCP hedeflerinin ${okCount}/${r.probes.length} tanesi erişilebilir; engelli adresler Dragnet'i etkilemez.`;
+    } else if (r.dht && r.dht.ok) {
+      $("net-detail").textContent =
+        `DHT bootstrap düğümü UDP üzerinden ${r.dht.ms} ms'de yanıt verdi — yol açık. Tarama başlatılınca sayaçlar dolar.`;
+    } else {
+      $("net-detail").textContent =
+        `UDP yoklaması yanıt vermedi ve tarama kapalı — tarama açıkken tekrar ölçün. Sürekli başarısızsa güvenlik duvarı UDP'yi engelliyor olabilir.`;
+    }
   } catch (e) { $("tbl-net").innerHTML = `<tr><td class="muted">Hata</td></tr>`; }
 }
 $("btn-net").addEventListener("click", loadNetwork);

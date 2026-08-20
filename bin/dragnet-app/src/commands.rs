@@ -258,17 +258,40 @@ pub async fn dashboard(
 
 /// Ağ sağlığı: birkaç hedefe TCP bağlantı gecikmesi (ICMP admin gerektirdiğinden TCP).
 #[tauri::command]
-pub async fn network_health() -> Result<Value, String> {
+pub async fn network_health(state: State<'_, AppState>) -> Result<Value, String> {
+    // ASIL KANIT: çalışan harvester'ın kendi sayaçları. Sentetik yoklama ISS engeli,
+    // sessiz bootstrap düğümü ya da kısa zaman aşımı yüzünden yanlış negatif verebilir
+    // (kullanıcı geri bildirimi: kart "UDP çalışmıyor" derken hasat 57 örnek/sn ile
+    // sürüyordu). Bu yüzden canlı sayaçlar da raporlanır ve karar onlara göre verilir.
+    let live = {
+        let guard = state.engine.lock().await;
+        match guard.as_ref() {
+            Some(e) => {
+                let s = e.snapshot().await;
+                Some(json!({
+                    "queries_sent": s.harvester.queries_sent,
+                    "responses": s.harvester.responses_seen,
+                    "queries_seen": s.harvester.queries_seen,
+                    "samples": s.harvester.samples_seen,
+                    "get_peers_seen": s.harvester.get_peers_seen,
+                    "announce_seen": s.harvester.announce_seen,
+                }))
+            }
+            None => None,
+        }
+    };
     // Hedefler Dragnet'in gerçekten ihtiyaç duyduğu şeyleri ölçer: DNS sunucularına TCP
     // gecikmesi (genel internet sağlığı) ve **DHT bootstrap düğümüne UDP** (asıl kritik
     // yol — Dragnet TCP değil UDP ile çalışır; bazı ağlarda 443 açıkken UDP kapalıdır).
     // Not: tek hedefin başarısızlığı ağın bozuk olduğu anlamına gelmez; ISS'ler belirli
     // adresleri (ör. 1.1.1.1) engelleyebilir — bu yüzden hata sebebi ayrı raporlanır.
-    const TCP_TARGETS: [(&str, &str); 4] = [
-        ("Google DNS", "8.8.8.8:53"),
-        ("Cloudflare DNS", "1.1.1.1:53"),
-        ("Quad9 DNS", "9.9.9.9:53"),
-        ("GitHub", "github.com:443"),
+    // 443 kullanılır: birçok ISS üçüncü taraf DNS'e (TCP/UDP 53) giden trafiği engeller;
+    // ilk sürümde hedefler 53. porttaydı ve hepsi "erişilemedi" görünüyordu — oysa ağ
+    // çalışıyordu (kullanıcı geri bildirimi + hasat sayaçları bunu kanıtladı).
+    const TCP_TARGETS: [(&str, &str); 3] = [
+        ("Google", "google.com:443"),
+        ("Cloudflare", "cloudflare.com:443"),
+        ("Wikipedia", "wikipedia.org:443"),
     ];
     let mut probes = Vec::new();
     for (name, addr) in TCP_TARGETS {
@@ -286,8 +309,10 @@ pub async fn network_health() -> Result<Value, String> {
         .unwrap_or(Probe::fail("görev çöktü"));
     Ok(json!({
         "probes": probes,
-        "dht": { "name": "DHT bootstrap (UDP)", "target": "router.bittorrent.com:6881",
+        "dht": { "name": "DHT bootstrap (UDP)", "target": "dht.transmissionbt.com:6881",
                  "ms": dht.ms, "ok": dht.ok, "error": dht.error },
+        // Canlı hasat sayaçları: UDP'nin gerçekten çalışıp çalışmadığının kanıtı.
+        "live": live,
     }))
 }
 
@@ -347,33 +372,44 @@ fn probe(addr: &str) -> Probe {
 /// asıl taşıyıcısı UDP olduğu için bu, TCP yoklamalarından daha anlamlıdır.
 fn dht_udp_probe() -> Probe {
     use std::net::{ToSocketAddrs, UdpSocket};
-    let Some(sa) = "router.bittorrent.com:6881"
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut a| a.next())
-    else {
-        return Probe::fail("ad çözülemedi (DNS)");
-    };
+    // Tek bir bootstrap düğümü yanıltıcıdır (router.bittorrent.com sık sık sessiz kalır);
+    // üçü sırayla denenir ve ilk yanıt veren raporlanır.
+    const NODES: [&str; 3] = [
+        "dht.transmissionbt.com:6881",
+        "router.utorrent.com:6881",
+        "router.bittorrent.com:6881",
+    ];
     let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
         return Probe::fail("UDP soketi açılamadı");
     };
-    let _ = sock.set_read_timeout(Some(Duration::from_millis(2500)));
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(4000)));
     let id = [0x42u8; 20];
     let pkt = dragnet_dht::krpc::build_find_node(b"dg", &id, &id);
-    let start = Instant::now();
-    if sock.send_to(&pkt, sa).is_err() {
-        return Probe::fail("UDP gönderilemedi (güvenlik duvarı?)");
+    let mut resolved = false;
+    for host in NODES {
+        let Some(sa) = host.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
+            continue;
+        };
+        resolved = true;
+        let start = Instant::now();
+        if sock.send_to(&pkt, sa).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 1500];
+        if sock.recv_from(&mut buf).is_ok() {
+            return Probe {
+                ms: start.elapsed().as_millis() as u64,
+                ok: true,
+                jitter: 0,
+                loss: 0,
+                error: "",
+            };
+        }
     }
-    let mut buf = [0u8; 1500];
-    match sock.recv_from(&mut buf) {
-        Ok(_) => Probe {
-            ms: start.elapsed().as_millis() as u64,
-            ok: true,
-            jitter: 0,
-            loss: 0,
-            error: "",
-        },
-        Err(_) => Probe::fail("yanıt yok (UDP engelli olabilir)"),
+    if resolved {
+        Probe::fail("bootstrap düğümleri yanıt vermedi")
+    } else {
+        Probe::fail("ad çözülemedi (DNS)")
     }
 }
 
