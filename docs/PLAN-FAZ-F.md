@@ -75,7 +75,23 @@ Qwen3-Embedding kademesi elendi (torrent adlarında Gemma'nın altında, CPU'da 
   game of thrones …) + tür/tema (bilim kurgu → sci-fi science fiction, büyücü → wizard …).
   "taht oyunları dizisi" MISS r=7 → **OK r=1**. Kelime zaten İngilizce biçimdeyse
   dokunulmaz ("zombies" → "zombie" FTS eşleşmesini bozardı).
-- Kalan: yazım düzeltme (F4-2), dönem sorgusu (F4-3), kullanıcı geri beslemesi (F4-4).
+**F4-2 TAMAM: yazım düzeltme — hit@5 %84 → %89.** Adaylar indeksin kendi FTS sözlüğünden
+(`torrents_vocab` = fts5vocab); harici sözlük yok. Üç ölçüm kararı: (a) düzeltmeyi her
+sorguya uygulamak %84 → %74 düşürdü (Türkçe kelimeler korpusta "bilinmeyen") → düzeltme
+yalnız **sonuç bulunamayan** sorguda çalışır; (b) kelime kelime en sık aday "hery poter" →
+"hero peter" üretti → kombinasyonlar FTS eş-geçişiyle doğrulanır; (c) kısa kelimelerde
+düzenleme mesafesi yetmiyor → ünsüz iskeleti (hery→hry) eşleşmesi, mesafe ≤2 şartıyla.
+
+**F4-3 TAMAM: kategori gözatma + kavram sözlüğü + tanınmayan tek kelime — hit@5 %89 → %90
+(19/21), MRR 0.82.** (a) Sorgu yalnız kategori kelimesiyse ("oyunlar") arama değil
+gözatmadır → kategori filtresiyle listeleme; (b) kavram→örnek genişletmeleri ("işletim
+sistemi" → operating system linux ubuntu debian iso); (c) tek kelimelik + sözlükte olmayan
++ düzeltilemeyen + tanıdık sinyal taşımayan sorgu ("mtrix", korpusta Matrix yok) → boş
+sonuç; cross-encoder bu sınıfta yanıltıcıydı ("Metro Simulator 2" −1.98 ile geçiyordu).
+Aday kombinasyonları toplam yakınlığa göre sıralanır (kartezyen sıra doğru adayı kesime
+düşürüyordu). Teşhis aracı: `dragnet-store --example vocab <db> <kelime…>`.
+
+- Kalan: kullanıcı geri beslemesi (F4-4: magnet kopyalama = zayıf pozitif).
 
 - Yazım düzeltme: FTS için trigram/edit-distance önerisi (indeksten sözlük; "hery poter" →
   "harry potter"), semantik zaten kısmen toleranslı.
@@ -109,6 +125,25 @@ Qwen3-Embedding kademesi elendi (torrent adlarında Gemma'nın altında, CPU'da 
   yüzden 0/eksik gösteriyordu. Oturum tepe değeri ayrıca tutulur (kapatma notunda "önce"
   olarak kullanılır). ORT DML tahsis sayacıyla çapraz doğrulama gerekmedi.
 - Görsel dil pano kartlarıyla hizalı (card-head + rozet + `muted small` açıklama satırı).
+
+### F7 — Zenginleştirme: "bu torrent gerçekte nedir?" (kullanıcı önerisi, 2026-08-19)
+
+Kategori ve başlık şu an **yalnız ada bakarak** tahmin ediliyor; tavan burada. Öneri: ad
+çözümlendikten sonra açık bir katalogdan doğrulanmış meta veri çekip yerel bir bilgi
+kütüphanesi kurmak (kanonik ad, tür, yıl, seri, **Türkçe takma adlar**).
+
+- **İlke sınırı korunur**: keşif ve indeks DHT'den gelir. Zenginleştirme *isteğe bağlı*,
+  önbellekli ve düştüğünde arama çalışmaya devam eden bir katmandır — site kazıma değil.
+- **Kaynak**: birincil **Wikidata** (CC0 → ticari sürümde de sorunsuz, API anahtarı yok,
+  film/dizi/oyun/albüm kapsar, **TR etiketleri var** → F4-1'deki elle yazılmış TR→EN
+  sözlüğün yerini otomatik alabilir). İkincil: TMDb (film/dizi), IGDB (oyun),
+  MusicBrainz (müzik, CC0).
+- **Akış**: `dragnet_core::parse` → başlık+yıl → Wikidata eşleştirme → güven eşiği →
+  yerel `titles` tablosu → kategori düzeltmesi + sorgu genişletme + seri gruplama.
+- **Riskler**: gizlilik (torrent adları üçüncü tarafa gider → varsayılan KAPALI, açık
+  onay), yanlış eşleştirme (güven eşiği + yıl doğrulaması), hız limiti (yerel önbellek).
+- **Önce prototip**: 500 gerçek ad üzerinde eşleştirme başarımını ölç (kaçı doğru
+  eşleşiyor, kaçı yanlış, kaçı eşleşmiyor); ancak sonuç iyiyse tam entegrasyon.
 
 ## Kaynaklar
 - Fine-tune EmbeddingGemma (Google AI): https://ai.google.dev/gemma/docs/embeddinggemma/fine-tuning-embeddinggemma-with-sentence-transformers

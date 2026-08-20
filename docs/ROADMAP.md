@@ -97,6 +97,11 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       sorgu anlama + kategori-farkındalı embedding (hit@5 %47→%74); bge-reranker-v2-m3 yeniden sıralayıcı (%79).
 - [x] Faz E (6): DXGI VRAM ölçümü + kapatmada serbest bırakma notu, donanıma göre otomatik kademe,
       Qwen3 kademesi elendi.
+- [x] Faz F (F4-2, F4-3): yazım düzeltme (indeks sözlüğü + eş-geçiş doğrulaması), kategori
+      gözatma, kavram sözlüğü, tanınmayan tek kelime → boş; hit@5 %84→%90, MRR 0.82.
+- [ ] Faz F (F7 — kullanıcı önerisi): çevrim içi zenginleştirme (Wikidata öncelikli;
+      kanonik ad/tür/yıl/TR takma adlar, yerel önbellek, varsayılan kapalı) — önce
+      500 ad üzerinde eşleştirme başarımı prototipi.
 - [x] Faz F (F4-1): güven kapısı (karşılığı olmayan sorgu → boş sonuç; cross-encoder eşiği
       −4.5, kosinüs bu ayrımı yapamıyor) + TR→EN sözlük (çeviri başlık/tür); hit@5 %79→%84,
       MRR 0.72→0.75. Kalan F4: yazım düzeltme, dönem sorgusu, geri besleme.
