@@ -56,6 +56,20 @@ const QUERIES: &[(&str, &[&str])] = &[
             "Equilibrium",
         ],
     ),
+    // Korpusta "matrix" hiç geçmiyor: doğru davranış düzeltmek değil, boş dönmek.
+    ("mtrix", &[]),
+    ("witchr 3", &["Witcher 3"]),
+    (
+        "isletim sistemi",
+        &[
+            "ubuntu",
+            "debian",
+            "linuxmint",
+            "archlinux",
+            "xubuntu",
+            "Windows",
+        ],
+    ),
     ("asdkjhqwe zxcv", &[]),
     ("qwrtyzx plmokn", &[]),
     ("sdfgh jklş", &[]),
@@ -131,16 +145,40 @@ fn main() {
             }
         }
     }
-    let spell = dragnet_core::spell::SpellIndex::build(freq.into_iter().filter(|(_, f)| *f >= 2));
+    let spell = dragnet_core::spell::SpellIndex::build(freq);
     eprintln!("yazım sözlüğü: {} terim", spell.len());
     let (mut score, mut n, mut noise_ok, mut mrr) = (0.0f64, 0usize, true, 0.0f64);
     for (q, expected) in QUERIES {
-        let (qtext, cat) = if use_plan {
+        let (mut qtext, cat) = if use_plan {
             let p = query::understand(q);
             (p.semantic_text, p.category)
         } else {
             (q.to_string(), None)
         };
+        let mut force_empty = false;
+        // Üretimdeki ön-düzeltme (F4-3): kısa sorguda tüm kelimeler sözlükte yoksa ve
+        // korpusta hiç eşleşme yoksa, aramadan önce yazımı düzelt ("mtrix" → "matrix").
+        if use_plan {
+            let toks: Vec<&str> = qtext.split_whitespace().collect();
+            let all_unknown = (1..=2).contains(&toks.len())
+                && toks
+                    .iter()
+                    .all(|t| t.chars().count() >= 4 && !spell.contains(t));
+            if all_unknown && co_occurs(&names, &qtext) == 0 {
+                match best_cand(&spell, &names, &qtext) {
+                    Some(fixed) => {
+                        eprintln!("  ön-düzeltme: {qtext} → {fixed}");
+                        qtext = fixed;
+                    }
+                    // Üretimdeki kural: tek kelimelik, tanınmayan, düzeltilemeyen sorgu
+                    // → karşılığı yok (boş).
+                    None if toks.len() == 1 && !query::understand(&qtext).recognized => {
+                        force_empty = true;
+                    }
+                    None => {}
+                }
+            }
+        }
         let mut hits = sem.search(&qtext, 30).unwrap();
         // Güven sinyalleri (F4): (1) embedding top1, (2) top1 / kuyruk(6-20) oranı,
         // (3) reranker'ın en iyi skoru. Amaç: "bu sorgunun korpusta karşılığı var mı?"
@@ -200,29 +238,13 @@ fn main() {
         // Üretimdeki güven kapısı (bkz. dragnet_semantic::WEAK_MATCH_SCORE): cross-encoder
         // hiçbir adayı alakalı bulmadıysa sonuç listesi boşalır. Boşalınca üretimdeki gibi
         // yazım düzeltmesiyle **bir kez** yeniden denenir ("bunu mu demek istediniz").
-        if rr_top.is_finite() && rr_top < dragnet_semantic::WEAK_MATCH_SCORE {
+        if force_empty {
+            hits.clear();
+        } else if rr_top.is_finite() && rr_top < dragnet_semantic::WEAK_MATCH_SCORE {
             hits.clear();
             // Üretimdeki gibi: aday kombinasyonlarından korpusta birlikte geçeni seç
             // (burada FTS yerine adlarda alt-dize sayımı — aynı mantık).
-            let fixed = spell
-                .candidates(&qtext, 24)
-                .into_iter()
-                .map(|c| {
-                    let toks: Vec<String> =
-                        c.split_whitespace().map(|s| s.to_lowercase()).collect();
-                    let hits = names
-                        .iter()
-                        .filter(|nm| {
-                            let low = nm.to_lowercase();
-                            toks.iter().all(|t| low.contains(t.as_str()))
-                        })
-                        .count();
-                    (hits, c)
-                })
-                .filter(|(h, _)| *h > 0)
-                .max_by_key(|(h, _)| *h)
-                .map(|(_, c)| c);
-            if let Some(fixed) = fixed {
+            if let Some(fixed) = best_cand(&spell, &names, &qtext) {
                 let mut h2 = sem.search(&fixed, 30).unwrap();
                 if let Some(rr) = &reranker {
                     let docs: Vec<String> = h2
@@ -287,4 +309,33 @@ fn main() {
 }
 fn idx(ih: InfoHash) -> usize {
     u32::from_le_bytes(ih.as_bytes()[..4].try_into().unwrap()) as usize
+}
+
+/// Sorgunun tüm kelimelerinin birlikte geçtiği ad sayısı (üretimdeki FTS eşleşme
+/// sayımının bu örnekteki karşılığı).
+fn co_occurs(names: &[String], query: &str) -> usize {
+    let toks: Vec<String> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
+    if toks.is_empty() {
+        return 0;
+    }
+    names
+        .iter()
+        .filter(|nm| {
+            let low = nm.to_lowercase();
+            toks.iter().all(|t| low.contains(t.as_str()))
+        })
+        .count()
+}
+
+/// Yazım düzeltme adaylarından korpusta en çok birlikte geçeni seçer (üretimdeki
+/// `best_candidate` ile aynı mantık).
+fn best_cand(
+    spell: &dragnet_core::spell::SpellIndex,
+    names: &[String],
+    query: &str,
+) -> Option<String> {
+    spell
+        .candidates(query, 24)
+        .into_iter()
+        .find(|c| co_occurs(names, c) > 0)
 }

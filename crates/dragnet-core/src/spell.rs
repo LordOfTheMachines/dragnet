@@ -307,3 +307,24 @@ mod tests {
         assert_eq!(s.correct_query("matrix 1999"), None); // düzeltilecek bir şey yok
     }
 }
+
+#[cfg(test)]
+mod tests_mtrix {
+    use super::*;
+
+    #[test]
+    fn tek_kelimelik_hata_aday_uretir() {
+        let s = SpellIndex::build(
+            [("matrix", 1u32), ("metro", 9), ("mario", 4), ("metal", 7)]
+                .into_iter()
+                .map(|(w, f)| (w.to_string(), f)),
+        );
+        assert!(!s.contains("mtrix"));
+        let c = s.suggest_all("mtrix", 6);
+        println!("adaylar: {c:?}");
+        assert!(c.contains(&"matrix"), "matrix aday olmalı, gelen: {c:?}");
+        let combos = s.candidates("mtrix", 24);
+        println!("kombinasyonlar: {combos:?}");
+        assert!(combos.iter().any(|x| x == "matrix"));
+    }
+}
