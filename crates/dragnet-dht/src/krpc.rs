@@ -51,6 +51,11 @@ pub struct Response {
     /// BEP-51 `samples`: düğümün aktif olarak sunduğu infohash örnekleri.
     /// Aktif (NAT-dostu) hasadın ana kaynağı.
     pub samples: Vec<[u8; ID_LEN]>,
+    /// BEP-42: yanıt veren düğümün bize bildirdiği **dış adresimiz** (`ip` alanı,
+    /// compact IPv4+port). Düğüm kimliğimizi bu IP'den türetmek için kullanılır —
+    /// BEP-42 uyumsuz kimlikler modern istemcilerin yönlendirme tablosuna alınmaz,
+    /// bu da pasif trafiği (announce/get_peers) neredeyse sıfıra düşürür.
+    pub reported_ip: Option<std::net::Ipv4Addr>,
 }
 
 /// Çözülmüş bir KRPC mesajı.
@@ -105,11 +110,16 @@ pub fn parse(buf: &[u8]) -> Option<Message> {
                 .map(parse_values)
                 .unwrap_or_default();
             let txid = dict_bytes(dict, b"t").unwrap_or_default().to_vec();
+            // BEP-42: üst düzey `ip` alanı bizim dış adresimizi bildirir (6 bayt compact).
+            let reported_ip = dict_bytes(dict, b"ip").and_then(|b| {
+                (b.len() >= 4).then(|| std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]))
+            });
             Some(Message::Response(Response {
                 txid,
                 values,
                 nodes,
                 samples,
+                reported_ip,
             }))
         }
         _ => Some(Message::Other),
@@ -480,6 +490,36 @@ mod tests {
                 assert_eq!(r.nodes[0], "9.9.9.9:6881".parse().unwrap());
             }
             other => panic!("beklenen Response, gelen {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod bep42_tests {
+    use super::*;
+
+    #[test]
+    fn yanittaki_ip_alani_cozulur() {
+        // d1:rd2:id20:…e1:ip6:<ipv4+port>1:t2:ab1:y1:re
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(b"d1:rd2:id20:aaaaaaaaaaaaaaaaaaaae2:ip6:");
+        pkt.extend_from_slice(&[159, 146, 35, 97, 0x1A, 0xE1]); // 159.146.35.97:6881
+        pkt.extend_from_slice(b"1:t2:ab1:y1:re");
+        match parse(&pkt) {
+            Some(Message::Response(r)) => assert_eq!(
+                r.reported_ip,
+                Some(std::net::Ipv4Addr::new(159, 146, 35, 97))
+            ),
+            other => panic!("yanıt beklenirdi: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ip_alani_yoksa_none() {
+        let pkt = b"d1:rd2:id20:aaaaaaaaaaaaaaaaaaaae1:t2:ab1:y1:re";
+        match parse(pkt) {
+            Some(Message::Response(r)) => assert_eq!(r.reported_ip, None),
+            other => panic!("yanıt beklenirdi: {other:?}"),
         }
     }
 }

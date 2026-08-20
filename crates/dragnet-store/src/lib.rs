@@ -239,6 +239,12 @@ impl Store {
         }
     }
 
+    /// Havuza doğrudan erişim — yalnız teşhis araçları için (örnekler: queue, whatis).
+    /// Üretim yolları depo metotlarını kullanır.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Depolama sınırlarını ayarlar (bayt; 0 = sınırsız): veritabanı bütçesi ve diskte
     /// bırakılacak boş alan rezervi. Aşılırsa **büyüme durur**, arama sürer (F8-4).
     pub fn set_limits(&self, db_max_bytes: u64, disk_reserve_bytes: u64) {

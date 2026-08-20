@@ -224,6 +224,11 @@ impl Drop for Harvester {
 struct Shared {
     socket: UdpSocket,
     our_id: Mutex<[u8; ID_LEN]>,
+    /// Yanıtlardaki `ip` alanından öğrenilen dış adresimiz (BEP-42). Bilinince düğüm
+    /// kimliği bu IP'den türetilir: BEP-42 uyumsuz kimlikleri modern istemciler
+    /// yönlendirme tablosuna ALMAZ, dolayısıyla bize pasif trafik (announce/get_peers)
+    /// gelmez — hasadın en canlı kaynağı budur.
+    public_ip: Mutex<Option<std::net::Ipv4Addr>>,
     nodes: Mutex<VecDeque<SocketAddrV4>>,
     limiter: Mutex<TokenBucket>,
     dedup: Mutex<RecentSet>,
@@ -308,6 +313,8 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     let shared = Arc::new(Shared {
         socket,
         our_id: Mutex::new(*Id::random().as_bytes()),
+        // BEP-42 (aşağıda): dış IP öğrenilince kimlik ondan türetilir.
+        public_ip: Mutex::new(None),
         nodes: Mutex::new(VecDeque::with_capacity(config.node_queue_capacity)),
         limiter: Mutex::new(TokenBucket::new(config.max_queries_per_sec)),
         dedup: Mutex::new(RecentSet::new(config.dedup_capacity)),
@@ -437,6 +444,23 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
         }
         Message::Response(r) => {
             shared.stats.responses_seen.fetch_add(1, Ordering::Relaxed);
+            // BEP-42: karşı düğüm bize dış adresimizi bildirdiyse ve henüz uyumlu bir
+            // kimliğimiz yoksa, kimliği hemen o IP'den türet. Uyumsuz kimlikli düğümler
+            // modern istemcilerin yönlendirme tablosuna alınmaz; alınmayınca da bize
+            // announce/get_peers gelmez (ölçüm: gelen announce = 0). Bu yüzden bu, pasif
+            // hasadın en kritik ayarıdır.
+            if let Some(ip) = r.reported_ip {
+                if !ip.is_private() && !ip.is_loopback() && !ip.is_unspecified() {
+                    let mut cur = shared.public_ip.lock().unwrap();
+                    if *cur != Some(ip) {
+                        *cur = Some(ip);
+                        drop(cur);
+                        let new_id = *Id::from_ipv4(ip).as_bytes();
+                        *shared.our_id.lock().unwrap() = new_id;
+                        info!(%ip, "dış adres öğrenildi → BEP-42 uyumlu düğüm kimliği kuruldu");
+                    }
+                }
+            }
             if !r.nodes.is_empty() {
                 let added = shared.push_nodes(&r.nodes);
                 shared
@@ -621,9 +645,15 @@ async fn rotate_loop(shared: Arc<Shared>, interval: Duration) {
     ticker.tick().await; // ilk anlık tık: hemen döndürme.
     loop {
         ticker.tick().await;
-        let new_id = *Id::random().as_bytes();
+        // Dış IP biliniyorsa kimlik BEP-42 uyumlu türetilir (rastgele bileşen her
+        // döndürmede değişir); bilinmiyorsa rastgele.
+        let ip = *shared.public_ip.lock().unwrap();
+        let new_id = match ip {
+            Some(ip) => *Id::from_ipv4(ip).as_bytes(),
+            None => *Id::random().as_bytes(),
+        };
         *shared.our_id.lock().unwrap() = new_id;
-        debug!("düğüm kimliği döndürüldü");
+        debug!(bep42 = ip.is_some(), "düğüm kimliği döndürüldü");
     }
 }
 
