@@ -90,7 +90,11 @@ impl Default for HarvesterConfig {
             max_queries_per_sec: 50.0,
             crawl_tick: Duration::from_millis(100),
             crawl_batch: 4,
-            id_rotation: Duration::from_secs(600),
+            // Kimlik döndürme YAVAŞ olmalı: her döndürmede (BEP-42 rastgele bileşeni değişir)
+            // ağ bizi YENİ bir düğüm sanar ve tablolarındaki girdimiz bayatlar; pasif trafik
+            // (announce/get_peers) ise ancak tablolarda kalıcı yer edinince gelir. 10 dakika
+            // "yatay tarama" için iyiydi ama pasif hasadı sürekli sıfırlıyordu.
+            id_rotation: Duration::from_secs(3600),
             dedup_capacity: 1 << 18,
             // Her BEP-51 örneğinden sonra daha çok doğrudan get_peers: peer ipuçlu (yani
             // CANLI olduğu bilinen) aday üretmenin en ucuz yolu. Ölçüm: kuyruğun %98'i

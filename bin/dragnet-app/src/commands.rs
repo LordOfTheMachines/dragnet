@@ -519,15 +519,25 @@ pub async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Res
     // Semantik ayarları anında uygula (aç/kapa/kademe değişimi; yeniden başlatma yok).
     state.semantic.apply(state.store.clone(), &settings).await;
 
-    // Tarama açıksa yeni ayarlarla yeniden başlat. Yeni çekirdeği bırakmadan-ÖNCE
-    // ayağa kaldır: başlatma başarısız olursa eski tarama çalışmaya devam etsin.
-    // (db_path açılışta sabitlendiğinden değişse bile etkin depo tutarlı kalır;
-    // yeni yol yeniden başlatınca geçerli olur.)
+    // Tarama açıksa yeni ayarlarla yeniden başlat. ÖNCE ESKİSİ KAPATILIR:
+    // harvester'ın UDP portu (6881) tek bir sürece bağlanabilir; eskisi ayakta
+    // dururken yenisini başlatınca port dolu bulunuyor ve **efemer porta düşülüyordu**
+    // (kullanıcı ekranında port 53237 görünüyordu) — bu da modemdeki yönlendirmeyi
+    // işlevsiz bırakıp pasif hasadı sıfırlıyordu. Bedeli: yeni çekirdek başlatılamazsa
+    // tarama kapalı kalır (hata döndürülür, kullanıcı yeniden başlatabilir).
     let mut guard = state.engine.lock().await;
     if guard.is_some() {
+        drop(guard.take()); // eski çekirdek burada durur, portlar serbest kalır
+                            // Soketlerin işletim sistemi tarafından bırakılması bir an sürebilir.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let cfg = settings.to_engine_config(state.db_path.clone());
-        let new_engine = Engine::start(cfg).await.map_err(|e| e.to_string())?;
-        *guard = Some(new_engine); // eski çekirdek burada drop olur
+        match Engine::start(cfg).await {
+            Ok(e) => {
+                tracing::info!(addr = %e.harvester_addr(), "tarama yeni ayarlarla yeniden başlatıldı");
+                *guard = Some(e);
+            }
+            Err(e) => return Err(format!("tarama yeniden başlatılamadı: {e}")),
+        }
     }
     Ok(json!({ "ok": true }))
 }

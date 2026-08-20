@@ -586,22 +586,54 @@ impl Store {
     pub async fn next_to_fetch(&self, limit: i64, now: i64) -> Result<Vec<InfoHash>, StoreError> {
         let cooldown = now - FETCH_RETRY_COOLDOWN_SECS;
         let hot_window = now - HOT_WINDOW_SECS;
-        let rows = sqlx::query(
+        // ÖNCE CANLI ADAYLAR (ölçümle eklendi): kuyruğun %98'i BEP-51 örneklemesinden
+        // gelen soğuk kayıt ve bunların ~%90'ında DHT'de hiç peer bulunamıyor
+        // (385 denemenin 347'si "peer yok", ortalama 0,5 peer/çekim). Her deneme bir
+        // işçiyi ~3 sn meşgul ettiği için soğuk yığın, canlı adayların önünü tıkıyordu.
+        // Artık peer ipucu olan (peer'i BİLİNEN) ve sıcak (son 2 saatte gerçek trafikte
+        // görülen) kayıtlar öncelikli çekilir; soğuklar yalnız kalan kotayı doldurur.
+        let warm_limit = limit.max(0);
+        let mut rows = sqlx::query(
             "SELECT infohash FROM torrents
-              WHERE (metadata_status = 'pending'
-                     AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2)))
-                 OR (metadata_status = 'fetched' AND garbled = 1 AND fetch_attempts = 0)
-              ORDER BY hint_peers DESC,
-                       (hot_seen IS NOT NULL AND hot_seen > ?3) DESC,
-                       seen_count DESC, hot_count DESC, last_seen DESC
+              WHERE metadata_status = 'pending'
+                AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
+                AND (hint_peers > 0 OR (hot_seen IS NOT NULL AND hot_seen > ?3))
+              ORDER BY hint_peers DESC, hot_seen DESC, seen_count DESC
               LIMIT ?4",
         )
         .bind(MAX_FETCH_ATTEMPTS)
         .bind(cooldown)
         .bind(hot_window)
-        .bind(limit.max(0))
+        .bind(warm_limit)
         .fetch_all(&self.pool)
         .await?;
+        // Soğuk kota: canlı aday VARSA kotanın yalnız ¼'ü soğuklara ayrılır (canlıların
+        // önünü tıkamasınlar); HİÇ canlı aday yoksa işçileri boşta bırakmamak için kota
+        // tamamen soğuklarla doldurulur — eski ama hâlâ canlı torrent'ler de çıkabiliyor.
+        let cold_cap = if rows.is_empty() {
+            limit.max(0)
+        } else {
+            (limit.max(0) / 4).max(1)
+        };
+        if (rows.len() as i64) < limit && cold_cap > 0 {
+            let more = sqlx::query(
+                "SELECT infohash FROM torrents
+                  WHERE (metadata_status = 'pending'
+                         AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
+                         AND hint_peers = 0
+                         AND (hot_seen IS NULL OR hot_seen <= ?3))
+                     OR (metadata_status = 'fetched' AND garbled = 1 AND fetch_attempts = 0)
+                  ORDER BY seen_count DESC, hot_count DESC, last_seen DESC
+                  LIMIT ?4",
+            )
+            .bind(MAX_FETCH_ATTEMPTS)
+            .bind(cooldown)
+            .bind(hot_window)
+            .bind(cold_cap.min(limit - rows.len() as i64))
+            .fetch_all(&self.pool)
+            .await?;
+            rows.extend(more);
+        }
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let hex: String = r.get("infohash");
