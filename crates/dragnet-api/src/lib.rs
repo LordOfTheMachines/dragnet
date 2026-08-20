@@ -476,7 +476,11 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(json["mode"], "hybrid");
+        // Kısa (≤2 kelime), tanıdık sinyal taşımayan sorgu bir **ad aramasıdır**: korpusta
+        // birebir/önek eşleşme varsa semantikle harmanlamadan sözcüksel sonuç döner
+        // (kullanıcı kuralı: "cümle değilse birebir eşleşme"). Sonuç aynı, mod etiketi
+        // dürüst: "fts".
+        assert_eq!(json["mode"], "fts");
         assert_eq!(json["results"][0]["name"], "Ubuntu 24.04 Desktop");
         let json = body_json(
             app()

@@ -164,6 +164,27 @@ pub async fn search(
             }
         }
     }
+    // SÖZCÜKSEL ÖNCELİK (kullanıcı kuralı: "cümle değilse birebir eşleşme mantığı
+    // devreye girmeli"). Kısa ve tanıdık sinyal taşımayan sorgular ad aramasıdır
+    // ("solidworks", "witcher 3", "abby"): korpusta birebir/önek eşleşme varsa
+    // semantik komşularla harmanlamadan onları döndür. Yoksa hibrit yola devam edilir;
+    // orada da karşılık yoksa güven kapısı "bulunamadı" der.
+    if !recognized && (1..=2).contains(&toks.len()) && mode != SearchMode::Semantic {
+        let probe = pre_fix.as_deref().unwrap_or(query);
+        if store.count_fts_matches(probe).await > 0 {
+            let rows = store
+                .search_paged(probe, limit, offset, sort, desc, filter)
+                .await?;
+            if !rows.is_empty() {
+                return Ok(SearchOutcome {
+                    rows,
+                    used: SearchMode::Fts,
+                    weak: false,
+                    corrected: pre_fix,
+                });
+            }
+        }
+    }
     let out = search_once(
         store, slot, query, mode, limit, offset, sort, desc, filter, show_weak,
     )

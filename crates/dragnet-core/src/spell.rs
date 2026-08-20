@@ -79,7 +79,8 @@ impl SpellIndex {
         if n < 4 || self.known.contains(&w) {
             return None;
         }
-        let budget = if n >= 6 { 2 } else { 1 };
+        // İskelet dışı adaylarda bütçe 1 (bkz. `suggest_all`: "matrix" → "martin" tuzağı).
+        let budget = 1;
         let first = w.chars().next()?;
         // 1) Ünsüz iskeleti eşleşmesi. KORUMA (ölçümle eklendi): iskelet tek başına çok
         // gevşek — İngilizce korpusta doğal olarak bulunmayan Türkçe sorgu kelimeleri
@@ -147,13 +148,17 @@ impl SpellIndex {
                 }
             }
         }
-        let budget = if n >= 6 { 2 } else { 1 };
+        // İskelet eşleşmesi DIŞINDAKİ adaylar için bütçe **1**'dir. 2 vermek, doğru
+        // yazılmış ama korpusta olmayan kelimeleri saçma karşılıklara çeviriyordu:
+        // "matrix" → "martin" (tr↔rt yer değişimi + x→n = 2). Kullanıcı "matrix"
+        // aradığında "Martin Scorsese" görüyordu; doğrusu "bulunamadı" demektir.
+        const BUCKET_BUDGET: usize = 1;
         if let Some(first) = w.chars().next() {
-            for len in n.saturating_sub(budget)..=n + budget {
+            for len in n.saturating_sub(BUCKET_BUDGET)..=n + BUCKET_BUDGET {
                 if let Some(cands) = self.buckets.get(&(first, len)) {
                     for (t, f) in cands {
-                        let d = damerau(&w, t, budget);
-                        if d <= budget && !scored.iter().any(|(_, _, s)| *s == t.as_str()) {
+                        let d = damerau(&w, t, BUCKET_BUDGET);
+                        if d <= BUCKET_BUDGET && !scored.iter().any(|(_, _, s)| *s == t.as_str()) {
                             scored.push((d, *f, t.as_str()));
                         }
                     }

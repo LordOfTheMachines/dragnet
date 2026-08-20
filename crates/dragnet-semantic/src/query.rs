@@ -131,19 +131,6 @@ const ALIAS_PHRASES: &[(&str, &str)] = &[
     ("narnia günlükleri", "chronicles of narnia"),
     ("esaretin bedeli", "the shawshank redemption"),
     ("canavarlar şirketi", "monsters inc"),
-    // Kavram → korpustaki örnekler (kullanıcı geri bildirimi: "işletim sistemi" sorgusu
-    // adında "windows" geçen her şeyi getiriyordu; model ubuntu'nun bir işletim sistemi
-    // olduğunu bilmiyor). Kavramı hem İngilizce karşılığıyla hem yaygın örnekleriyle
-    // genişletiyoruz.
-    (
-        "işletim sistemi",
-        "operating system linux ubuntu debian iso",
-    ),
-    (
-        "isletim sistemi",
-        "operating system linux ubuntu debian iso",
-    ),
-    ("linux dağıtımı", "linux distribution ubuntu debian iso"),
     ("ofis programı", "office"),
     ("ofis yazılımı", "office"),
     ("antivirüs", "antivirus security"),
@@ -159,6 +146,34 @@ const ALIAS_PHRASES: &[(&str, &str)] = &[
     ("araba yarışı", "racing"),
     ("araba yarisi", "racing"),
     ("ikinci dünya savaşı", "world war ii"),
+];
+
+/// Kavram → (İngilizce karşılık, korpustaki tipik örnekler). Örnekler **yalnız kavram
+/// sorgunun tamamıysa** eklenir: "işletim sistemi" → örneklerle genişletilir, ama
+/// "windows işletim sistemi" → yalnız "operating system" eklenir. (Kullanıcı geri
+/// bildirimi: örnekleri her durumda eklemek "windows işletim sistemi" sorgusuna linux
+/// dağıtımlarını getiriyordu — genişletme kullanıcının niyetiyle yarışıyordu.)
+const ALIAS_CONCEPTS: &[(&str, &str, &str)] = &[
+    (
+        "işletim sistemi",
+        "operating system",
+        "linux ubuntu debian iso",
+    ),
+    (
+        "isletim sistemi",
+        "operating system",
+        "linux ubuntu debian iso",
+    ),
+    (
+        "linux dağıtımı",
+        "linux distribution",
+        "ubuntu debian iso mint",
+    ),
+    (
+        "işletim sistemleri",
+        "operating systems",
+        "linux windows iso",
+    ),
 ];
 
 /// Tek kelimelik TR→EN karşılıklar (tam kelime eşleşmesi; ek almış biçimler için
@@ -343,6 +358,20 @@ pub fn understand(query: &str) -> QueryPlan {
     }
     let mut text = kept.join(" ");
 
+    // Kavramlar: İngilizce karşılık her zaman, örnekler yalnız kavram sorgunun tamamıysa.
+    for (tr, en, examples) in ALIAS_CONCEPTS {
+        if text.contains(tr) {
+            let rest: String = text.replace(tr, " ");
+            let only_concept = rest.split_whitespace().all(|w| {
+                FILLER_PHRASES.contains(&w) || CATEGORY_HINTS.iter().any(|(k, _)| w == *k)
+            });
+            text = text.replace(
+                tr,
+                &format!("{en} {}", if only_concept { examples } else { "" }),
+            );
+            plan.recognized = true;
+        }
+    }
     // TR→EN karşılıklar: önce çok kelimeli başlıklar/temalar, sonra tek kelimeler.
     for (tr, en) in ALIAS_PHRASES {
         if text.contains(tr) {
