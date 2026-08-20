@@ -85,6 +85,8 @@ pub struct FetchStats {
     pub peer_bad_handshake: AtomicU64,
     pub peer_no_metadata_ext: AtomicU64,
     pub peer_other: AtomicU64,
+    /// Genel internet adresi olmadığı için hiç denenmeyen peer (F8-3 politikası).
+    pub peer_not_public: AtomicU64,
 }
 
 /// Anlık kopya.
@@ -102,6 +104,7 @@ pub struct FetchStatsSnapshot {
     pub peer_bad_handshake: u64,
     pub peer_no_metadata_ext: u64,
     pub peer_other: u64,
+    pub peer_not_public: u64,
 }
 
 impl FetchStats {
@@ -128,6 +131,7 @@ impl FetchStats {
             peer_bad_handshake: self.peer_bad_handshake.load(Ordering::Relaxed),
             peer_no_metadata_ext: self.peer_no_metadata_ext.load(Ordering::Relaxed),
             peer_other: self.peer_other.load(Ordering::Relaxed),
+            peer_not_public: self.peer_not_public.load(Ordering::Relaxed),
         }
     }
 }
@@ -289,7 +293,10 @@ impl MetadataFetcher {
                                 PeerError::Io(_) => &self.stats.peer_io,
                                 PeerError::Timeout => &self.stats.peer_timeout,
                                 PeerError::BadHandshake | PeerError::InfoHashMismatch => &self.stats.peer_bad_handshake,
-                                PeerError::NoExtension | PeerError::NoUtMetadata => &self.stats.peer_no_metadata_ext,
+                                PeerError::NoExtension | PeerError::NoUtMetadata => {
+                                    &self.stats.peer_no_metadata_ext
+                                }
+                                PeerError::NotPublic => &self.stats.peer_not_public,
                                 _ => &self.stats.peer_other,
                             };
                             c.fetch_add(1, Ordering::Relaxed);

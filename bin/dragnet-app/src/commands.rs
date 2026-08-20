@@ -145,6 +145,10 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         "fetch": fetch.map(|f| json!({
             "attempts": f.attempts, "ok": f.ok, "no_peers": f.no_peers,
             "all_peers_failed": f.all_peers_failed, "avg_ms": f.avg_ms, "avg_peers": f.avg_peers,
+            // Peer denemesi hata dökümü: "neden başarısız?" sorusunun cevabı (teşhis).
+            "peer_ok": f.peer_ok, "peer_timeout": f.peer_timeout, "peer_io": f.peer_io,
+            "peer_bad_handshake": f.peer_bad_handshake, "peer_no_ext": f.peer_no_metadata_ext,
+            "peer_not_public": f.peer_not_public, "peer_other": f.peer_other,
         })),
         "queue": queue.map(|(p, h, u, r)| json!({ "pending": p, "hot": h, "unreachable": u, "fetched_last_hour": r })),
         "semantic": state.semantic.status_json().await,
