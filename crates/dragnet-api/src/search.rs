@@ -72,7 +72,9 @@ async fn best_candidate(
     // Adaylar zaten (mesafe, sonra frekans) sırasında: korpusta karşılığı olan İLK aday
     // seçilir. "En çok eşleşen"i seçmek yanlıştı — "mtrix" için nadir ama doğru "matrix"
     // yerine sık geçen ama uzak bir terim kazanabiliyordu.
-    for cand in spell.candidates(query, 24) {
+    // 64: iki kelimelik sorguda kombinasyon sayısı ~28, üç kelimelide daha fazla; her
+    // aday tek bir COUNT sorgusu (~1 ms) ve yalnız sonuç bulunamayan sorgularda çalışır.
+    for cand in spell.candidates(query, 64) {
         if store.count_fts_matches(&cand).await > 0 {
             return Some(cand);
         }
@@ -127,7 +129,10 @@ pub async fn search(
     let mut query = query;
     let mut pre_fix: Option<String> = None;
     let toks: Vec<&str> = query.split_whitespace().collect();
-    if (1..=2).contains(&toks.len()) {
+    // Tanıdık sorgulara (kategori/sözlük/yıl sinyali olanlara) hiç dokunma: "filmler"
+    // bir gözatma isteğidir, yazım hatası değil.
+    let recognized = dragnet_semantic::query::understand(query).recognized;
+    if !recognized && (1..=2).contains(&toks.len()) {
         if let Some(spell) = store.spell().await {
             let all_unknown = toks
                 .iter()
@@ -142,9 +147,7 @@ pub async fn search(
                     // sinyal taşımayan sorgu ("mtrix"): korpusta karşılığı yok demektir.
                     // Cross-encoder böyle sorgularda yanıltıcı olabiliyor (ölçüm: "mtrix"
                     // için "Metro Simulator 2" −1.98 ile kapıdan geçiyordu).
-                    None if toks.len() == 1
-                        && !dragnet_semantic::query::understand(query).recognized =>
-                    {
+                    None if toks.len() == 1 => {
                         return Ok(SearchOutcome {
                             rows: Vec::new(),
                             used: if mode == SearchMode::Fts {

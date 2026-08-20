@@ -335,7 +335,7 @@ fn best_cand(
     query: &str,
 ) -> Option<String> {
     spell
-        .candidates(query, 24)
+        .candidates(query, 64)
         .into_iter()
         .find(|c| co_occurs(names, c) > 0)
 }

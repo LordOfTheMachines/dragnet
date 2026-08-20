@@ -397,6 +397,9 @@ pub fn understand(query: &str) -> QueryPlan {
     if !words.is_empty() && words.iter().all(|w| cat_of(w).is_some()) {
         plan.category = words.iter().find_map(|w| cat_of(w));
         plan.category_only = true;
+        // Kategori kelimesi tanıdık bir sinyaldir: tek kelimelik "oyunlar" sorgusu
+        // "tanınmayan tek kelime → boş" kuralına takılmamalı.
+        plan.recognized = true;
         plan.semantic_text = words.join(" ");
         plan.fts_text = plan.semantic_text.clone();
         return plan;
@@ -481,6 +484,7 @@ mod tests {
         assert_eq!(p.semantic_text, "oyunlar");
         assert_eq!(p.category, Some("game"));
         assert!(p.category_only);
+        assert!(p.recognized, "kategori sorgusu tanınmış sayılmalı");
         // Çoklu kategori kelimesi de gözatmadır ("tüm filmler" → dolgu + kategori).
         let p = understand("tüm filmler");
         assert_eq!(p.category, Some("video"));

@@ -200,26 +200,36 @@ impl SpellIndex {
                 v
             })
             .collect();
-        let mut out: Vec<String> = vec![String::new()];
+        // Kombinasyonlar **toplam yakınlık** sırasına göre üretilir: her kelimenin aday
+        // sırası (0 = kelimenin kendisi, 1 = en yakın aday …) toplanır, küçük toplam önce
+        // denenir. Kartezyen sırayla üretmek "harry potter"ı listenin sonuna atıyor ve
+        // kesime takılıyordu (ölçüm: "hery poter" düzeltilemiyordu).
+        let mut out: Vec<(usize, String)> = vec![(0, String::new())];
         for opts in &per_word {
             let mut next = Vec::with_capacity(out.len() * opts.len());
-            for prefix in &out {
-                for o in opts {
-                    next.push(if prefix.is_empty() {
-                        o.clone()
-                    } else {
-                        format!("{prefix} {o}")
-                    });
+            for (rank, prefix) in &out {
+                for (i, o) in opts.iter().enumerate() {
+                    next.push((
+                        rank + i,
+                        if prefix.is_empty() {
+                            o.clone()
+                        } else {
+                            format!("{prefix} {o}")
+                        },
+                    ));
                 }
             }
-            // Kombinasyon patlamasını sınırla: her adımda en fazla `max * 2` dal tut.
+            next.sort_by_key(|(r, _)| *r);
+            // Kombinasyon patlamasını sınırla: her adımda en iyi `max * 2` dalı tut.
             next.truncate(max * 2);
             out = next;
         }
+        out.sort_by_key(|(r, _)| *r);
         let original = words.join(" ");
-        out.retain(|c| *c != original);
-        out.truncate(max);
-        out
+        let mut res: Vec<String> = out.into_iter().map(|(_, c)| c).collect();
+        res.retain(|c| *c != original);
+        res.truncate(max);
+        res
     }
 }
 
