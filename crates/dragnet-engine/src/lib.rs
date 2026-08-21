@@ -401,6 +401,10 @@ impl Engine {
                                 - (prev.send_errors + prev.recv_errors),
                         ),
                         (metric::DHT_DUPLICATES, cur.duplicates - prev.duplicates),
+                        (
+                            metric::DHT_HARVESTED,
+                            cur.unique_infohashes - prev.unique_infohashes,
+                        ),
                     ] {
                         let _ = store.add_metric(name, d as i64, now).await;
                     }

@@ -211,6 +211,14 @@ const SPELL_TERMS: i64 = 300_000;
 /// WAL dosyası üst sınırı (bayt): checkpoint sonrası bu boyuta kırpılır.
 const WAL_SIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Boru hattı metriklerinin kova genişliği (sn). Saatlik kova, ayar denemelerinde
+/// kullanılan 10-30 dakikalık pencereleri ölçemiyordu (bir değişikliğin etkisi ancak
+/// kova kapanınca görünüyordu). 10 dakika, ölçüm disiplinindeki en kısa anlamlı
+/// pencereyle uyumlu ve tablo büyümesi ihmal edilebilir (metrik başına 144 satır/gün).
+const METRIC_BUCKET_SECS: i64 = 600;
+/// Metrik satırlarının saklanma süresi; bunun ötesi periyodik temizlikte silinir.
+const METRIC_RETENTION_SECS: i64 = 30 * 24 * 3600;
+
 /// Boru hattının **sıcak** kuyruk sorguları — saniyede birkaç kez çalışırlar, dolayısıyla
 /// sorgu planları doğrudan çekim hızını belirler.
 ///
@@ -1273,7 +1281,7 @@ impl Store {
                ON CONFLICT(name, bucket) DO UPDATE SET value = value + ?3",
         )
         .bind(name)
-        .bind((now / 3600) * 3600)
+        .bind((now / METRIC_BUCKET_SECS) * METRIC_BUCKET_SECS)
         .bind(n)
         .execute(&self.pool)
         .await?;
@@ -1287,7 +1295,7 @@ impl Store {
             "SELECT COALESCE(SUM(value), 0) AS n FROM metrics WHERE name = ?1 AND bucket > ?2",
         )
         .bind(name)
-        .bind(((now - secs.max(0)) / 3600) * 3600 - 1)
+        .bind(((now - secs.max(0)) / METRIC_BUCKET_SECS) * METRIC_BUCKET_SECS - 1)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("n"))
@@ -1339,6 +1347,11 @@ impl Store {
         .execute(&self.pool)
         .await?
         .rows_affected();
+        // Eski metrik satırları (teşhis verisi; süresiz büyümesine gerek yok).
+        let _ = sqlx::query("DELETE FROM metrics WHERE bucket < ?1")
+            .bind(now - METRIC_RETENTION_SECS)
+            .execute(&self.pool)
+            .await;
         if a + b + c > 0 {
             debug!(
                 pending = a,
@@ -1755,6 +1768,10 @@ pub mod metric {
     /// keşif çeşitliliğini ölçer: %100'e yaklaşıyorsa aynı düğümlerden aynı örnekler
     /// geliyordur ve örnekleme boşa dönüyordur.
     pub const DHT_DUPLICATES: &str = "dht_duplicates";
+    /// Dedup'tan geçip boru hattına yayılan infohash (GERÇEK hasat hızı). Tablodaki
+    /// `first_seen` satırlarını saymak artık yanıltır: triyaj ölü kayıtları saniyeler
+    /// içinde sildiği için keşfedilenlerin çoğu sayım anında tabloda yoktur.
+    pub const DHT_HARVESTED: &str = "dht_harvested";
 }
 
 /// Yarım kalmış bir triyaj işaretinin (probe_at set, sonuç yok) eskimiş sayılma süresi.
@@ -2540,6 +2557,46 @@ mod tests {
         store.upsert_torrent(&r).await.unwrap();
         let (_p, _h, _u, recent) = store.fetch_queue_stats(much_later + 10).await.unwrap();
         assert_eq!(recent, 1, "fetched_at ile son 1 saat sayacı");
+    }
+
+    /// Olay sayaçları pencere içinde doğru toplanmalı ve pencere dışına taşmamalı.
+    /// Bu altyapı sessizce bozulursa boru hattı hakkında YANLIŞ kararlar veririz —
+    /// nitekim ölçüm bir kez satır sayımına dayandığı için triyaj hızı 8 kat düşük
+    /// raporlanmıştı (silinen kayıtlar görünmüyordu).
+    #[tokio::test]
+    async fn metrics_count_events_within_window() {
+        let store = Store::in_memory().await.unwrap();
+        let now = 1_000_000i64;
+        for _ in 0..3 {
+            store.bump_metric(metric::TRIAGE_DONE, now).await.unwrap();
+        }
+        store.add_metric(metric::TRIAGE_DEAD, 7, now).await.unwrap();
+        // Aynı kovaya yazılanlar toplanır.
+        assert_eq!(
+            store.metric_since(metric::TRIAGE_DONE, now, 600).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            store.metric_since(metric::TRIAGE_DEAD, now, 600).await.unwrap(),
+            7
+        );
+        // Sıfır/negatif artış yazılmaz (harvester farkı hesaplanırken oluşabilir).
+        store.add_metric(metric::TRIAGE_DEAD, 0, now).await.unwrap();
+        assert_eq!(
+            store.metric_since(metric::TRIAGE_DEAD, now, 600).await.unwrap(),
+            7
+        );
+        // Pencere dışındaki eski kova sayılmaz.
+        let much_later = now + 10 * METRIC_BUCKET_SECS;
+        assert_eq!(
+            store
+                .metric_since(metric::TRIAGE_DONE, much_later, METRIC_BUCKET_SECS)
+                .await
+                .unwrap(),
+            0
+        );
+        // Bilinmeyen metrik 0 döner (hata değil).
+        assert_eq!(store.metric_since("yok", now, 600).await.unwrap(), 0);
     }
 
     /// Yarım kalmış triyaj işareti (`probe_at` set, sonuç yok) kaydı sonsuza dek

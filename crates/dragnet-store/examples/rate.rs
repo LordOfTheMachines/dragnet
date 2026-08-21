@@ -25,7 +25,11 @@ async fn main() {
         }
     };
 
-    let discovered = n(format!("SELECT COUNT(*) FROM torrents WHERE first_seen > {since}")).await;
+    // Tabloda HÂLÂ DURAN yeni kayıtlar. Gerçek hasat hızı DEĞİLDİR: triyaj, peer'i
+    // olmayan kayıtları saniyeler içinde siler, dolayısıyla keşfedilenlerin çoğu sayım
+    // anında tabloda yoktur. Gerçek hız `DHT_HARVESTED` olay sayacından okunur; bu satır
+    // "kuyrukta biriken" anlamına gelir.
+    let kept = n(format!("SELECT COUNT(*) FROM torrents WHERE first_seen > {since}")).await;
     // ÖNEMLİ: triyaj ve çekim aşamaları işini bitirince kaydı SİLİYOR (sıfır peer →
     // `delete_pending`, deneme hakkı bitti → `mark_fetch_failed`). Bu yüzden hızlarını
     // tablodaki satırları sayarak ölçmek YANILTIR — silinenler görünmez. Ölçümde tam
@@ -71,7 +75,9 @@ async fn main() {
     let per_h = |v: i64| v as f64 * 60.0 / win_min as f64;
     println!("PENCERE: son {win_min} dakika\n");
     println!("AŞAMA HIZI (saatlik projeksiyon)");
+    let discovered = m(dragnet_store::metric::DHT_HARVESTED).await;
     println!("  1. hasat (yeni infohash)  : {discovered:>7}  → {:>8.0}/saat", per_h(discovered));
+    println!("     · kuyrukta kalan       : {kept:>7}  (gerisini triyaj ölü bulup sildi)");
     println!("  2. triyaj (peer ölçümü)   : {probed:>7}  → {:>8.0}/saat", per_h(probed));
     println!("  3. çekim denemesi         : {attempted:>7}  → {:>8.0}/saat", per_h(attempted));
     println!("  4. BAŞARI (ad indekslendi): {succeeded:>7}  → {:>8.0}/saat", per_h(succeeded));
