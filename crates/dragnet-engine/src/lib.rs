@@ -63,6 +63,13 @@ impl Default for EngineConfig {
     }
 }
 
+/// Triyajda bir turda ölçülecek infohash sayısı (eşzamanlı DHT peer sayımı).
+const TRIAGE_BATCH: i64 = 8;
+/// Triyaj peer sayımı için süre bütçesi: "peer var mı" sorusu, tam arama değil.
+const TRIAGE_TIMEOUT: Duration = Duration::from_secs(6);
+/// Ölü bekleyen kayıtlar bu süreden eskiyse silinir (kullanıcı isteği: 3 gün).
+const DEAD_PURGE_AFTER_SECS: i64 = 3 * 24 * 3600;
+
 /// Çekirdek başlatma hataları.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -209,6 +216,60 @@ impl Engine {
                 }
                 None => warn!(hex, "geçersiz seed infohash (40-hex olmalı), atlanıyor"),
             }
+        }
+
+        // TRİYAJ (F10): metadata çekmeden ÖNCE ucuz bir DHT peer sayımı. Yalnız peer'i
+        // olan (sağlıklı) torrent'ler pahalı çekime girsin diye. Kullanıcı teşhisi:
+        // "hiç paylaşanı olmayan eski bir torrent'i istediğin kadar çağır, indiremezsin".
+        // Ölçüm de aynı yeri gösteriyordu (peer denemelerinin %97'si zaman aşımı).
+        {
+            let store = store.clone();
+            let fetcher = Arc::clone(&fetcher);
+            tasks.push(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_millis(500));
+                loop {
+                    ticker.tick().await;
+                    if store.growth_paused() {
+                        continue;
+                    }
+                    let now = now_unix();
+                    let batch = match store.next_to_triage(TRIAGE_BATCH, now).await {
+                        Ok(b) if !b.is_empty() => b,
+                        _ => continue,
+                    };
+                    let mut handles = Vec::new();
+                    for ih in batch {
+                        let store = store.clone();
+                        let fetcher = Arc::clone(&fetcher);
+                        handles.push(tokio::spawn(async move {
+                            // Kısa bütçe: bu bir "var mı yok mu" ölçümü, tam arama değil.
+                            let peers = fetcher.count_peers(ih, TRIAGE_TIMEOUT).await;
+                            let _ = store.record_probe(ih, peers as i64, now_unix()).await;
+                        }));
+                    }
+                    for h in handles {
+                        let _ = h.await;
+                    }
+                }
+            }));
+        }
+
+        // ÖLÜ TEMİZLİĞİ (F10): triyajda peer bulunamamış ve günlerdir görülmemiş bekleyen
+        // kayıtlar ile eski `unreachable` kayıtlar silinir — adlı kayıtlara dokunulmaz.
+        // Ölü yığın hem kuyruğu hem diski zehirliyordu (2 milyon bekleyen kayıt).
+        {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(3600));
+                loop {
+                    ticker.tick().await;
+                    match store.purge_dead(now_unix(), DEAD_PURGE_AFTER_SECS).await {
+                        Ok(n) if n > 0 => info!(deleted = n, "ölü bekleyen kayıtlar temizlendi"),
+                        Err(e) => warn!(error = %e, "ölü kayıt temizliği başarısız"),
+                        _ => {}
+                    }
+                }
+            }));
         }
 
         // F8-4: depolama basıncını periyodik ölç (motorun kendi Store örneği için).

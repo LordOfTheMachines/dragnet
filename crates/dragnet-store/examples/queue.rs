@@ -51,12 +51,35 @@ async fn main() {
     .await;
     let oldest_check = q("SELECT COALESCE(MIN(last_check), 0) FROM torrents WHERE metadata_status='fetched' AND last_check IS NOT NULL".to_string()).await;
 
+    // F10 triyaj dağılımı: ölçülen peer sayısına göre sağlıklı/ölü ayrımı.
+    let probed = q(
+        "SELECT COUNT(*) FROM torrents WHERE metadata_status='pending' AND probe_at > 0"
+            .to_string(),
+    )
+    .await;
+    let healthy = q(format!(
+        "SELECT COUNT(*) FROM torrents WHERE metadata_status='pending' AND probe_peers >= {}",
+        dragnet_store::MIN_HEALTHY_PEERS
+    ))
+    .await;
+    let zero = q(
+        "SELECT COUNT(*) FROM torrents WHERE metadata_status='pending' AND probe_peers = 0"
+            .to_string(),
+    )
+    .await;
     println!("KUYRUK BİLEŞİMİ");
     println!("  bekleyen (pending)      : {pending}");
     println!("    · sıcak (son 2 saat)  : {hot2h}");
     println!("    · peer ipuçlu         : {hinted}");
     println!("    · soğuk (kalan)       : {}", pending - hot2h - hinted);
     println!("  ulaşılamayan            : {unreach}");
+    println!("TRİYAJ (F10)");
+    println!("  ölçülmüş                : {probed}");
+    println!(
+        "    · sağlıklı (>= {} peer): {healthy}",
+        dragnet_store::MIN_HEALTHY_PEERS
+    );
+    println!("    · peer bulunamayan     : {zero}");
     println!("  denenmiş (en az 1 kez)  : {tried}");
     println!("\nİNDEKS");
     println!("  adlı kayıt              : {fetched}   (son 1 saatte: {last1h})");

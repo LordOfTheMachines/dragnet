@@ -366,9 +366,21 @@ impl Store {
             "ALTER TABLE torrents ADD COLUMN hot_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE torrents ADD COLUMN fetched_at INTEGER DEFAULT NULL",
             "ALTER TABLE torrents ADD COLUMN hint_peers INTEGER NOT NULL DEFAULT 0",
+            // F10 (triyaj): metadata çekmeden ÖNCE ölçülen canlı peer sayısı ve ölçüm anı.
+            // -1 = henüz ölçülmedi. Ölçüm (gece boyu 134k peer denemesi): denemelerin
+            // %97'si zaman aşımı, çünkü kuyruk 2 milyonluk ölü BEP-51 yığınıydı. Artık
+            // önce ucuz bir DHT peer sayımı yapılıyor; yalnız **sağlıklı** (yeterli
+            // peer'i olan) torrent'ler pahalı metadata çekimine giriyor.
+            "ALTER TABLE torrents ADD COLUMN probe_peers INTEGER NOT NULL DEFAULT -1",
+            "ALTER TABLE torrents ADD COLUMN probe_at INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = sqlx::query(col).execute(&self.pool).await;
         }
+        let _ = sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_triage ON torrents(probe_at, last_seen DESC) WHERE metadata_status='pending';",
+        )
+        .execute(&self.pool)
+        .await;
         let _ = sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_fetch_queue2 ON torrents(hint_peers DESC, seen_count DESC, last_seen DESC) WHERE metadata_status='pending';",
         )
@@ -598,14 +610,17 @@ impl Store {
             "SELECT infohash FROM torrents
               WHERE metadata_status = 'pending'
                 AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
-                AND (hint_peers > 0 OR (hot_seen IS NOT NULL AND hot_seen > ?3))
-              ORDER BY hint_peers DESC, hot_seen DESC, seen_count DESC
+                AND (probe_peers >= ?5 OR hint_peers >= ?5
+                     OR (probe_peers < 0 AND hint_peers > 0)
+                     OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > ?3))
+              ORDER BY probe_peers DESC, hint_peers DESC, hot_seen DESC, seen_count DESC
               LIMIT ?4",
         )
         .bind(MAX_FETCH_ATTEMPTS)
         .bind(hot_cooldown)
         .bind(hot_window)
         .bind(warm_limit)
+        .bind(MIN_HEALTHY_PEERS)
         .fetch_all(&self.pool)
         .await?;
         // Soğuk kota: canlı aday VARSA kotanın yalnız ¼'ü soğuklara ayrılır (canlıların
@@ -1117,6 +1132,91 @@ impl Store {
             .unwrap_or(0)
     }
 
+    /// TRİYAJ (F10) — metadata çekmeden önce peer sayımı yapılacak adaylar.
+    /// **Taze ve sıcak** kayıtlar önce: torrent'ler hızla ölür; keşiften saatler sonra
+    /// ölçmek anlamsızdır. Seçilenlerin `probe_at`'ı hemen işaretlenir ki eşzamanlı
+    /// çağrılar aynı adayları almasın.
+    pub async fn next_to_triage(&self, limit: i64, now: i64) -> Result<Vec<InfoHash>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT infohash FROM torrents
+              WHERE metadata_status = 'pending' AND probe_at = 0
+              ORDER BY (hot_seen IS NOT NULL AND hot_seen > ?1) DESC,
+                       hint_peers DESC, last_seen DESC
+              LIMIT ?2",
+        )
+        .bind(now - HOT_WINDOW_SECS)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        let out: Vec<InfoHash> = rows
+            .into_iter()
+            .filter_map(|r| InfoHash::from_hex(&r.get::<String, _>("infohash")))
+            .collect();
+        if !out.is_empty() {
+            let ph = std::iter::repeat_n("?", out.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("UPDATE torrents SET probe_at = ? WHERE infohash IN ({ph})");
+            let mut q = sqlx::query(&sql).bind(now);
+            for ih in &out {
+                q = q.bind(ih.to_hex());
+            }
+            q.execute(&self.pool).await?;
+        }
+        Ok(out)
+    }
+
+    /// Triyaj sonucunu yazar (ölçülen canlı peer sayısı).
+    pub async fn record_probe(&self, ih: InfoHash, peers: i64, now: i64) -> Result<(), StoreError> {
+        sqlx::query("UPDATE torrents SET probe_peers = ?1, probe_at = ?2 WHERE infohash = ?3")
+            .bind(peers.max(0))
+            .bind(now)
+            .bind(ih.to_hex())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Ölü/eski bekleyen kayıtları siler (F10 temizlik): triyajda peer bulunamamış ve
+    /// `older_than_secs`'ten uzun süredir görülmemiş `pending` kayıtlar ile eski
+    /// `unreachable` kayıtlar. **Adlı (fetched) kayıtlara dokunulmaz** — onlar üründür.
+    /// Döndürdüğü: silinen satır sayısı.
+    pub async fn purge_dead(&self, now: i64, older_than_secs: i64) -> Result<u64, StoreError> {
+        let cutoff = now - older_than_secs.max(0);
+        let a = sqlx::query(
+            "DELETE FROM torrents
+              WHERE metadata_status = 'pending' AND probe_peers = 0 AND last_seen < ?1",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        let b = sqlx::query(
+            "DELETE FROM torrents WHERE metadata_status = 'unreachable' AND last_seen < ?1",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if a + b > 0 {
+            debug!(pending = a, unreachable = b, "ölü kayıtlar temizlendi");
+        }
+        Ok(a + b)
+    }
+
+    /// Bekleyen (adsız) yığını tamamen siler — adlı kayıtlar korunur. Kullanıcı isteğiyle
+    /// yapılan "sıfırla" işlemi: 2 milyonluk eski BEP-51 yığını, taze ve canlı
+    /// infohash'lerin önünü tıkıyordu.
+    pub async fn reset_pending(&self) -> Result<u64, StoreError> {
+        let n =
+            sqlx::query("DELETE FROM torrents WHERE metadata_status IN ('pending','unreachable')")
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        let _ = sqlx::query("VACUUM").execute(&self.pool).await;
+        Ok(n)
+    }
+
     /// Önbellekli yazım düzeltme dizini. İlk çağrıda kurulur, `SPELL_TTL` sonunda
     /// tazelenir; hata olursa `None` döner (arama düzeltmesiz sürer).
     pub async fn spell(&self) -> Option<Arc<dragnet_core::spell::SpellIndex>> {
@@ -1449,6 +1549,11 @@ pub const FETCH_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
 // NOT: 20 dk denendi, isim üretimi çöktü (sıcak kayıtlar 3 denemeyi hızla tüketip
 // "ulaşılamayan" oluyor ve taze adaylara yer kalmıyor). 6 saat = eski davranış.
 pub const HOT_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
+/// SAĞLIKLI sayılma eşiği (F10): triyajda ya da peer ipucunda bu kadar peer görülen
+/// torrent metadata çekimine değer. Kullanıcı gözlemi: "hiç paylaşanı olmayan eski bir
+/// torrent'i istediğin kadar çağır, indiremezsin". Ölçüm de aynı yeri gösteriyordu:
+/// peer denemelerinin %97'si zaman aşımıydı.
+pub const MIN_HEALTHY_PEERS: i64 = 3;
 /// "Sıcak" sayılma penceresi (sn): bu süre içinde pasif trafikte görülen infohash öncelikli.
 pub const HOT_WINDOW_SECS: i64 = 2 * 3600;
 
