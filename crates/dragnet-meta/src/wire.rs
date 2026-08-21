@@ -58,6 +58,12 @@ pub async fn fetch_info_from_peer(
 /// TCP bağlanma için ayrı, kısa zaman aşımı: Faz E ölçümünde peer denemelerinin ~%92'si
 /// bağlanma zaman aşımıydı (NAT/güvenlik duvarı arkasındaki peer'ler); başarılı bağlantılar
 /// tipik olarak <2 s. Böylece ölü adresler eşzamanlılık yuvasını uzun tutmaz.
+// ÖLÇÜM (gece boyu, 134k peer denemesi): 130.948 zaman aşımı, yalnız 1.457 bağlantı
+// hatası, 1.099 başarı. Yani peer'lerin '97'si hiç yanıt vermiyor (NAT/ölü) ve her biri
+// bir yuvayı 3,5 sn tutuyordu. Başarılı bağlantılar <2 sn olduğu için 1,8 sn yeterli:
+// aynı sürede ~2 kat daha çok peer denenir.
+// NOT: 1,8 sn denendi ve isim üretimi saatte ~430'dan ~37'ye ÇÖKTÜ — başarılı
+// bağlantıların önemli kısmı 2-3 sn arasındaymış. 3,5 sn'ye geri dönüldü.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
 
 /// Peer adresi **genel internet** adresi mi? (F8-3, güvenlik)

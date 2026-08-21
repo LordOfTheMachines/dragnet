@@ -585,6 +585,7 @@ impl Store {
     /// `now` yapılır ki eşzamanlı çağrılar aynı adayları almasın.
     pub async fn next_to_fetch(&self, limit: i64, now: i64) -> Result<Vec<InfoHash>, StoreError> {
         let cooldown = now - FETCH_RETRY_COOLDOWN_SECS;
+        let hot_cooldown = now - HOT_RETRY_COOLDOWN_SECS;
         let hot_window = now - HOT_WINDOW_SECS;
         // ÖNCE CANLI ADAYLAR (ölçümle eklendi): kuyruğun %98'i BEP-51 örneklemesinden
         // gelen soğuk kayıt ve bunların ~%90'ında DHT'de hiç peer bulunamıyor
@@ -602,7 +603,7 @@ impl Store {
               LIMIT ?4",
         )
         .bind(MAX_FETCH_ATTEMPTS)
-        .bind(cooldown)
+        .bind(hot_cooldown)
         .bind(hot_window)
         .bind(warm_limit)
         .fetch_all(&self.pool)
@@ -1441,6 +1442,13 @@ impl Store {
 pub const MAX_FETCH_ATTEMPTS: i64 = 3;
 /// Başarısız denemeler arası soğuma (sn) — peer'ler zamanla değişir, tekrar denemeye değer.
 pub const FETCH_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
+/// SICAK kayıtlar için kısa soğuma (sn): son 2 saatte gerçek trafikte görülmüş bir
+/// torrent az önce canlıydı; ilk denemede peer'ler yanıt vermediyse 20 dakika sonra
+/// başka peer'lerle tekrar denemeye değer (ölçüm: başarısızlıkların %97'si zaman
+/// aşımı, yani peer bileşimi değişince sonuç da değişebiliyor).
+// NOT: 20 dk denendi, isim üretimi çöktü (sıcak kayıtlar 3 denemeyi hızla tüketip
+// "ulaşılamayan" oluyor ve taze adaylara yer kalmıyor). 6 saat = eski davranış.
+pub const HOT_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
 /// "Sıcak" sayılma penceresi (sn): bu süre içinde pasif trafikte görülen infohash öncelikli.
 pub const HOT_WINDOW_SECS: i64 = 2 * 3600;
 

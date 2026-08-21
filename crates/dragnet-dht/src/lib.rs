@@ -443,7 +443,27 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                 Method::AnnouncePeer => {
                     shared.stats.announce_seen.fetch_add(1, Ordering::Relaxed);
                     if let Some(ih) = q.info_hash {
-                        harvest(shared, ih, SightingSource::Announce);
+                        // ANNOUNCE EDEN DÜĞÜM O TORRENT'İN PEER'İDİR ve bize paket
+                        // gönderebildiğine göre erişilebilirdir — metadata çekimi için
+                        // elimize geçen en kaliteli adres budur. Ölçüm: peer
+                        // denemelerinin %97'si zaman aşımı (DHT'den gelen bayat/NAT'lı
+                        // adresler); announce eden peer ise az önce canlıydı.
+                        // BEP-5: implied_port=1 ise gönderenin UDP kaynak portu, değilse
+                        // sorgudaki `port` kullanılır.
+                        let port = if q.implied_port {
+                            Some(from.port())
+                        } else {
+                            q.announce_port
+                        };
+                        let peer = port
+                            .filter(|p| *p != 0)
+                            .map(|p| SocketAddrV4::new(*from.ip(), p));
+                        harvest_with_peers(
+                            shared,
+                            ih,
+                            SightingSource::Announce,
+                            peer.into_iter().collect(),
+                        );
                     }
                     Some(krpc::build_response_id_only(&q.txid, &id))
                 }
@@ -538,12 +558,23 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
 /// kısa pencerede tekrarları bastırılır — çünkü "şu anda aranıyor" sinyali değerlidir.
 /// Döndürdüğü: dedup'a göre yeni miydi.
 fn harvest(shared: &Shared, ih: [u8; ID_LEN], source: SightingSource) -> bool {
+    harvest_with_peers(shared, ih, source, Vec::new())
+}
+
+/// `harvest` + bilinen peer adresleri (announce edenin adresi gibi). Peer'li sighting
+/// tekrarlı olsa bile yayılır: adres tazedir ve çekim için doğrudan kullanılır.
+fn harvest_with_peers(
+    shared: &Shared,
+    ih: [u8; ID_LEN],
+    source: SightingSource,
+    peers: Vec<SocketAddrV4>,
+) -> bool {
     let is_new = if source.is_hot() {
         shared.hot_dedup.lock().unwrap().insert(ih)
     } else {
         shared.dedup.lock().unwrap().insert(ih)
     };
-    if !is_new {
+    if !is_new && peers.is_empty() {
         shared.stats.duplicates.fetch_add(1, Ordering::Relaxed);
         if !source.is_hot() {
             let mut m = shared.dup_counts.lock().unwrap();
@@ -553,7 +584,10 @@ fn harvest(shared: &Shared, ih: [u8; ID_LEN], source: SightingSource) -> bool {
         }
         return false;
     }
-    emit(shared, ih, source, Vec::new(), 0);
+    if !peers.is_empty() {
+        shared.stats.peer_hints.fetch_add(1, Ordering::Relaxed);
+    }
+    emit(shared, ih, source, peers, 0);
     true
 }
 

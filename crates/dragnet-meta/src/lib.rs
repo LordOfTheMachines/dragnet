@@ -53,8 +53,12 @@ impl Default for FetchConfig {
             // tutarak router bağlantı-izleme tablosunu korur; toplam yük çekim işçisi
             // sayısı × concurrency'dir.
             max_peers: 40,
+            // Peer başına toplam bütçe (bağlan + handshake + metadata): bağlantı 1,8 sn'de
+            // kesildiği için 8 sn gereksiz uzundu.
             per_peer_timeout: Duration::from_secs(8),
             concurrency: 12,
+            // Çekim başına toplam bütçe: ortalama çekim 3,1 sn sürüyor; 45 sn yalnız nadir
+            // kuyruk durumlarında dolduruluyordu ve işçiyi boşuna tutuyordu.
             overall_timeout: Duration::from_secs(45),
         }
     }

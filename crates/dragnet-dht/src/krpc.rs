@@ -37,6 +37,13 @@ pub struct Query {
     pub txid: Vec<u8>,
     pub method: Method,
     pub info_hash: Option<[u8; ID_LEN]>,
+    /// `announce_peer` sorgusundaki port (BEP-5). `implied_port=1` ise gönderenin
+    /// UDP kaynak portu kullanılır. **Announce eden düğüm o torrent'in peer'idir** ve
+    /// bize doğrudan paket gönderebildiği için erişilebilirdir — metadata çekimi için
+    /// en kaliteli peer adresi budur.
+    pub announce_port: Option<u16>,
+    /// `implied_port` bayrağı: 1 ise porta değil, gönderenin kaynak portuna bakılır.
+    pub implied_port: bool,
 }
 
 /// Karşı taraftan gelen bir yanıt (`y = "r"`).
@@ -89,10 +96,21 @@ pub fn parse(buf: &[u8]) -> Option<Message> {
                 .and_then(as_dict)
                 .and_then(|a| dict_bytes(a, b"info_hash"))
                 .and_then(to_id);
+            let a = dict_get(dict, b"a").and_then(as_dict);
+            let announce_port = a
+                .and_then(|a| dict_get(a, b"port"))
+                .and_then(as_int)
+                .and_then(|p| (0..=65535).contains(&p).then_some(p as u16));
+            let implied_port = a
+                .and_then(|a| dict_get(a, b"implied_port"))
+                .and_then(as_int)
+                .is_some_and(|v| v != 0);
             Some(Message::Query(Query {
                 txid,
                 method,
                 info_hash,
+                announce_port,
+                implied_port,
             }))
         }
         Some(b"r") => {
@@ -169,6 +187,14 @@ fn parse_samples(bytes: &[u8]) -> Vec<[u8; ID_LEN]> {
 }
 
 // --- Value yardımcıları ---
+
+/// Bencode tamsayısı (announce `port` ve `implied_port` alanları için).
+fn as_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(i) => Some(*i),
+        _ => None,
+    }
+}
 
 fn as_dict(v: &Value) -> Option<&std::collections::HashMap<Vec<u8>, Value>> {
     match v {
