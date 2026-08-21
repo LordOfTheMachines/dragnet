@@ -1292,13 +1292,24 @@ impl Store {
     /// `secs` saat katı verilmelidir).
     pub async fn metric_since(&self, name: &str, now: i64, secs: i64) -> Result<i64, StoreError> {
         let row = sqlx::query(
-            "SELECT COALESCE(SUM(value), 0) AS n FROM metrics WHERE name = ?1 AND bucket > ?2",
+            "SELECT COALESCE(SUM(value), 0) AS n FROM metrics WHERE name = ?1 AND bucket >= ?2",
         )
         .bind(name)
-        .bind(((now - secs.max(0)) / METRIC_BUCKET_SECS) * METRIC_BUCKET_SECS - 1)
+        .bind(Self::metric_window_start(now, secs))
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("n"))
+    }
+
+    /// [`Store::metric_since`]'in gerçekte kapsadığı pencerenin başlangıcı (unix sn).
+    ///
+    /// Sayımlar kova hizalıdır, dolayısıyla istenen pencere ile GERÇEKTE sayılan aralık
+    /// aynı değildir. Bu fark hız hesabında yanıltır: bir ölçümde 10 dakikalık pencere
+    /// 450/saat, 20 dakikalık pencere 225/saat gösterdi — oysa ikisi de **aynı 75 olayı**
+    /// sayıyordu. Çağıran, hızı hesaplarken istediği pencereyi değil, bu fonksiyonun
+    /// verdiği gerçek aralığı bölen olarak kullanmalıdır.
+    pub fn metric_window_start(now: i64, secs: i64) -> i64 {
+        ((now - secs.max(0)) / METRIC_BUCKET_SECS) * METRIC_BUCKET_SECS
     }
 
     /// Triyaj sonucunu yazar (ölçülen canlı peer sayısı).
@@ -2609,6 +2620,28 @@ mod tests {
         );
         // Bilinmeyen metrik 0 döner (hata değil).
         assert_eq!(store.metric_since("yok", now, 600).await.unwrap(), 0);
+
+        // Kova hizalaması: farklı pencereler AYNI olayları kapsıyorsa, hız hesabı da
+        // aynı çıkmalı. Bunun için çağırana gerçek aralık verilir — istenen pencereyi
+        // bölen olarak kullanmak, aynı 75 olayı 450/saat ve 225/saat diye iki farklı
+        // hıza çevirmişti.
+        let w1 = Store::metric_window_start(now, 600);
+        let w2 = Store::metric_window_start(now, 1200);
+        assert!(w1 > w2, "geniş pencere daha erken başlar");
+        assert_eq!(w1 % METRIC_BUCKET_SECS, 0, "kova hizalı olmalı");
+        // İki pencere aynı sayıyı veriyorsa (arada başka kova yoksa), gerçek aralıklar
+        // farklıdır ve hız o aralıklara göre hesaplanmalıdır.
+        assert_eq!(
+            store
+                .metric_since(metric::TRIAGE_DONE, now, 600)
+                .await
+                .unwrap(),
+            store
+                .metric_since(metric::TRIAGE_DONE, now, 1200)
+                .await
+                .unwrap()
+        );
+        assert!(now - w2 > now - w1);
     }
 
     /// Yarım kalmış triyaj işareti (`probe_at` set, sonuç yok) kaydı sonsuza dek

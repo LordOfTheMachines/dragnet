@@ -209,7 +209,11 @@ Aynı makine, aynı ayarlar (`fetch_workers = 24`, `fetch_peer_concurrency = 16`
 | Sorgu başına gelen yanıt | %6 | **%34** | 5,7× |
 | Örneklerde tekrar (dedup) | %99,7 | **%64** | — |
 | Triyaj (aday ölçümü) | 1.406/saat | **11.260/saat** | 8× |
-| **İsim üretimi** | **146/saat** | **~320/saat** | **2,2×** |
+| **İsim üretimi** | **146/saat** | **~270–400/saat** | **~2×** |
+
+Son satırdaki aralık gerçektir, belirsizlik değil: aynı kurulumda ardışık pencereler
+271, 344, 399 ve 408/saat verdi. Oynaklık bu işin doğasında var (bkz. §9) ve tek bir
+pencereye bakıp "şu kadar oldu" demek, bu projede daha önce yanlış kararlara yol açtı.
 
 Son satır neden yalnız 2,2×? Çünkü zincirin ilk halkaları açıldıktan sonra tavanı artık
 **aday kalitesi** belirliyor: triyaj edilen adayların %88'inde DHT'de hiç peer yok

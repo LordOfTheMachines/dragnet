@@ -39,6 +39,11 @@ async fn main() {
     // olarak bu tuzağa düşüldü: satır sayımı triyajı 1.317/saat gösterirken gerçek hız
     // (backlog düşüşünden) ~11.000/saat idi. Bu yüzden olay sayaçları (`metrics`) okunur.
     let win_secs = win_min * 60;
+    // GERÇEK kapsanan aralık: sayımlar 10 dakikalık kova hizalı olduğu için istenen
+    // pencereyle aynı değildir. Hız hesabında istenen pencereyi bölen olarak kullanmak
+    // yanıltır — bir ölçümde 10 dk penceresi 450/saat, 20 dk penceresi 225/saat gösterdi,
+    // oysa ikisi de AYNI 75 olayı sayıyordu. Bu yüzden bölen `covered`'dır.
+    let covered = (now - dragnet_store::Store::metric_window_start(now, win_secs)).max(1);
     let m = |name: &'static str| {
         let store = store.clone();
         async move { store.metric_since(name, now, win_secs).await.unwrap_or(0) }
@@ -76,8 +81,12 @@ async fn main() {
     )
     .await;
 
-    let per_h = |v: i64| v as f64 * 60.0 / win_min as f64;
-    println!("PENCERE: son {win_min} dakika\n");
+    let per_h = |v: i64| v as f64 * 3600.0 / covered as f64;
+    let per_s = |v: i64| v as f64 / covered as f64;
+    println!(
+        "PENCERE: istenen {win_min} dk → sayaçların GERÇEKTE kapsadığı {:.1} dk\n",
+        covered as f64 / 60.0
+    );
     println!("AŞAMA HIZI (saatlik projeksiyon)");
     let discovered = m(dragnet_store::metric::DHT_HARVESTED).await;
     println!(
@@ -131,7 +140,7 @@ async fn main() {
     let dups = m(dragnet_store::metric::DHT_DUPLICATES).await;
     println!(
         "  BEP-51 örnek (aktif)      : {samples:>7}  → {:>8.1}/sn",
-        samples as f64 / win_secs as f64
+        per_s(samples)
     );
     if samples > 0 {
         // Bu oran %100'e yaklaşıyorsa aynı düğümlerden aynı örnekler geliyordur:
@@ -151,7 +160,7 @@ async fn main() {
     );
     println!(
         "  gönderilen sorgu          : {sent:>7}  → {:>8.1}/sn",
-        sent as f64 / win_secs as f64
+        per_s(sent)
     );
     if sent + limited > 0 {
         println!(
@@ -170,7 +179,7 @@ async fn main() {
     }
     println!(
         "  öğrenilen düğüm           : {learned:>7}  → {:>8.1}/sn",
-        learned as f64 / win_secs as f64
+        per_s(learned)
     );
     println!("  kanal doluluğundan düşen  : {dropped:>7}");
     let sockerr = m(dragnet_store::metric::DHT_SOCK_ERR).await;
