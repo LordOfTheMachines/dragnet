@@ -89,6 +89,8 @@ pub struct HarvesterConfig {
 const STATE_NODES: usize = 1000;
 /// Durum dosyasının kaydedilme aralığı.
 const STATE_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+/// Düğüm kuyruğu kuruduğunda yeniden tohumlama denemeleri arasındaki en kısa süre.
+const RESEED_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 impl Default for HarvesterConfig {
     fn default() -> Self {
@@ -191,6 +193,11 @@ pub struct Stats {
     pub rate_limited: AtomicU64,
     /// Takip get_peers ile `values` (taze peer) alınan örnek sayısı (Faz E).
     pub peer_hints: AtomicU64,
+    /// Soket hataları. Windows'ta bunlar sessizce yutulduğunda hasat, sebebi görünmeden
+    /// durur: bir hedef ICMP "port unreachable" döndürünce Windows bunu SONRAKİ soket
+    /// çağrısında `WSAECONNRESET` olarak verir (bkz. `disable_conn_reset`).
+    pub send_errors: AtomicU64,
+    pub recv_errors: AtomicU64,
 }
 
 /// Anlık sayaç görüntüsü (kolay loglama için).
@@ -209,6 +216,8 @@ pub struct StatsSnapshot {
     pub samples_seen: u64,
     pub rate_limited: u64,
     pub peer_hints: u64,
+    pub send_errors: u64,
+    pub recv_errors: u64,
 }
 
 impl Stats {
@@ -227,6 +236,8 @@ impl Stats {
             samples_seen: self.samples_seen.load(Ordering::Relaxed),
             rate_limited: self.rate_limited.load(Ordering::Relaxed),
             peer_hints: self.peer_hints.load(Ordering::Relaxed),
+            send_errors: self.send_errors.load(Ordering::Relaxed),
+            recv_errors: self.recv_errors.load(Ordering::Relaxed),
         }
     }
 }
@@ -339,12 +350,20 @@ impl Shared {
     }
 
     /// Öğrenilen düğümleri kuyruğa ekler (kapasiteyle sınırlı). Eklenen sayısını döner.
+    /// Öğrenilen düğümleri kuyruğa ekler. Kuyruk doluysa **en eskisi düşürülür** —
+    /// yeni gelen atılmaz.
+    ///
+    /// Neden: eskiden kapasiteye ulaşınca yeni düğümler atılıyordu, yani kuyruk bir kez
+    /// dolduktan sonra **hep aynı düğümler** dolaşıyordu. BEP-51 örneklemesinde bu,
+    /// aynı düğümlere tekrar tekrar sorup aynı infohash'leri almak demek: ölçümde
+    /// saniyede ~90 örnek geliyordu ama bunların %99,7'si dedup'a takılıyor, yeni kayıt
+    /// 0,24/sn'de kalıyordu. Kuyruğun tazelenmesi keşif çeşitliliğinin ön koşuludur.
     fn push_nodes(&self, learned: &[SocketAddrV4]) -> u64 {
         let mut q = self.nodes.lock().unwrap();
         let mut added = 0;
         for &n in learned {
-            if q.len() >= self.node_queue_capacity {
-                break;
+            while q.len() >= self.node_queue_capacity {
+                q.pop_front();
             }
             q.push_back(n);
             added += 1;
@@ -371,7 +390,7 @@ impl Shared {
 pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     // İstenen porta bağlan; başka uygulama (ör. qBittorrent 6881) tutuyorsa
     // çökmek yerine efemer porta düş.
-    let socket = match UdpSocket::bind(SocketAddrV4::new(config.bind_address, config.port)).await {
+    let socket = match bind_socket(SocketAddrV4::new(config.bind_address, config.port)).await {
         Ok(s) => s,
         Err(e) if config.port != 0 => {
             warn!(
@@ -380,7 +399,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
                 "harvester portu bağlanamadı (başka uygulama kullanıyor olabilir, \
                  örn. qBittorrent 6881); efemer porta düşülüyor"
             );
-            UdpSocket::bind(SocketAddrV4::new(config.bind_address, 0)).await?
+            bind_socket(SocketAddrV4::new(config.bind_address, 0)).await?
         }
         Err(e) => return Err(e),
     };
@@ -455,6 +474,58 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     })
 }
 
+/// Windows'ta UDP soketinin `WSAECONNRESET` davranışını kapatır.
+///
+/// **Neden gerekli:** Bir DHT hedefi kapalıysa yönlendirici/işletim sistemi ICMP
+/// "port unreachable" döndürür. Windows bunu, bağlantısız bir UDP soketinde bile,
+/// **bir sonraki** `recv_from`/`send_to` çağrısını `WSAECONNRESET` (10054) ile
+/// başarısız kılarak bildirir. Bir crawler ise doğası gereği sürekli ölü hedeflere
+/// paket yollar, dolayısıyla soket sürekli hata verir; hatalar yutulduğu için de
+/// hasat **sebebi görünmeden** yavaşlar: gelen yanıtlar kaybolur, düğüm kuyruğu kurur,
+/// giden sorgu bütçesi kullanılamaz.
+///
+/// `SIO_UDP_CONNRESET = false` bu bildirimi kapatır ve soket, UNIX'teki gibi ICMP
+/// hatalarını yok sayar. Windows dışında bu işlev bir şey yapmaz.
+#[cfg(windows)]
+fn disable_conn_reset(socket: &std::net::UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{WSAIoctl, SIO_UDP_CONNRESET, SOCKET};
+
+    let mut enable: u32 = 0;
+    let mut returned: u32 = 0;
+    // SAFETY: geçerli bir soket tanıtıcısı ve doğru boyutlu bir `u32` tamponu veriliyor;
+    // çağrı yalnız soketin ICMP-hata bildirim bayrağını değiştirir.
+    let rc = unsafe {
+        WSAIoctl(
+            SOCKET(socket.as_raw_socket() as usize),
+            SIO_UDP_CONNRESET,
+            Some(&mut enable as *mut u32 as *mut std::ffi::c_void),
+            std::mem::size_of::<u32>() as u32,
+            None,
+            0,
+            &mut returned,
+            None,
+            None,
+        )
+    };
+    if rc != 0 {
+        warn!("SIO_UDP_CONNRESET ayarlanamadı; ICMP kaynaklı soket hataları görülebilir");
+    }
+}
+
+#[cfg(not(windows))]
+fn disable_conn_reset(_socket: &std::net::UdpSocket) {}
+
+/// İstenen porta bağlanır ve platforma özgü soket ayarlarını uygular.
+async fn bind_socket(addr: SocketAddrV4) -> std::io::Result<UdpSocket> {
+    // Önce std soketi: `SIO_UDP_CONNRESET` ioctl'i bağlanmadan hemen sonra, tokio'ya
+    // devretmeden uygulanmalı.
+    let std_socket = std::net::UdpSocket::bind(addr)?;
+    disable_conn_reset(&std_socket);
+    std_socket.set_nonblocking(true)?;
+    UdpSocket::from_std(std_socket)
+}
+
 /// Bootstrap host'larını çözer ve düğüm kuyruğuna ekler.
 async fn seed_bootstrap(shared: &Shared) {
     let mut resolved = Vec::new();
@@ -514,6 +585,9 @@ async fn recv_loop(shared: Arc<Shared>) {
         let (len, from) = match shared.socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
+                // Sayılır: Windows'ta bu hatalar sessizce yutulunca hasat sebebi
+                // görünmeden durur (bkz. `disable_conn_reset`).
+                shared.stats.recv_errors.fetch_add(1, Ordering::Relaxed);
                 debug!(error = %e, "recv_from hatası");
                 continue;
             }
@@ -628,6 +702,14 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                     }
                 }
             }
+            // YANIT VEREN DÜĞÜMÜ KUYRUĞA GERİ KOY. `pop_nodes` sorguladığı düğümü
+            // kuyruktan çıkarır ve eskiden bir daha geri koymazdı; yani KANITLANMIŞ
+            // canlı düğümler bir kez kullanılıp atılıyor, yerlerini yanıtlarda gelen
+            // kanıtlanmamış (çoğu ölü) adresler alıyordu. Kuyruk böyle kurur ve
+            // `crawl_loop` sorgulayacak düğüm bulamaz: ölçümde giden sorgu 50/sn
+            // bütçeye karşılık 1,5/sn'ye düşmüş, hasat pratikte durmuştu.
+            // Sona eklenir: sıra tekrar gelene kadar kuyruğun tamamı dolaşılır.
+            shared.push_nodes(&[from]);
             if !r.nodes.is_empty() {
                 let added = shared.push_nodes(&r.nodes);
                 shared
@@ -782,11 +864,18 @@ fn emit(
 async fn crawl_loop(shared: Arc<Shared>, config: HarvesterConfig) {
     let mut ticker = tokio::time::interval(config.crawl_tick);
     let mut counter: u32 = 0;
+    // Kuyruk boşaldığında yeniden tohumlama YALNIZ ara ara denenir. Eskiden her tıkta
+    // (100 ms) çağrılıyordu: kuyruk kurumuşsa bu, saniyede 10 kez 4 bootstrap adının DNS
+    // çözümlemesi demekti ve `seed_bootstrap` bir `await` olduğu için crawl döngüsünün
+    // kendisini DNS'e kilitliyordu — yani kuyruk boşken hasat toparlanmak yerine
+    // tamamen duruyordu. (Ayrıca `rebootstrap_loop` zaten 60 sn'de bir aynı işi yapıyor.)
+    let mut last_reseed = Instant::now() - RESEED_MIN_INTERVAL;
     loop {
         ticker.tick().await;
 
-        // Kuyruk boşaldıysa bootstrap'tan yeniden tohumla.
-        if shared.queue_len() == 0 {
+        // Kuyruk boşaldıysa bootstrap'tan yeniden tohumla (hız sınırlı).
+        if shared.queue_len() == 0 && last_reseed.elapsed() >= RESEED_MIN_INTERVAL {
+            last_reseed = Instant::now();
             seed_bootstrap(&shared).await;
         }
 
@@ -814,7 +903,10 @@ async fn crawl_loop(shared: Arc<Shared>, config: HarvesterConfig) {
                 Ok(_) => {
                     shared.stats.queries_sent.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(e) => debug!(error = %e, "crawl sorgusu gönderilemedi"),
+                Err(e) => {
+                    shared.stats.send_errors.fetch_add(1, Ordering::Relaxed);
+                    debug!(error = %e, "crawl sorgusu gönderilemedi");
+                }
             }
         }
     }
@@ -878,6 +970,8 @@ impl StatsSnapshot {
             samples_seen: self.samples_seen + o.samples_seen,
             rate_limited: self.rate_limited + o.rate_limited,
             peer_hints: self.peer_hints + o.peer_hints,
+            send_errors: self.send_errors + o.send_errors,
+            recv_errors: self.recv_errors + o.recv_errors,
         }
     }
 }

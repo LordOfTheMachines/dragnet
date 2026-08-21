@@ -29,6 +29,13 @@ fetch_workers = 12
 # Tek bir metadata çekiminde denenecek eşzamanlı peer sayısı.
 fetch_peer_concurrency = 12
 
+# Aynı anda kaç aday triyaj edilsin (DHT'de "peer'i var mı?" ölçümü).
+# Triyaj, çekimin ADAY ARZINI üreten aşamadır; ölçümde asıl darboğaz burasıydı.
+# Her ölçüm bir DHT aramasıdır (~50 giden UDP sorgusu), yani bu değeri büyütmek
+# doğrudan modemin bağlantı-izleme tablosunu zorlar — internetin yavaşlıyorsa
+# önce bunu düşür. Ayrıntılı gerekçe ve matematik: docs/CEKIM-HIZI.md
+triage_concurrency = 24
+
 # Başlangıçta çekilip indekslenecek infohash'ler (indeksi ısıtmak / test için).
 # seed_infohashes = ["08ada5a7a6183aae1e09d831df6748d566095a10"]  # Sintel
 

@@ -94,7 +94,14 @@ async fn main() {
     let sent = m(dragnet_store::metric::DHT_QUERIES_SENT).await;
     let limited = m(dragnet_store::metric::DHT_RATE_LIMITED).await;
     println!("\nHARVESTER (DHT)");
+    let dups = m(dragnet_store::metric::DHT_DUPLICATES).await;
     println!("  BEP-51 örnek (aktif)      : {samples:>7}  → {:>8.1}/sn", samples as f64 / win_secs as f64);
+    if samples > 0 {
+        // Bu oran %100'e yaklaşıyorsa aynı düğümlerden aynı örnekler geliyordur:
+        // örnekleme dönüyor ama YENİ infohash üretmiyordur.
+        println!("    · tekrar (dedup)        : {dups:>7}  (%{:.1} örnek boşa)",
+            100.0 * dups as f64 / samples as f64);
+    }
     println!("  gelen announce (pasif)    : {announce:>7}  → {:>8.0}/saat", per_h(announce));
     println!("  gelen get_peers (pasif)   : {gp:>7}  → {:>8.0}/saat", per_h(gp));
     println!("  gönderilen sorgu          : {sent:>7}  → {:>8.1}/sn", sent as f64 / win_secs as f64);
@@ -102,6 +109,18 @@ async fn main() {
         println!("  rate-limit ile düşen      : {limited:>7}  (%{:.0} talep reddedildi)",
             100.0 * limited as f64 / (sent + limited) as f64);
     }
+    let resp = m(dragnet_store::metric::DHT_RESPONSES).await;
+    let learned = m(dragnet_store::metric::DHT_NODES_LEARNED).await;
+    let dropped = m(dragnet_store::metric::DHT_DROPPED).await;
+    if sent > 0 {
+        println!("  gelen yanıt               : {resp:>7}  (sorgu başına %{:.0})", 100.0 * resp as f64 / sent as f64);
+    }
+    println!("  öğrenilen düğüm           : {learned:>7}  → {:>8.1}/sn", learned as f64 / win_secs as f64);
+    println!("  kanal doluluğundan düşen  : {dropped:>7}");
+    let sockerr = m(dragnet_store::metric::DHT_SOCK_ERR).await;
+    println!("  UDP soket hatası          : {sockerr:>7}  (Windows ICMP/WSAECONNRESET)");
+    println!("  NOT: gönderilen sorgu bütçenin ÇOK altındaysa düğüm kuyruğu kurumuştur");
+    println!("  (öğrenilen düğüm ~0). Düşen infohash yüksekse darboğaz SQLite yazma yolu.");
 
     println!("\nADAY STOKU (çekim işçileri aç mı?)");
     println!("  hazır, hiç denenmemiş     : {ready}");

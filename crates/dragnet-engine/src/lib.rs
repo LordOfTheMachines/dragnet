@@ -386,6 +386,21 @@ impl Engine {
                             cur.queries_sent - prev.queries_sent,
                         ),
                         (metric::DHT_RATE_LIMITED, cur.rate_limited - prev.rate_limited),
+                        (metric::DHT_RESPONSES, cur.responses_seen - prev.responses_seen),
+                        (
+                            metric::DHT_NODES_LEARNED,
+                            cur.nodes_learned - prev.nodes_learned,
+                        ),
+                        (
+                            metric::DHT_DROPPED,
+                            cur.dropped_channel_full - prev.dropped_channel_full,
+                        ),
+                        (
+                            metric::DHT_SOCK_ERR,
+                            (cur.send_errors + cur.recv_errors)
+                                - (prev.send_errors + prev.recv_errors),
+                        ),
+                        (metric::DHT_DUPLICATES, cur.duplicates - prev.duplicates),
                     ] {
                         let _ = store.add_metric(name, d as i64, now).await;
                     }

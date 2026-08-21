@@ -1738,6 +1738,23 @@ pub mod metric {
     pub const DHT_QUERIES_SENT: &str = "dht_queries_sent";
     /// Rate-limit yüzünden gönderilemeyen sorgu (bütçe darsa bu birikir).
     pub const DHT_RATE_LIMITED: &str = "dht_rate_limited";
+    /// Gelen KRPC yanıtı. `queries_sent`'e oranı "sorgularımız cevap alıyor mu"yu söyler;
+    /// düşükse giden paketler kayboluyordur (ağ/modem) ve düğüm kuyruğu kurur.
+    pub const DHT_RESPONSES: &str = "dht_responses";
+    /// Yanıtlardan öğrenilen yeni düğüm. Sıfıra yakınsa `crawl_loop` sorgulayacak düğüm
+    /// bulamaz ve giden sorgu bütçesi kullanılamaz — hasadın sessiz ölüm biçimi budur.
+    pub const DHT_NODES_LEARNED: &str = "dht_nodes_learned";
+    /// Tüketici yetişemediği için düşürülen infohash (kanal backpressure). Yüksekse
+    /// darboğaz DHT değil, sighting yazan SQLite yoludur.
+    pub const DHT_DROPPED: &str = "dht_dropped";
+    /// UDP soket hataları (gönderme + alma). Windows'ta ICMP "port unreachable"
+    /// bildirimleri soketi `WSAECONNRESET` ile patlatır; bu sayaç sıfırdan belirgin
+    /// biçimde farklıysa hasat sessizce yavaşlıyor demektir.
+    pub const DHT_SOCK_ERR: &str = "dht_sock_err";
+    /// Dedup filtresine takılan (daha önce görülmüş) infohash. `DHT_SAMPLES`'a oranı
+    /// keşif çeşitliliğini ölçer: %100'e yaklaşıyorsa aynı düğümlerden aynı örnekler
+    /// geliyordur ve örnekleme boşa dönüyordur.
+    pub const DHT_DUPLICATES: &str = "dht_duplicates";
 }
 
 /// Yarım kalmış bir triyaj işaretinin (probe_at set, sonuç yok) eskimiş sayılma süresi.
