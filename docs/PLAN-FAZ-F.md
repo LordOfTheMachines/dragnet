@@ -154,6 +154,54 @@ Küçük notlar (opsiyonel): model kimliğine bağlam şemasını gömmek (bizde
 API'de sabit-zamanlı token karşılaştırması + sorgu uzunluğu sınırı + IP başına hız limiti
 (varsayılan loopback bind olduğu için düşük öncelikli).
 
+### F9–F12 — Hasat/çekim hızı turu (2026-08-20/21): ne işe yaradı, ne yaramadı
+
+Kullanıcının asıl derdi **metadata çekim hızı** (bulunan torrent'in adının belirmesi).
+Bu turda yapılan her değişiklik ölçüldü. **Çürüyen hipotezleri tekrar denemeyin.**
+
+**İŞE YARAYANLAR (kalıcı):**
+1. **BEP-42 uyumlu düğüm kimliği** — kimlik `Id::random()` idi; modern istemciler
+   BEP-42 uyumsuz düğümleri yönlendirme tablosuna almaz, dolayısıyla pasif trafik
+   gelmez. KRPC yanıtlarındaki `ip` alanından dış adres öğrenilip kimlik ondan
+   türetiliyor. Ölçüm: gelen get_peers 5 → 5.428, announce 0 → 61, sorgu 20 → 62/dk.
+2. **Port düşme hatası** — ayar kaydedilince yeni çekirdek, eskisi ayaktayken
+   başlatılıyordu; 6881 dolu bulunup **efemer porta düşülüyordu** (kullanıcı ekranında
+   port 53237). Modemdeki yönlendirme işlevsiz kalıyordu. Artık eski çekirdek önce
+   durduruluyor.
+3. **Kimlik döndürme 10 dk → 60 dk** — her döndürmede ağ bizi yeni düğüm sanıyor,
+   tablolardaki girdimiz bayatlıyordu.
+4. **Bootstrap dayanıklılığı** — DNS kesildiğinde hasat SESSİZCE ölüyordu (BEP-51 0/sn,
+   gelen sorgu 0/dk). Gömülü yedek IP'ler + kuyruk boşalınca 60 sn'de bir yeniden
+   tohumlama eklendi.
+5. **Canlı-öncelikli kuyruk + triyaj (F10)** — metadata çekmeden önce ucuz DHT peer
+   sayımı; sıfır peer'li kayıt hemen siliniyor. Ölçüm: taze infohash'lerin **%71'i
+   sıfır peer**. Eşik `MIN_HEALTHY_PEERS`: 3 iken sağlıklı havuz çok daraldı ve işçiler
+   boşta kaldı (saatte 217 → 90); **1** doğru değer (triyaj zaten 0'ları siliyor) → 277.
+6. **Boru hattı disiplini (F11)** — bekleyen kuyruk 20.000'i aşınca soğuk BEP-51
+   örnekleri alınmıyor; deneme hakkı biten kayıt `unreachable` olarak saklanmıyor,
+   siliniyor. 2,35 milyonluk ölü yığın tek seferlik temizlendi (`reset_pending`).
+7. **Announce eden peer** artık peer ipucu olarak kaydediliyor (en kaliteli adres).
+
+**ÇÜRÜYEN HİPOTEZLER (tekrar denemeyin, ölçüm sonuçlarıyla):**
+- **Çoklu düğüm kimliği (F9)**: 4 kimlik → saatte 171 (tam bütçe) / 127 (bölüşülmüş
+  bütçe), tek kimlik ~255-325. Kod duruyor (`harvester_instances`, varsayılan 1) ama
+  ek portlar modemde yönlendirilmeden adil test edilemez.
+- **uTP yedek yolu (F12)**: 9.068 denemede 21 başarı (%0,2); ortalama çekim süresi
+  3,1 → 35,4 sn, isim üretimi saatte ~300 → 2. Varsayılan KAPALI (`DRAGNET_UTP=1`).
+- **Zaman aşımlarını kısaltmak**: bağlantı 3,5 → 1,8 sn + peer 8 → 5 sn + çekim 45 → 25
+  sn → saatte ~315'ten **37'ye** düştü (başarılı bağlantıların önemli kısmı 2-3 sn).
+- **Sıcak kayıtlarda kısa yeniden deneme** (6 saat → 20 dk): deneme hakkı dakikalar
+  içinde tükeniyor, taze adaylara yer kalmıyor (saatte 315 → 157).
+
+**ÖLÇÜM DİSİPLİNİ:** 7-8 dakikalık pencerelerde oynaklık çok yüksek (aynı kurulumda
+255 ile 325 arası ölçüldü). Karar için panodaki **"Son 1 saatte indekslenen"** ya da
+en az 30 dakikalık pencere kullanılmalı.
+
+**SIRADAKİ ADAYLAR (henüz denenmedi):** triyaj verimi (şu an ~80 ölçüm/dk, hasat
+~100/dk — triyaj darboğaz olabilir); `MIN_HEALTHY_PEERS` ve triyaj bütçesinin birlikte
+ayarlanması; peer başına deneme sayısını artırmak (ort. 2,5 peer/çekim); çekim
+işçilerinin boşta kalma oranını ölçmek.
+
 ### F7 — Zenginleştirme: "bu torrent gerçekte nedir?" (kullanıcı önerisi, 2026-08-19)
 
 Kategori ve başlık şu an **yalnız ada bakarak** tahmin ediliyor; tavan burada. Öneri: ad

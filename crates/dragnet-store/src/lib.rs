@@ -1576,7 +1576,11 @@ pub const HOT_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
 /// torrent metadata çekimine değer. Kullanıcı gözlemi: "hiç paylaşanı olmayan eski bir
 /// torrent'i istediğin kadar çağır, indiremezsin". Ölçüm de aynı yeri gösteriyordu:
 /// peer denemelerinin %97'si zaman aşımıydı.
-pub const MIN_HEALTHY_PEERS: i64 = 3;
+// ÖLÇÜM (2026-08-21): eşik 3 iken triyajdan geçen 12.997 kaydın yalnız 1.669'u kuyruğa
+// girebiliyordu; 1-2 peer'li ~2.900 kayıt kalıcı olarak dışarıda kalıyor ve çekim işçileri
+// boşta bekliyordu (isim üretimi saatte ~217 → ~90). Triyaj zaten SIFIR peer'lileri siliyor;
+// dolayısıyla "en az 1 peer" doğru eşik.
+pub const MIN_HEALTHY_PEERS: i64 = 1;
 /// "Sıcak" sayılma penceresi (sn): bu süre içinde pasif trafikte görülen infohash öncelikli.
 pub const HOT_WINDOW_SECS: i64 = 2 * 3600;
 

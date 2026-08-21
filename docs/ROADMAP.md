@@ -97,6 +97,14 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       sorgu anlama + kategori-farkındalı embedding (hit@5 %47→%74); bge-reranker-v2-m3 yeniden sıralayıcı (%79).
 - [x] Faz E (6): DXGI VRAM ölçümü + kapatmada serbest bırakma notu, donanıma göre otomatik kademe,
       Qwen3 kademesi elendi.
+- [x] Faz F (F8–F12): **hasat/çekim boru hattı turu** — BEP-42 düğüm kimliği, harvester port
+      düşme hatası, bootstrap dayanıklılığı (gömülü IP + yeniden tohumlama), kimlik döndürme
+      60 dk, canlı-öncelikli kuyruk + **triyaj** (metadata öncesi peer sayımı; taze
+      infohash'lerin %71'i sıfır peer), ölü kayıt silme (2,35M yığın temizlendi), giriş
+      kısma, announce peer ipucu, dosya yolları indekste + dosya ağacı, peer adres
+      politikası, depolama büyüme freni. Ölçüm: isim üretimi saatte ~135 → ~280-320.
+      **Çürüyen hipotezler** (ayrıntı `docs/PLAN-FAZ-F.md`): çoklu düğüm kimliği, uTP
+      yedek yolu, kısa zaman aşımları, sıcak kayıtlarda kısa yeniden deneme.
 - [x] Faz F (F4-2, F4-3): yazım düzeltme (indeks sözlüğü + eş-geçiş doğrulaması), kategori
       gözatma, kavram sözlüğü, tanınmayan tek kelime → boş; hit@5 %84→%90, MRR 0.82.
 - [ ] Faz F (F7 — kullanıcı önerisi): çevrim içi zenginleştirme (Wikidata öncelikli;
