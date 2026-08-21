@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 use dragnet_core::InfoHash;
 use dragnet_dht::{HarvesterConfig, StatsSnapshot};
 use dragnet_meta::{FetchConfig, MetadataFetcher};
-use dragnet_store::Store;
+use dragnet_store::{metric, Store};
 
 pub use dragnet_store::TorrentSummary;
 
@@ -141,8 +141,13 @@ impl Engine {
             } else {
                 config.harvester_port.saturating_add(i as u16)
             };
+            // Kimlik/düğüm önbelleği veritabanının yanında durur (her kimlik ayrı dosya).
+            // Kimliğin oturumlar arası KORUNMASI pasif hasadın birikmesi için şart.
+            let state_path = (!config.db_path.is_empty())
+                .then(|| std::path::PathBuf::from(format!("{}.dht{i}", config.db_path)));
             match dragnet_dht::spawn(HarvesterConfig {
                 port,
+                state_path,
                 // Giden sorgu bütçesi kimlikler ARASINDA BÖLÜŞÜLÜR: ölçümde her kimliğe
                 // tam bütçe verince (4 × 50/sn) toplam DHT trafiği metadata çekiminin
                 // peer aramalarıyla yarıştı ve isim üretimi saatte 325 → 171'e düştü.
@@ -163,6 +168,8 @@ impl Engine {
                 dragnet_dht::spawn(HarvesterConfig {
                     port: config.harvester_port,
                     max_queries_per_sec: config.harvester_max_queries_per_sec,
+                    state_path: (!config.db_path.is_empty())
+                        .then(|| std::path::PathBuf::from(format!("{}.dht0", config.db_path))),
                     ..Default::default()
                 })
                 .await?,
@@ -305,10 +312,14 @@ impl Engine {
                             let peers = fetcher
                                 .peers_of(ih, TRIAGE_TIMEOUT, TRIAGE_PEER_CAP)
                                 .await;
+                            // Olay olarak sayılır: ölü kayıt SİLİNDİĞİ için tablodaki
+                            // satırlara bakarak triyaj hızı ölçülemez (bkz. `metrics`).
+                            let _ = store.bump_metric(metric::TRIAGE_DONE, now_unix()).await;
                             if peers.is_empty() {
                                 // F11: peer'i olmayan torrent'in metadata'sı çekilemez;
                                 // saklamak kuyruğu ve diski zehirliyor → hemen sil.
                                 // Gerçekten canlanırsa DHT'de yeniden görülür.
+                                let _ = store.bump_metric(metric::TRIAGE_DEAD, now_unix()).await;
                                 let _ = store.delete_pending(ih).await;
                             } else {
                                 hints
@@ -338,6 +349,47 @@ impl Engine {
                         Err(e) => warn!(error = %e, "ölü kayıt temizliği başarısız"),
                         _ => {}
                     }
+                }
+            }));
+        }
+
+        // HARVESTER SAYAÇLARINI KALICI KIL: bunlar süreç-içi atomik sayaçlar, süreç
+        // kapanınca kaybolur ve teşhis araçlarından görünmez. "Hasat neden düştü?"
+        // sorusunu ancak bunlar cevaplar — aktif örnekleme mi durdu, pasif trafik mi
+        // gelmiyor? Periyodik olarak FARKLARI `metrics` tablosuna yazılır.
+        {
+            let store = store.clone();
+            let stats: Vec<Arc<dragnet_dht::Stats>> = harvester_stats.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(60));
+                ticker.tick().await;
+                let snap = |s: &[Arc<dragnet_dht::Stats>]| {
+                    s.iter()
+                        .map(|x| x.snapshot())
+                        .reduce(|a, b| a.merge(b))
+                        .unwrap_or_else(|| dragnet_dht::Stats::default().snapshot())
+                };
+                let mut prev = snap(&stats);
+                loop {
+                    ticker.tick().await;
+                    let cur = snap(&stats);
+                    let now = now_unix();
+                    for (name, d) in [
+                        (metric::DHT_SAMPLES, cur.samples_seen - prev.samples_seen),
+                        (metric::DHT_ANNOUNCE, cur.announce_seen - prev.announce_seen),
+                        (
+                            metric::DHT_GET_PEERS,
+                            cur.get_peers_seen - prev.get_peers_seen,
+                        ),
+                        (
+                            metric::DHT_QUERIES_SENT,
+                            cur.queries_sent - prev.queries_sent,
+                        ),
+                        (metric::DHT_RATE_LIMITED, cur.rate_limited - prev.rate_limited),
+                    ] {
+                        let _ = store.add_metric(name, d as i64, now).await;
+                    }
+                    prev = cur;
                 }
             }));
         }
@@ -574,10 +626,21 @@ async fn fetch_and_store(
     store: &Store,
     fetcher: &MetadataFetcher,
 ) {
+    let hinted = !hints.is_empty();
+    let started = Instant::now();
+    let _ = store.bump_metric(metric::FETCH_ATTEMPT, now_unix()).await;
     match fetcher.fetch_with_hints(infohash, hints).await {
         Ok(record) => {
             let files = record.files.len();
             let name = record.name.clone();
+            let _ = store.bump_metric(metric::FETCH_OK, now_unix()).await;
+            // İpucu adresleri, DHT araması devreye girmeden (HINT_GRACE) sonuç verdiyse
+            // bu çekim ağa hiç arama maliyeti ödetmedi — F13'ün asıl kazancı budur.
+            if hinted && started.elapsed() < dragnet_meta::HINT_GRACE {
+                let _ = store
+                    .bump_metric(metric::FETCH_OK_HINTED, now_unix())
+                    .await;
+            }
             match store.upsert_torrent(&record).await {
                 Ok(()) => info!(infohash = %infohash, name = %name, files, "metadata indekslendi"),
                 Err(e) => error!(error = %e, "torrent yazılamadı"),

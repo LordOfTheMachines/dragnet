@@ -75,7 +75,20 @@ pub struct HarvesterConfig {
     pub followups_per_sample: usize,
     /// Sorgulanmayı bekleyen düğüm kuyruğunun azami boyutu.
     pub node_queue_capacity: usize,
+    /// Düğüm kimliğinin ve öğrenilen düğümlerin saklanacağı dosya (`None` = kalıcılık yok).
+    ///
+    /// Neden: pasif hasat (gelen `announce_peer`/`get_peers`) ancak ağdaki yönlendirme
+    /// tablolarında yer edinince gelir ve bu birikim saatler alır. Kimlik her açılışta
+    /// yeniden üretilirse ağ bizi HER SEFERİNDE yeni bir düğüm sanar ve birikim sıfırlanır
+    /// — aynı gerekçeyle kimlik döndürme aralığı da 10 dk'dan 60 dk'ya çıkarılmıştı.
+    /// Dosyada ayrıca son bilinen düğümler tutulur; açılışta DNS'i beklemeden ağa dönülür.
+    pub state_path: Option<std::path::PathBuf>,
 }
+
+/// Durum dosyasına yazılacak azami düğüm sayısı (6 bayt/düğüm → ~6 KB).
+const STATE_NODES: usize = 1000;
+/// Durum dosyasının kaydedilme aralığı.
+const STATE_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 
 impl Default for HarvesterConfig {
     fn default() -> Self {
@@ -90,18 +103,71 @@ impl Default for HarvesterConfig {
             max_queries_per_sec: 50.0,
             crawl_tick: Duration::from_millis(100),
             crawl_batch: 4,
-            // Kimlik döndürme YAVAŞ olmalı: her döndürmede (BEP-42 rastgele bileşeni değişir)
-            // ağ bizi YENİ bir düğüm sanar ve tablolarındaki girdimiz bayatlar; pasif trafik
-            // (announce/get_peers) ise ancak tablolarda kalıcı yer edinince gelir. 10 dakika
-            // "yatay tarama" için iyiydi ama pasif hasadı sürekli sıfırlıyordu.
-            id_rotation: Duration::from_secs(3600),
+            // KİMLİK DÖNDÜRME VARSAYILAN OLARAK KAPALI (0). Gerekçe: her döndürmede
+            // (BEP-42 rastgele bileşeni değişir) ağ bizi YENİ bir düğüm sanar ve
+            // tablolarındaki girdimiz bayatlar; pasif trafik (announce/get_peers) ise ancak
+            // tablolarda kalıcı yer edinince gelir. Ölçümle bir kez 10 dk → 60 dk yapılmış
+            // ve hasat iyileşmişti; aynı gerekçe sonuna kadar götürülünce döndürmenin
+            // kendisi gereksiz kalıyor: "kimlik uzayında dolaşma" faydası ZATEN sağlanıyor,
+            // çünkü `crawl_loop` her sorguda hedefi (`target`) rastgele seçiyor — düğüm
+            // kimliğini de döndürmek örnekleme çeşitliliğine ek bir şey katmıyor, yalnız
+            // yerleşikliği bozuyor. Deneme yapmak isteyen bu alanı sıfırdan farklı verir.
+            id_rotation: Duration::ZERO,
             dedup_capacity: 1 << 18,
             // Her BEP-51 örneğinden sonra daha çok doğrudan get_peers: peer ipuçlu (yani
             // CANLI olduğu bilinen) aday üretmenin en ucuz yolu. Ölçüm: kuyruğun %98'i
             // soğuk örnekleme, çekim başarısı ~%2; ipuçlu adaylarda peer zaten bilinir.
             followups_per_sample: 8,
             node_queue_capacity: 8192,
+            state_path: None,
         }
+    }
+}
+
+/// Kalıcı hasatçı durumu: düğüm kimliği + son bilinen düğümler.
+///
+/// Biçim (küçük ve elle okunabilir olması gerekmiyor): `DGN1` sihirli sözcüğü,
+/// 20 bayt kimlik, ardından 6 baytlık compact IPv4 düğüm kayıtları.
+mod state {
+    use super::{ID_LEN, STATE_NODES};
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::path::Path;
+
+    const MAGIC: &[u8; 4] = b"DGN1";
+
+    /// Durumu okur; dosya yoksa/bozuksa `None` (çağıran sıfırdan başlar).
+    pub fn load(path: &Path) -> Option<([u8; ID_LEN], Vec<SocketAddrV4>)> {
+        let buf = std::fs::read(path).ok()?;
+        if buf.len() < MAGIC.len() + ID_LEN || &buf[..4] != MAGIC {
+            return None;
+        }
+        let id: [u8; ID_LEN] = buf[4..4 + ID_LEN].try_into().ok()?;
+        let nodes = buf[4 + ID_LEN..]
+            .chunks_exact(6)
+            .map(|c| {
+                SocketAddrV4::new(
+                    Ipv4Addr::new(c[0], c[1], c[2], c[3]),
+                    u16::from_be_bytes([c[4], c[5]]),
+                )
+            })
+            .filter(|a| a.port() != 0 && !a.ip().is_unspecified())
+            .collect();
+        Some((id, nodes))
+    }
+
+    /// Durumu atomik yazar (önce geçici dosya, sonra yerine taşı) — yarıda kesilirse
+    /// eski durum bozulmadan kalır.
+    pub fn save(path: &Path, id: &[u8; ID_LEN], nodes: &[SocketAddrV4]) -> std::io::Result<()> {
+        let mut buf = Vec::with_capacity(4 + ID_LEN + nodes.len().min(STATE_NODES) * 6);
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(id);
+        for n in nodes.iter().take(STATE_NODES) {
+            buf.extend_from_slice(&n.ip().octets());
+            buf.extend_from_slice(&n.port().to_be_bytes());
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &buf)?;
+        std::fs::rename(&tmp, path)
     }
 }
 
@@ -325,9 +391,21 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     let (reply_tx, reply_rx) = mpsc::channel::<(Vec<u8>, SocketAddrV4)>(512);
     let stats = Arc::new(Stats::default());
 
+    // Kalıcı durum: önceki oturumun kimliği ve son bilinen düğümleri. Kimliğin
+    // korunması pasif hasat için kritiktir — ağın yönlendirme tablolarındaki yerimiz
+    // ancak kimlik sabit kalırsa birikir.
+    let persisted = config.state_path.as_deref().and_then(state::load);
+    let (initial_id, cached_nodes) = match persisted {
+        Some((id, nodes)) => {
+            info!(nodes = nodes.len(), "önceki DHT kimliği ve düğümler geri yüklendi");
+            (id, nodes)
+        }
+        None => (*Id::random().as_bytes(), Vec::new()),
+    };
+
     let shared = Arc::new(Shared {
         socket,
-        our_id: Mutex::new(*Id::random().as_bytes()),
+        our_id: Mutex::new(initial_id),
         // BEP-42 (aşağıda): dış IP öğrenilince kimlik ondan türetilir.
         public_ip: Mutex::new(None),
         nodes: Mutex::new(VecDeque::with_capacity(config.node_queue_capacity)),
@@ -344,17 +422,29 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         followups_per_sample: config.followups_per_sample,
     });
 
-    // Kuyruğu bootstrap düğümleriyle doldur.
+    // Önce önbellekteki düğümler (DNS beklemeden ağa dön), sonra bootstrap.
+    if !cached_nodes.is_empty() {
+        shared.push_nodes(&cached_nodes);
+    }
     seed_bootstrap(&shared).await;
 
-    let tasks = vec![
+    let mut tasks = vec![
         tokio::spawn(recv_loop(Arc::clone(&shared))),
         tokio::spawn(reply_loop(Arc::clone(&shared), reply_rx)),
         tokio::spawn(crawl_loop(Arc::clone(&shared), config.clone())),
-        tokio::spawn(rotate_loop(Arc::clone(&shared), config.id_rotation)),
         tokio::spawn(flush_repeats_loop(Arc::clone(&shared))),
         tokio::spawn(rebootstrap_loop(Arc::clone(&shared))),
     ];
+    // Kimlik döndürme yalnız açıkça istenirse (0 = kapalı; varsayılan kapalı).
+    if !config.id_rotation.is_zero() {
+        tasks.push(tokio::spawn(rotate_loop(
+            Arc::clone(&shared),
+            config.id_rotation,
+        )));
+    }
+    if let Some(path) = config.state_path.clone() {
+        tasks.push(tokio::spawn(save_state_loop(Arc::clone(&shared), path)));
+    }
 
     Ok(Harvester {
         infohashes: rx,
@@ -522,9 +612,19 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                     if *cur != Some(ip) {
                         *cur = Some(ip);
                         drop(cur);
-                        let new_id = *Id::from_ipv4(ip).as_bytes();
-                        *shared.our_id.lock().unwrap() = new_id;
-                        info!(%ip, "dış adres öğrenildi → BEP-42 uyumlu düğüm kimliği kuruldu");
+                        // Geri yüklenen kimlik bu IP için HÂLÂ geçerliyse KORUNUR: ağdaki
+                        // yönlendirme tablolarında biriken yerimiz ancak kimlik sabit
+                        // kalırsa yaşar. Yalnız geçersizse (ör. IP değişmiş) yeniden türetilir.
+                        let mut id = shared.our_id.lock().unwrap();
+                        let already_valid = Id::from_bytes(*id)
+                            .map(|cur| cur.is_valid_for_ip(ip))
+                            .unwrap_or(false);
+                        if already_valid {
+                            info!(%ip, "dış adres öğrenildi; mevcut kimlik BEP-42 uyumlu, korunuyor");
+                        } else {
+                            *id = *Id::from_ipv4(ip).as_bytes();
+                            info!(%ip, "dış adres öğrenildi → BEP-42 uyumlu düğüm kimliği kuruldu");
+                        }
                     }
                 }
             }
@@ -720,6 +820,23 @@ async fn crawl_loop(shared: Arc<Shared>, config: HarvesterConfig) {
     }
 }
 
+/// Kimliği ve öğrenilen düğümleri periyodik olarak diske yazar.
+async fn save_state_loop(shared: Arc<Shared>, path: std::path::PathBuf) {
+    let mut ticker = tokio::time::interval(STATE_SAVE_INTERVAL);
+    ticker.tick().await; // ilk anlık tık: hemen yazma.
+    loop {
+        ticker.tick().await;
+        let id = shared.our_id();
+        let nodes: Vec<SocketAddrV4> = {
+            let q = shared.nodes.lock().unwrap();
+            q.iter().take(STATE_NODES).copied().collect()
+        };
+        if let Err(e) = state::save(&path, &id, &nodes) {
+            debug!(error = %e, "DHT durumu yazılamadı");
+        }
+    }
+}
+
 /// Düğüm kimliğini periyodik döndürür (kimlik uzayında konum değiştirir).
 async fn rotate_loop(shared: Arc<Shared>, interval: Duration) {
     let mut ticker = tokio::time::interval(interval);
@@ -775,6 +892,46 @@ mod tests {
         assert!(c.max_queries_per_sec > 0.0);
         assert!(c.channel_capacity > 0);
         assert!(c.crawl_batch > 0);
+    }
+
+    /// Kimlik ve düğüm önbelleği diskte gidip gelmeli. Bu sessizce bozulursa hasat
+    /// yavaşlar ama hiçbir hata görünmez — bu yüzden test edilir.
+    #[test]
+    fn state_roundtrips_id_and_nodes() {
+        let dir = std::env::temp_dir().join("dragnet-dht-state-test");
+        std::fs::create_dir_all(&dir).expect("dizin");
+        let path = dir.join("state.bin");
+        let id = [0x5au8; ID_LEN];
+        let nodes = vec![
+            "1.2.3.4:6881".parse::<SocketAddrV4>().unwrap(),
+            "5.6.7.8:1337".parse::<SocketAddrV4>().unwrap(),
+        ];
+        state::save(&path, &id, &nodes).expect("yazılmalı");
+        let (got_id, got_nodes) = state::load(&path).expect("okunmalı");
+        assert_eq!(got_id, id);
+        assert_eq!(got_nodes, nodes);
+
+        // Bozuk/yabancı dosya sessizce yok sayılır (sıfırdan başlanır), çökmez.
+        std::fs::write(&path, b"bozuk").expect("yaz");
+        assert!(state::load(&path).is_none());
+        assert!(state::load(&dir.join("yok.bin")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Geri yüklenen kimlik, dış IP için hâlâ BEP-42 uyumluysa korunmalıdır — pasif
+    /// hasadın birikimi buna bağlı.
+    #[test]
+    fn bep42_id_stays_valid_across_restart() {
+        let ip = Ipv4Addr::new(159, 146, 35, 97);
+        let id = *Id::from_ipv4(ip).as_bytes();
+        assert!(
+            Id::from_bytes(id).unwrap().is_valid_for_ip(ip),
+            "türetilen kimlik kendi IP'si için geçerli olmalı"
+        );
+        // Başka bir IP'ye taşınırsa geçersizleşir → yeniden türetilmesi beklenir.
+        assert!(!Id::from_bytes(id)
+            .unwrap()
+            .is_valid_for_ip(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
     #[tokio::test]

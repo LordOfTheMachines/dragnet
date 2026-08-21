@@ -211,6 +211,49 @@ const SPELL_TERMS: i64 = 300_000;
 /// WAL dosyası üst sınırı (bayt): checkpoint sonrası bu boyuta kırpılır.
 const WAL_SIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Boru hattının **sıcak** kuyruk sorguları — saniyede birkaç kez çalışırlar, dolayısıyla
+/// sorgu planları doğrudan çekim hızını belirler.
+///
+/// Burada `const` olarak duruyorlar ki teşhis aracı (`--example rate`) planlarını ÇALIŞAN
+/// sorgudan çıkarabilsin. Metinler bir kez teşhis aracına elle kopyalanmıştı ve kopya
+/// bayatlayınca araç, düzeltilmiş sorgular için hâlâ "TEMP B-TREE" raporladı.
+pub mod queries {
+    /// Triyaj adayları: henüz ölçülmemiş bekleyen kayıtlar, en taze önce.
+    /// Sıra `idx_triage(probe_at, last_seen DESC)` ile birebir örtüşür (sıralama yok).
+    pub const NEXT_TO_TRIAGE: &str = "SELECT infohash FROM torrents
+              WHERE metadata_status = 'pending' AND probe_at = 0
+              ORDER BY last_seen DESC
+              LIMIT ?1";
+
+    /// Çekim adayları (canlılık kanıtı olanlar). Sıra
+    /// `idx_fetch_live(probe_peers DESC, hint_peers DESC, seen_count DESC)` ile örtüşür.
+    ///
+    /// `INDEXED BY` neden gerekli: SQLite kendi maliyet tahminiyle `idx_status`'u seçip
+    /// bekleyen yığının TAMAMINI okuyor ve `USE TEMP B-TREE FOR ORDER BY` ile sıralıyordu
+    /// (ANALYZE sonrası da değişmedi). Oysa canlı adaylar tam olarak bu indeksin BAŞINDA
+    /// duruyor (probe_peers DESC), dolayısıyla indeks taraması `LIMIT` kadar satır okuyup
+    /// duruyor ve sıralama tamamen kalkıyor. İndeks migrasyonda zorunlu oluşturulur.
+    pub const NEXT_TO_FETCH_LIVE: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_live
+              WHERE metadata_status = 'pending'
+                AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
+                AND (probe_peers >= ?5 OR hint_peers >= ?5
+                     OR (probe_peers < 0 AND hint_peers > 0)
+                     OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > ?3))
+              ORDER BY probe_peers DESC, hint_peers DESC, seen_count DESC
+              LIMIT ?4";
+
+    /// Kodlaması bozuk çıkmış adların bir kerelik yeniden çekimi (küçük, sınırlı kol).
+    /// `ORDER BY` bilerek yok: kota zaten birkaç satır ve sıralamak, çekilmiş kayıtların
+    /// tamamını okuyup geçici b-tree kurmak demekti (her zamanlayıcı turunda).
+    pub const NEXT_TO_FETCH_GARBLED: &str = "SELECT infohash FROM torrents
+                  WHERE metadata_status = 'fetched' AND garbled = 1 AND fetch_attempts = 0
+                  LIMIT ?1";
+
+    /// Giriş kısma kararı için bekleyen sayısı (kapsayan indeks).
+    pub const COUNT_PENDING: &str =
+        "SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'pending'";
+}
+
 impl Store {
     /// Bir dosya yolundan depo açar (yoksa oluşturur) ve şemayı hazırlar.
     pub async fn open(path: &str) -> Result<Self, StoreError> {
@@ -405,11 +448,31 @@ impl Store {
         // F13: `next_to_fetch` canlı kolunun ORDER BY'ıyla birebir örtüşen kısmi indeks.
         // Olmadan plan `USE TEMP B-TREE FOR ORDER BY` çıkıyor ve zamanlayıcı her turda
         // (saniyede birkaç kez) tüm bekleyen yığını sıralıyordu.
-        let _ = sqlx::query(
+        // Hata YUTULMAZ: sorgu `INDEXED BY idx_fetch_live` diyor, indeks yoksa çekim
+        // kuyruğu tamamen çalışmaz. Sessiz yavaşlık yerine açık hata isteriz.
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_fetch_live ON torrents(probe_peers DESC, hint_peers DESC, seen_count DESC) WHERE metadata_status='pending';",
         )
         .execute(&self.pool)
-        .await;
+        .await?;
+        // F13 — BORU HATTI METRİKLERİ (saatlik kova).
+        // Neden gerekli: boru hattının iki aşaması işini bitirince kaydı SİLİYOR (triyajda
+        // sıfır peer → `delete_pending`; deneme hakkı bitince → `mark_fetch_failed`).
+        // Dolayısıyla "kaç triyaj yapıldı / kaç deneme yapıldı" sorusu tablodaki satırlara
+        // bakarak CEVAPLANAMAZ — silinenler görünmez ve hız olduğundan düşük raporlanır
+        // (ölçümde triyaj 11.000/saat iken satır sayımı 1.317/saat gösteriyordu). Bu tablo
+        // olayları sayar, dolayısıyla silinenler de sayılır.
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS metrics (
+                name   TEXT NOT NULL,
+                bucket INTEGER NOT NULL,
+                value  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (name, bucket)
+            );"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         // Tek seferlik onarım (şema sürümü 1): eski `unreachable` kayıtları Faz E öncesi
         // boru hattının (kısa zaman aşımı, tek deneme) kurbanıydı → 1 denemeyle geri kuyruğa.
         let ver: i64 = sqlx::query("PRAGMA user_version")
@@ -616,19 +679,17 @@ impl Store {
 
     /// Çekim zamanlayıcısı için sıradaki adaylar (öncelikli kuyruk): `pending` olup
     /// hiç denenmemiş ya da soğuma süresi dolmuş (en fazla `MAX_FETCH_ATTEMPTS` deneme)
-    /// kayıtlar; **sıcak** (yakın zamanda pasif trafikte görülen) > **popüler**
-    /// (`seen_count`) > **taze** (`last_seen`). Seçilenlerin `last_attempt`'ı hemen
-    /// `now` yapılır ki eşzamanlı çağrılar aynı adayları almasın.
+    /// **ve canlılık kanıtı taşıyan** kayıtlar. Öncelik: ölçülmüş peer sayısı
+    /// (`probe_peers`) > peer ipucu (`hint_peers`) > popülerlik (`seen_count`).
+    /// Seçilenlerin `last_attempt`'ı hemen `now` yapılır ki eşzamanlı çağrılar aynı
+    /// adayları almasın.
     pub async fn next_to_fetch(&self, limit: i64, now: i64) -> Result<Vec<InfoHash>, StoreError> {
-        let cooldown = now - FETCH_RETRY_COOLDOWN_SECS;
         let hot_cooldown = now - HOT_RETRY_COOLDOWN_SECS;
         let hot_window = now - HOT_WINDOW_SECS;
-        // ÖNCE CANLI ADAYLAR (ölçümle eklendi): kuyruğun %98'i BEP-51 örneklemesinden
-        // gelen soğuk kayıt ve bunların ~%90'ında DHT'de hiç peer bulunamıyor
-        // (385 denemenin 347'si "peer yok", ortalama 0,5 peer/çekim). Her deneme bir
-        // işçiyi ~3 sn meşgul ettiği için soğuk yığın, canlı adayların önünü tıkıyordu.
-        // Artık peer ipucu olan (peer'i BİLİNEN) ve sıcak (son 2 saatte gerçek trafikte
-        // görülen) kayıtlar öncelikli çekilir; soğuklar yalnız kalan kotayı doldurur.
+        // YALNIZ CANLI ADAYLAR: kuyruğun büyük kısmı BEP-51 örneklemesinden gelen soğuk
+        // kayıttır ve bunların çoğunda DHT'de hiç peer bulunmaz. Bu yüzden çekime yalnız
+        // canlılık kanıtı olanlar girer: triyajda peer ÖLÇÜLMÜŞ (`probe_peers`), peer
+        // ipucu gelmiş (`hint_peers`) ya da son 2 saatte gerçek trafikte görülmüş (`hot_seen`).
         let warm_limit = limit.max(0);
         // ÖLÇÜM (F13): eski sıra `probe_peers DESC, hint_peers DESC, hot_seen DESC,
         // seen_count DESC` idi ve hiçbir indeksle eşleşmiyordu (TEMP B-TREE). `hot_seen`
@@ -636,23 +697,14 @@ impl Store {
         // sinyalleri ve `hot_seen` WHERE'de koşul olarak duruyor — böylece kalan sıra
         // `idx_fetch_live(probe_peers DESC, hint_peers DESC, seen_count DESC)` ile birebir
         // örtüşür ve sıralama maliyeti kalkar (LIMIT erken çıkar).
-        let mut rows = sqlx::query(
-            "SELECT infohash FROM torrents
-              WHERE metadata_status = 'pending'
-                AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
-                AND (probe_peers >= ?5 OR hint_peers >= ?5
-                     OR (probe_peers < 0 AND hint_peers > 0)
-                     OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > ?3))
-              ORDER BY probe_peers DESC, hint_peers DESC, seen_count DESC
-              LIMIT ?4",
-        )
-        .bind(MAX_FETCH_ATTEMPTS)
-        .bind(hot_cooldown)
-        .bind(hot_window)
-        .bind(warm_limit)
-        .bind(MIN_HEALTHY_PEERS)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut rows = sqlx::query(queries::NEXT_TO_FETCH_LIVE)
+            .bind(MAX_FETCH_ATTEMPTS)
+            .bind(hot_cooldown)
+            .bind(hot_window)
+            .bind(warm_limit)
+            .bind(MIN_HEALTHY_PEERS)
+            .fetch_all(&self.pool)
+            .await?;
         // TRİYAJ EDİLMEMİŞ ("soğuk") KAYITLAR ARTIK ÇEKİLMİYOR (F13, ölçümle).
         // Eskiden canlı aday bulunamayınca kota tamamen soğuklarla doldurulurdu
         // ("işçiyi boşta bırakma"). Ölçüm bunun zararlı olduğunu gösterdi: saatte 6.181
@@ -666,18 +718,12 @@ impl Store {
         // devrede (dragnet-meta `text::get_text`), dolayısıyla bunları bir kez yeniden
         // çekmek gerçekten düzeltir — küçük ve sınırlı bir kol olarak kalır.
         if (rows.len() as i64) < limit {
-            let more = sqlx::query(
-                "SELECT infohash FROM torrents
-                  WHERE metadata_status = 'fetched' AND garbled = 1 AND fetch_attempts = 0
-                  ORDER BY seen_count DESC
-                  LIMIT ?1",
-            )
-            .bind((limit - rows.len() as i64).min(GARBLED_REFETCH_CAP))
-            .fetch_all(&self.pool)
-            .await?;
+            let more = sqlx::query(queries::NEXT_TO_FETCH_GARBLED)
+                .bind((limit - rows.len() as i64).min(GARBLED_REFETCH_CAP))
+                .fetch_all(&self.pool)
+                .await?;
             rows.extend(more);
         }
-        let _ = cooldown;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let hex: String = r.get("infohash");
@@ -733,10 +779,9 @@ impl Store {
 
     /// Bekleyen (adsız) kayıt sayısı — giriş hızını kapasiteye göre kısmak için (F11).
     pub async fn count_pending(&self) -> Result<i64, StoreError> {
-        let row =
-            sqlx::query("SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'pending'")
-                .fetch_one(&self.pool)
-                .await?;
+        let row = sqlx::query(queries::COUNT_PENDING)
+            .fetch_one(&self.pool)
+            .await?;
         Ok(row.get::<i64, _>("n"))
     }
 
@@ -1149,19 +1194,12 @@ impl Store {
             .await
     }
 
-    /// Metadata çekilemeyen bir infohash'i `unreachable` işaretler (yalnız `pending` ise).
-    /// Böylece gelecekte tekrar tekrar denenmez.
-    pub async fn mark_unreachable(&self, infohash: InfoHash) -> Result<(), StoreError> {
-        let hex = infohash.to_hex();
-        sqlx::query(
-            "UPDATE torrents SET metadata_status = 'unreachable' \
-             WHERE infohash = ?1 AND metadata_status = 'pending'",
-        )
-        .bind(&hex)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
+    // NOT: `mark_unreachable` kaldırıldı (F13 temizliği). F11'de "deneme hakkı biten kayıt
+    // `unreachable` olarak SAKLANMAZ, SİLİNİR" kararı alınınca öksüz kalmıştı; hiçbir
+    // çağıranı yoktu ama duruşu hâlâ yürürlükteymiş gibi görünüyordu. Çekim başarısızlığı
+    // `mark_fetch_failed`, triyajda ölü çıkan kayıt `delete_pending` ile ele alınır.
+    // `unreachable` statüsü yalnız ESKİ veritabanlarında kalan satırlar için okunur
+    // (sayaçlar ve `purge_dead` onları temizler).
 
     /// Metadata'sı çekilmiş (aranabilir) torrent sayısı.
     /// FTS sözlüğünden yazım düzeltme dizini kurar (F4-2). Yalnız harf içeren, en az
@@ -1196,15 +1234,10 @@ impl Store {
         // Yalnız `last_seen DESC` bırakıldı: `idx_triage(probe_at, last_seen DESC)` bunu
         // tam karşılar, sıralama tamamen kalkar. Önceliği kaybetmiyoruz — hint'li ve sıcak
         // kayıtlar triyajı BEKLEMEDEN çekim kuyruğunun canlı koluna zaten giriyor.
-        let rows = sqlx::query(
-            "SELECT infohash FROM torrents
-              WHERE metadata_status = 'pending' AND probe_at = 0
-              ORDER BY last_seen DESC
-              LIMIT ?1",
-        )
-        .bind(limit.max(0))
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(queries::NEXT_TO_TRIAGE)
+            .bind(limit.max(0))
+            .fetch_all(&self.pool)
+            .await?;
         let out: Vec<InfoHash> = rows
             .into_iter()
             .filter_map(|r| InfoHash::from_hex(&r.get::<String, _>("infohash")))
@@ -1221,6 +1254,43 @@ impl Store {
             q.execute(&self.pool).await?;
         }
         Ok(out)
+    }
+
+    /// Bir boru hattı olayını sayar (saatlik kova). Silinen kayıtlar yüzünden satır
+    /// sayımıyla ölçülemeyen aşamalar için — bkz. `metrics` tablosu açıklaması.
+    pub async fn bump_metric(&self, name: &str, now: i64) -> Result<(), StoreError> {
+        self.add_metric(name, 1, now).await
+    }
+
+    /// [`Store::bump_metric`] — birden çok olayı tek seferde ekler. Süreç-içi atomik
+    /// sayaçların (ör. harvester) periyodik farkını kaydetmek için.
+    pub async fn add_metric(&self, name: &str, n: i64, now: i64) -> Result<(), StoreError> {
+        if n <= 0 {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO metrics (name, bucket, value) VALUES (?1, ?2, ?3)
+               ON CONFLICT(name, bucket) DO UPDATE SET value = value + ?3",
+        )
+        .bind(name)
+        .bind((now / 3600) * 3600)
+        .bind(n)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Son `secs` saniyedeki olay sayısı (kova çözünürlüğü 1 saat, dolayısıyla
+    /// `secs` saat katı verilmelidir).
+    pub async fn metric_since(&self, name: &str, now: i64, secs: i64) -> Result<i64, StoreError> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(value), 0) AS n FROM metrics WHERE name = ?1 AND bucket > ?2",
+        )
+        .bind(name)
+        .bind(((now - secs.max(0)) / 3600) * 3600 - 1)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("n"))
     }
 
     /// Triyaj sonucunu yazar (ölçülen canlı peer sayısı).
@@ -1640,6 +1710,36 @@ pub const HOT_WINDOW_SECS: i64 = 2 * 3600;
 /// azami yer. Kodlama tespiti devreye girdikten sonra bunlar gerçekten düzelir, ama
 /// kuyruğun tamamını kaplamamalı — taze adaylar önceliklidir.
 const GARBLED_REFETCH_CAP: i64 = 2;
+/// Boru hattı metrik adları (`metrics` tablosu). Aşamaların gerçek hızı bunlardan okunur;
+/// tablo satırlarını saymak yanıltır, çünkü ölü kayıtlar silinir.
+pub mod metric {
+    /// Triyaj tamamlandı (sonuç ne olursa olsun).
+    pub const TRIAGE_DONE: &str = "triage_done";
+    /// Triyajda peer bulunamadı → kayıt silindi.
+    pub const TRIAGE_DEAD: &str = "triage_dead";
+    /// Bir metadata çekim denemesi tamamlandı.
+    pub const FETCH_ATTEMPT: &str = "fetch_attempt";
+    /// Çekim başarılı (ad indekslendi).
+    pub const FETCH_OK: &str = "fetch_ok";
+    /// Çekim, DHT araması hiç yapılmadan yalnız ipucu adresleriyle başarıldı (F13 kazancı).
+    pub const FETCH_OK_HINTED: &str = "fetch_ok_hinted";
+
+    // --- Harvester (dragnet-dht) sayaçlarının periyodik farkı ---
+    // Bunlar süreç-içi atomik sayaçlardır; süreç kapanınca kaybolurlar ve teşhis
+    // araçlarından görünmezler. "Hasat neden düştü?" sorusu ancak bunlarla cevaplanır:
+    // aktif örnekleme mi durdu (SAMPLES), yoksa pasif trafik mi gelmiyor (ANNOUNCE/GET_PEERS)?
+    /// BEP-51 `sample_infohashes` yanıtlarından gelen infohash örneği sayısı (aktif hasat).
+    pub const DHT_SAMPLES: &str = "dht_samples";
+    /// Bize gelen `announce_peer` sorgusu (pasif hasadın EN KALİTELİ kaynağı: peer canlı).
+    pub const DHT_ANNOUNCE: &str = "dht_announce";
+    /// Bize gelen `get_peers` sorgusu (pasif: "birileri şu anda bunu arıyor").
+    pub const DHT_GET_PEERS: &str = "dht_get_peers";
+    /// Gönderdiğimiz DHT sorgusu (giden bütçenin gerçekte ne kadarı kullanılıyor).
+    pub const DHT_QUERIES_SENT: &str = "dht_queries_sent";
+    /// Rate-limit yüzünden gönderilemeyen sorgu (bütçe darsa bu birikir).
+    pub const DHT_RATE_LIMITED: &str = "dht_rate_limited";
+}
+
 /// Yarım kalmış bir triyaj işaretinin (probe_at set, sonuç yok) eskimiş sayılma süresi.
 /// Bu süreden eski işaretler temizlikte sıfırlanır ve kayıt yeniden ölçülebilir olur.
 const STALE_PROBE_SECS: i64 = 3600;

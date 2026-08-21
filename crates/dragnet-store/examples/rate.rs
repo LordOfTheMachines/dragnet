@@ -26,18 +26,21 @@ async fn main() {
     };
 
     let discovered = n(format!("SELECT COUNT(*) FROM torrents WHERE first_seen > {since}")).await;
-    let probed = n(format!(
-        "SELECT COUNT(*) FROM torrents WHERE probe_at > {since}"
-    ))
-    .await;
-    let attempted = n(format!(
-        "SELECT COUNT(*) FROM torrents WHERE last_attempt > {since}"
-    ))
-    .await;
-    let succeeded = n(format!(
-        "SELECT COUNT(*) FROM torrents WHERE fetched_at > {since}"
-    ))
-    .await;
+    // ÖNEMLİ: triyaj ve çekim aşamaları işini bitirince kaydı SİLİYOR (sıfır peer →
+    // `delete_pending`, deneme hakkı bitti → `mark_fetch_failed`). Bu yüzden hızlarını
+    // tablodaki satırları sayarak ölçmek YANILTIR — silinenler görünmez. Ölçümde tam
+    // olarak bu tuzağa düşüldü: satır sayımı triyajı 1.317/saat gösterirken gerçek hız
+    // (backlog düşüşünden) ~11.000/saat idi. Bu yüzden olay sayaçları (`metrics`) okunur.
+    let win_secs = win_min * 60;
+    let m = |name: &'static str| {
+        let store = store.clone();
+        async move { store.metric_since(name, now, win_secs).await.unwrap_or(0) }
+    };
+    let probed = m(dragnet_store::metric::TRIAGE_DONE).await;
+    let triage_dead = m(dragnet_store::metric::TRIAGE_DEAD).await;
+    let attempted = m(dragnet_store::metric::FETCH_ATTEMPT).await;
+    let succeeded = m(dragnet_store::metric::FETCH_OK).await;
+    let hinted_ok = m(dragnet_store::metric::FETCH_OK_HINTED).await;
     // Çekime HAZIR ama henüz hiç denenmemiş sağlıklı aday: işçiler aç mı?
     let ready = n(format!(
         "SELECT COUNT(*) FROM torrents WHERE metadata_status='pending' AND fetch_attempts = 0
@@ -76,8 +79,30 @@ async fn main() {
         println!("\n  deneme başına başarı     : %{:.1}", 100.0 * succeeded as f64 / attempted as f64);
     }
     if probed > 0 {
-        println!("  triyaj → deneme aktarımı : %{:.1}", 100.0 * attempted as f64 / probed as f64);
+        println!("  triyajda ölü çıkan       : %{:.1}  ({triage_dead})", 100.0 * triage_dead as f64 / probed as f64);
+        println!("  triyaj → aday dönüşümü   : %{:.1}", 100.0 * (probed - triage_dead) as f64 / probed as f64);
     }
+    if succeeded > 0 {
+        // F13 kazancının doğrudan kanıtı: DHT araması hiç yapılmadan biten çekimler.
+        println!("  DHT aramasız başarı      : %{:.1}  ({hinted_ok}/{succeeded})", 100.0 * hinted_ok as f64 / succeeded as f64);
+    }
+    // HARVESTER: hasat düşükse sebebi burada görünür — aktif örnekleme mi durdu
+    // (samples), yoksa ağ bizi tanımıyor mu (announce/get_peers sıfıra yakın)?
+    let samples = m(dragnet_store::metric::DHT_SAMPLES).await;
+    let announce = m(dragnet_store::metric::DHT_ANNOUNCE).await;
+    let gp = m(dragnet_store::metric::DHT_GET_PEERS).await;
+    let sent = m(dragnet_store::metric::DHT_QUERIES_SENT).await;
+    let limited = m(dragnet_store::metric::DHT_RATE_LIMITED).await;
+    println!("\nHARVESTER (DHT)");
+    println!("  BEP-51 örnek (aktif)      : {samples:>7}  → {:>8.1}/sn", samples as f64 / win_secs as f64);
+    println!("  gelen announce (pasif)    : {announce:>7}  → {:>8.0}/saat", per_h(announce));
+    println!("  gelen get_peers (pasif)   : {gp:>7}  → {:>8.0}/saat", per_h(gp));
+    println!("  gönderilen sorgu          : {sent:>7}  → {:>8.1}/sn", sent as f64 / win_secs as f64);
+    if sent + limited > 0 {
+        println!("  rate-limit ile düşen      : {limited:>7}  (%{:.0} talep reddedildi)",
+            100.0 * limited as f64 / (sent + limited) as f64);
+    }
+
     println!("\nADAY STOKU (çekim işçileri aç mı?)");
     println!("  hazır, hiç denenmemiş     : {ready}");
     println!("  hazır, yeniden deneme     : {ready_retry}");
@@ -87,32 +112,15 @@ async fn main() {
     // indeks yerine tam tarama + geçici sıralama yapıyorsa kuyruk büyüdükçe zamanlayıcı
     // yavaşlar ve işçiler beklemede kalır (darboğaz ağ değil, SQLite olur).
     println!("\nSICAK SORGU PLANLARI (SCAN = tam tarama, TEMP B-TREE = geçici sıralama)");
+    // Sorgu metinleri `dragnet_store::queries` içinden gelir — yani ÇALIŞAN sorgunun
+    // planı gösterilir. (Bir kez elle kopyalanmıştı ve kopya bayatlayınca bu araç,
+    // düzeltilmiş sorgular için hâlâ "TEMP B-TREE" raporladı.)
+    use dragnet_store::queries;
     for (ad, sql) in [
-        (
-            "next_to_triage",
-            "SELECT infohash FROM torrents WHERE metadata_status='pending' AND probe_at=0
-               ORDER BY (hot_seen IS NOT NULL AND hot_seen > 0) DESC, hint_peers DESC, last_seen DESC LIMIT 8",
-        ),
-        (
-            "next_to_fetch/canlı",
-            "SELECT infohash FROM torrents WHERE metadata_status='pending'
-                AND (fetch_attempts = 0 OR (fetch_attempts < 3 AND last_attempt < 0))
-                AND (probe_peers >= 1 OR hint_peers >= 1 OR (probe_peers < 0 AND hint_peers > 0)
-                     OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > 0))
-              ORDER BY probe_peers DESC, hint_peers DESC, hot_seen DESC, seen_count DESC LIMIT 24",
-        ),
-        (
-            "next_to_fetch/soğuk",
-            "SELECT infohash FROM torrents WHERE (metadata_status='pending'
-                 AND (fetch_attempts = 0 OR (fetch_attempts < 3 AND last_attempt < 0))
-                 AND hint_peers = 0 AND (hot_seen IS NULL OR hot_seen <= 0))
-                OR (metadata_status='fetched' AND garbled = 1 AND fetch_attempts = 0)
-              ORDER BY seen_count DESC, hot_count DESC, last_seen DESC LIMIT 6",
-        ),
-        (
-            "count_pending",
-            "SELECT COUNT(*) FROM torrents WHERE metadata_status='pending'",
-        ),
+        ("next_to_triage", queries::NEXT_TO_TRIAGE),
+        ("next_to_fetch/canlı", queries::NEXT_TO_FETCH_LIVE),
+        ("next_to_fetch/garbled", queries::NEXT_TO_FETCH_GARBLED),
+        ("count_pending", queries::COUNT_PENDING),
     ] {
         let rows = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
             .fetch_all(store.pool())

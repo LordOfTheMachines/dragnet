@@ -67,7 +67,7 @@ impl Default for FetchConfig {
 /// İpucu adresleri denenirken DHT aramasının bekletileceği süre (F13). İpuçları taze
 /// olduğu için çekimlerin çoğu bu pencerede biter ve arama hiç yapılmaz; bitmezse
 /// normal yola dönülür. TCP bağlanma bütçesi (3,5 sn) ile aynı mertebede tutuldu.
-const HINT_GRACE: Duration = Duration::from_secs(3);
+pub const HINT_GRACE: Duration = Duration::from_secs(3);
 
 /// DHT üzerinden metadata çeken fetcher. İçinde bir mainline DHT istemcisi tutar.
 pub struct MetadataFetcher {
@@ -600,6 +600,50 @@ mod tests {
         assert_eq!(rec.files.len(), 2);
         assert_eq!(rec.files[0].path, "pack/a.txt");
         assert_eq!(rec.files[1].path, "pack/sub/b.txt");
+    }
+
+    /// UTF-8 OLMAYAN ad ve dosya yolları doğru kodlamayla çözülmeli. Bu yol bir kez
+    /// regresyona uğradı: `text` modülü yazılmış ama `parse_info_dict` `from_utf8_lossy`
+    /// kullanmaya devam etmişti — GBK/Shift-JIS adlar `���` olarak indeksleniyor,
+    /// `garbled` işaretlenip boşuna yeniden çekiliyordu (yeniden çekmek kodlamayı düzeltmez).
+    #[test]
+    fn decodes_legacy_encodings_in_name_and_paths() {
+        use serde_bencode::value::Value;
+        // GBK kodlu ad ("电影") + GBK kodlu dosya yolu bileşeni.
+        let (gbk_name, _, _) = encoding_rs::GB18030.encode("电影 高清版");
+        let (gbk_path, _, _) = encoding_rs::GB18030.encode("第01集.mkv");
+        let mut file = std::collections::HashMap::new();
+        file.insert(b"length".to_vec(), Value::Int(10));
+        file.insert(
+            b"path".to_vec(),
+            Value::List(vec![Value::Bytes(gbk_path.into_owned())]),
+        );
+        let mut dict = std::collections::HashMap::new();
+        dict.insert(b"name".to_vec(), Value::Bytes(gbk_name.into_owned()));
+        dict.insert(b"files".to_vec(), Value::List(vec![Value::Dict(file)]));
+        let info = serde_bencode::to_bytes(&Value::Dict(dict)).expect("bencode");
+
+        let rec = parse_info_dict(&info, InfoHash::from_bytes([0u8; 20])).expect("çözülmeli");
+        assert_eq!(rec.name, "电影 高清版");
+        assert_eq!(rec.files[0].path, "电影 高清版/第01集.mkv");
+        assert!(!rec.name.contains('\u{FFFD}'), "� kalmamalı");
+    }
+
+    /// `name.utf-8` varsa ona öncelik verilir (istemcilerin yaygın uzantısı).
+    #[test]
+    fn prefers_utf8_variant_of_name() {
+        use serde_bencode::value::Value;
+        let (gbk, _, _) = encoding_rs::GB18030.encode("电影");
+        let mut dict = std::collections::HashMap::new();
+        dict.insert(b"name".to_vec(), Value::Bytes(gbk.into_owned()));
+        dict.insert(
+            b"name.utf-8".to_vec(),
+            Value::Bytes("Movie (utf8)".as_bytes().to_vec()),
+        );
+        dict.insert(b"length".to_vec(), Value::Int(5));
+        let info = serde_bencode::to_bytes(&Value::Dict(dict)).expect("bencode");
+        let rec = parse_info_dict(&info, InfoHash::from_bytes([0u8; 20])).expect("çözülmeli");
+        assert_eq!(rec.name, "Movie (utf8)");
     }
 
     #[test]
