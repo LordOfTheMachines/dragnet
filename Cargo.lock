@@ -1416,6 +1416,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]
@@ -1439,6 +1440,7 @@ dependencies = [
  "anyhow",
  "chardetng",
  "dragnet-core",
+ "dragnet-store",
  "encoding_rs",
  "futures-lite",
  "librqbit-utp",
@@ -1446,6 +1448,7 @@ dependencies = [
  "serde",
  "serde_bencode",
  "sha1_smol",
+ "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

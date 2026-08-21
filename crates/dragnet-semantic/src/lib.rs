@@ -6,7 +6,8 @@
 //!   [`onnx::OrtEmbedder`] (MiniLM / EmbeddingGemma; CPU ya da DirectML).
 //! - [`models`]: 3 kademeli model kataloğu ([`Tier`]) + bir kerelik indirme.
 //! - [`index::VecIndex`]: bellek-içi int8 brute-force kosinüs indeksi.
-//! - [`hybrid::rrf`]: FTS + semantik aday listelerini harmanlama.
+//! - RRF harmanlama (FTS + semantik aday listeleri) [`dragnet_core::rank`]'tadır;
+//!   depo da aynı işlevi oradan kullanır.
 //! - [`Semantic`]: hepsini saran, `Arc` ile paylaşılan cephe.
 //!
 //! Kalıcılık bu crate'in işi değil: nicemlenmiş vektörler `dragnet-store`'da
@@ -15,7 +16,6 @@
 
 pub mod embedder;
 pub mod hw;
-pub mod hybrid;
 pub mod index;
 pub mod models;
 pub mod onnx;

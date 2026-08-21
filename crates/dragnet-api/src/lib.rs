@@ -197,10 +197,24 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Response> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match provided {
-        Some(t) if t == expected => None,
+        Some(t) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => None,
         _ => Some((StatusCode::UNAUTHORIZED, "yetkisiz").into_response()),
     }
 }
+
+/// Sabit zamanlı bayt karşılaştırması. `==` ilk farklı baytta döner; token'ı ağ
+/// üzerinden deneyen biri yanıt sürelerinden doğru öneki bayt bayt çıkarabilir.
+/// (Varsayılan bind loopback olduğu için risk düşük, ama API dışarı açılabiliyor.)
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Arama sorgusu için üst sınır. Sınırsız girdi hem FTS ayrıştırıcısını hem de
+/// (semantik açıkken) tokenizer'ı gereksiz yere zorlar; gerçek sorgular çok kısadır.
+const MAX_QUERY_CHARS: usize = 256;
 
 async fn search(
     State(state): State<Arc<AppState>>,
@@ -224,10 +238,12 @@ async fn search(
         hide_garbled: params.hide_garbled.unwrap_or(true),
     };
     let mode = SearchMode::parse(params.mode.as_deref().unwrap_or(""));
+    // Sorguyu sınırla (karakter sınırında kes — bayt sınırı UTF-8'i ortadan bölerdi).
+    let q: String = params.q.chars().take(MAX_QUERY_CHARS).collect();
     match search::search(
         &state.store,
         &state.semantic,
-        &params.q,
+        &q,
         mode,
         limit as i64,
         offset as i64,

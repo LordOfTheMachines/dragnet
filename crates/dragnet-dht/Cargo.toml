@@ -21,3 +21,9 @@ tracing-subscriber = { workspace = true }
 [[example]]
 name = "harvest"
 path = "examples/harvest.rs"
+
+[target.'cfg(windows)'.dependencies]
+# SIO_UDP_CONNRESET: Windows'ta UDP soketinin ICMP "port unreachable" bildirimini
+# kapatmak için (bkz. `disable_conn_reset`). Crawler sürekli ölü hedefe paket yollar;
+# bu bildirim açıkken soket sürekli WSAECONNRESET verir ve hasat sessizce durur.
+windows = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_System_IO"] }

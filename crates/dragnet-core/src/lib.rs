@@ -362,11 +362,11 @@ pub fn bencode_value_len(b: &[u8]) -> Option<usize> {
     scan(b, 0, 0)
 }
 
-/// Bir bencode tamponunun `serde_bencode`'a güvenle verilebilecek kadar sığ ve
-/// sınır-içi olup olmadığını kontrol eder (derinlik/uzunluk saldırılarına karşı).
-pub fn bencode_is_safe(b: &[u8]) -> bool {
-    bencode_value_len(b).is_some()
-}
+// NOT: `bencode_is_safe` kaldırıldı (F13 temizliği). Hiç çağıranı yoktu ve yalnız
+// "güvenli mi?" sorusuna evet/hayır dediği için asıl kullanım biçimini gizliyordu:
+// çağıranların hepsi (krpc::parse, wire, parse_info_dict) `bencode_value_len`'in
+// döndürdüğü UZUNLUĞA ihtiyaç duyar — ya tamponun tamamını kapladığını doğrulamak
+// (metadata) ya da değerin nerede bittiğini bilmek (ut_metadata parça başlığı) için.
 
 fn hex_val(c: u8) -> Option<u8> {
     match c {

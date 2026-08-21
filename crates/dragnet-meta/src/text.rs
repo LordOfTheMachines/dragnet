@@ -74,16 +74,11 @@ pub fn decode_bytes(b: &[u8]) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(b).into_owned())
 }
 
-/// Ad çözülemeyecek kadar bozuk mu? (`�` oranı yüksek) — çağıran isterse
-/// "bozuk ad" olarak işaretleyebilir.
-pub fn is_garbled(s: &str) -> bool {
-    let total = s.chars().count();
-    if total == 0 {
-        return false;
-    }
-    let bad = s.chars().filter(|&c| c == '\u{FFFD}').count();
-    bad * 4 >= total // %25 ve üzeri
-}
+// NOT: `is_garbled` kaldırıldı (F13 temizliği). Hiç çağıranı yoktu ve "bozuk ad"ın
+// İKİNCİ bir tanımını getiriyordu: depo bunu `instr(name, char(65533)) > 0` ile, yani
+// "içinde tek bir � bile varsa bozuk" olarak işaretliyor (`torrents.garbled`), buradaki
+// eşik ise %25'ti. Tek gerçeklik kaynağı depodaki sütun olsun — yeniden çekim kararı
+// zaten oradan veriliyor.
 
 #[cfg(test)]
 mod tests {
@@ -120,11 +115,5 @@ mod tests {
         d.remove(b"name.utf-8".as_slice());
         assert_eq!(get_text(&d, "name").as_deref(), Some("电影"));
         assert!(get_text(&d, "missing").is_none());
-    }
-
-    #[test]
-    fn garbled_detection() {
-        assert!(is_garbled("\u{FFFD}\u{FFFD}\u{FFFD}ab"));
-        assert!(!is_garbled("The Matrix \u{FFFD}"));
     }
 }

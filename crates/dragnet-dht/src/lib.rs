@@ -75,7 +75,22 @@ pub struct HarvesterConfig {
     pub followups_per_sample: usize,
     /// Sorgulanmayı bekleyen düğüm kuyruğunun azami boyutu.
     pub node_queue_capacity: usize,
+    /// Düğüm kimliğinin ve öğrenilen düğümlerin saklanacağı dosya (`None` = kalıcılık yok).
+    ///
+    /// Neden: pasif hasat (gelen `announce_peer`/`get_peers`) ancak ağdaki yönlendirme
+    /// tablolarında yer edinince gelir ve bu birikim saatler alır. Kimlik her açılışta
+    /// yeniden üretilirse ağ bizi HER SEFERİNDE yeni bir düğüm sanar ve birikim sıfırlanır
+    /// — aynı gerekçeyle kimlik döndürme aralığı da 10 dk'dan 60 dk'ya çıkarılmıştı.
+    /// Dosyada ayrıca son bilinen düğümler tutulur; açılışta DNS'i beklemeden ağa dönülür.
+    pub state_path: Option<std::path::PathBuf>,
 }
+
+/// Durum dosyasına yazılacak azami düğüm sayısı (6 bayt/düğüm → ~6 KB).
+const STATE_NODES: usize = 1000;
+/// Durum dosyasının kaydedilme aralığı.
+const STATE_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+/// Düğüm kuyruğu kuruduğunda yeniden tohumlama denemeleri arasındaki en kısa süre.
+const RESEED_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 impl Default for HarvesterConfig {
     fn default() -> Self {
@@ -90,18 +105,71 @@ impl Default for HarvesterConfig {
             max_queries_per_sec: 50.0,
             crawl_tick: Duration::from_millis(100),
             crawl_batch: 4,
-            // Kimlik döndürme YAVAŞ olmalı: her döndürmede (BEP-42 rastgele bileşeni değişir)
-            // ağ bizi YENİ bir düğüm sanar ve tablolarındaki girdimiz bayatlar; pasif trafik
-            // (announce/get_peers) ise ancak tablolarda kalıcı yer edinince gelir. 10 dakika
-            // "yatay tarama" için iyiydi ama pasif hasadı sürekli sıfırlıyordu.
-            id_rotation: Duration::from_secs(3600),
+            // KİMLİK DÖNDÜRME VARSAYILAN OLARAK KAPALI (0). Gerekçe: her döndürmede
+            // (BEP-42 rastgele bileşeni değişir) ağ bizi YENİ bir düğüm sanar ve
+            // tablolarındaki girdimiz bayatlar; pasif trafik (announce/get_peers) ise ancak
+            // tablolarda kalıcı yer edinince gelir. Ölçümle bir kez 10 dk → 60 dk yapılmış
+            // ve hasat iyileşmişti; aynı gerekçe sonuna kadar götürülünce döndürmenin
+            // kendisi gereksiz kalıyor: "kimlik uzayında dolaşma" faydası ZATEN sağlanıyor,
+            // çünkü `crawl_loop` her sorguda hedefi (`target`) rastgele seçiyor — düğüm
+            // kimliğini de döndürmek örnekleme çeşitliliğine ek bir şey katmıyor, yalnız
+            // yerleşikliği bozuyor. Deneme yapmak isteyen bu alanı sıfırdan farklı verir.
+            id_rotation: Duration::ZERO,
             dedup_capacity: 1 << 18,
             // Her BEP-51 örneğinden sonra daha çok doğrudan get_peers: peer ipuçlu (yani
             // CANLI olduğu bilinen) aday üretmenin en ucuz yolu. Ölçüm: kuyruğun %98'i
             // soğuk örnekleme, çekim başarısı ~%2; ipuçlu adaylarda peer zaten bilinir.
             followups_per_sample: 8,
             node_queue_capacity: 8192,
+            state_path: None,
         }
+    }
+}
+
+/// Kalıcı hasatçı durumu: düğüm kimliği + son bilinen düğümler.
+///
+/// Biçim (küçük ve elle okunabilir olması gerekmiyor): `DGN1` sihirli sözcüğü,
+/// 20 bayt kimlik, ardından 6 baytlık compact IPv4 düğüm kayıtları.
+mod state {
+    use super::{ID_LEN, STATE_NODES};
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::path::Path;
+
+    const MAGIC: &[u8; 4] = b"DGN1";
+
+    /// Durumu okur; dosya yoksa/bozuksa `None` (çağıran sıfırdan başlar).
+    pub fn load(path: &Path) -> Option<([u8; ID_LEN], Vec<SocketAddrV4>)> {
+        let buf = std::fs::read(path).ok()?;
+        if buf.len() < MAGIC.len() + ID_LEN || &buf[..4] != MAGIC {
+            return None;
+        }
+        let id: [u8; ID_LEN] = buf[4..4 + ID_LEN].try_into().ok()?;
+        let nodes = buf[4 + ID_LEN..]
+            .chunks_exact(6)
+            .map(|c| {
+                SocketAddrV4::new(
+                    Ipv4Addr::new(c[0], c[1], c[2], c[3]),
+                    u16::from_be_bytes([c[4], c[5]]),
+                )
+            })
+            .filter(|a| a.port() != 0 && !a.ip().is_unspecified())
+            .collect();
+        Some((id, nodes))
+    }
+
+    /// Durumu atomik yazar (önce geçici dosya, sonra yerine taşı) — yarıda kesilirse
+    /// eski durum bozulmadan kalır.
+    pub fn save(path: &Path, id: &[u8; ID_LEN], nodes: &[SocketAddrV4]) -> std::io::Result<()> {
+        let mut buf = Vec::with_capacity(4 + ID_LEN + nodes.len().min(STATE_NODES) * 6);
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(id);
+        for n in nodes.iter().take(STATE_NODES) {
+            buf.extend_from_slice(&n.ip().octets());
+            buf.extend_from_slice(&n.port().to_be_bytes());
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &buf)?;
+        std::fs::rename(&tmp, path)
     }
 }
 
@@ -125,6 +193,11 @@ pub struct Stats {
     pub rate_limited: AtomicU64,
     /// Takip get_peers ile `values` (taze peer) alınan örnek sayısı (Faz E).
     pub peer_hints: AtomicU64,
+    /// Soket hataları. Windows'ta bunlar sessizce yutulduğunda hasat, sebebi görünmeden
+    /// durur: bir hedef ICMP "port unreachable" döndürünce Windows bunu SONRAKİ soket
+    /// çağrısında `WSAECONNRESET` olarak verir (bkz. `disable_conn_reset`).
+    pub send_errors: AtomicU64,
+    pub recv_errors: AtomicU64,
 }
 
 /// Anlık sayaç görüntüsü (kolay loglama için).
@@ -143,6 +216,8 @@ pub struct StatsSnapshot {
     pub samples_seen: u64,
     pub rate_limited: u64,
     pub peer_hints: u64,
+    pub send_errors: u64,
+    pub recv_errors: u64,
 }
 
 impl Stats {
@@ -161,6 +236,8 @@ impl Stats {
             samples_seen: self.samples_seen.load(Ordering::Relaxed),
             rate_limited: self.rate_limited.load(Ordering::Relaxed),
             peer_hints: self.peer_hints.load(Ordering::Relaxed),
+            send_errors: self.send_errors.load(Ordering::Relaxed),
+            recv_errors: self.recv_errors.load(Ordering::Relaxed),
         }
     }
 }
@@ -273,12 +350,20 @@ impl Shared {
     }
 
     /// Öğrenilen düğümleri kuyruğa ekler (kapasiteyle sınırlı). Eklenen sayısını döner.
+    /// Öğrenilen düğümleri kuyruğa ekler. Kuyruk doluysa **en eskisi düşürülür** —
+    /// yeni gelen atılmaz.
+    ///
+    /// Neden: eskiden kapasiteye ulaşınca yeni düğümler atılıyordu, yani kuyruk bir kez
+    /// dolduktan sonra **hep aynı düğümler** dolaşıyordu. BEP-51 örneklemesinde bu,
+    /// aynı düğümlere tekrar tekrar sorup aynı infohash'leri almak demek: ölçümde
+    /// saniyede ~90 örnek geliyordu ama bunların %99,7'si dedup'a takılıyor, yeni kayıt
+    /// 0,24/sn'de kalıyordu. Kuyruğun tazelenmesi keşif çeşitliliğinin ön koşuludur.
     fn push_nodes(&self, learned: &[SocketAddrV4]) -> u64 {
         let mut q = self.nodes.lock().unwrap();
         let mut added = 0;
         for &n in learned {
-            if q.len() >= self.node_queue_capacity {
-                break;
+            while q.len() >= self.node_queue_capacity {
+                q.pop_front();
             }
             q.push_back(n);
             added += 1;
@@ -305,7 +390,7 @@ impl Shared {
 pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     // İstenen porta bağlan; başka uygulama (ör. qBittorrent 6881) tutuyorsa
     // çökmek yerine efemer porta düş.
-    let socket = match UdpSocket::bind(SocketAddrV4::new(config.bind_address, config.port)).await {
+    let socket = match bind_socket(SocketAddrV4::new(config.bind_address, config.port)).await {
         Ok(s) => s,
         Err(e) if config.port != 0 => {
             warn!(
@@ -314,7 +399,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
                 "harvester portu bağlanamadı (başka uygulama kullanıyor olabilir, \
                  örn. qBittorrent 6881); efemer porta düşülüyor"
             );
-            UdpSocket::bind(SocketAddrV4::new(config.bind_address, 0)).await?
+            bind_socket(SocketAddrV4::new(config.bind_address, 0)).await?
         }
         Err(e) => return Err(e),
     };
@@ -325,9 +410,24 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     let (reply_tx, reply_rx) = mpsc::channel::<(Vec<u8>, SocketAddrV4)>(512);
     let stats = Arc::new(Stats::default());
 
+    // Kalıcı durum: önceki oturumun kimliği ve son bilinen düğümleri. Kimliğin
+    // korunması pasif hasat için kritiktir — ağın yönlendirme tablolarındaki yerimiz
+    // ancak kimlik sabit kalırsa birikir.
+    let persisted = config.state_path.as_deref().and_then(state::load);
+    let (initial_id, cached_nodes) = match persisted {
+        Some((id, nodes)) => {
+            info!(
+                nodes = nodes.len(),
+                "önceki DHT kimliği ve düğümler geri yüklendi"
+            );
+            (id, nodes)
+        }
+        None => (*Id::random().as_bytes(), Vec::new()),
+    };
+
     let shared = Arc::new(Shared {
         socket,
-        our_id: Mutex::new(*Id::random().as_bytes()),
+        our_id: Mutex::new(initial_id),
         // BEP-42 (aşağıda): dış IP öğrenilince kimlik ondan türetilir.
         public_ip: Mutex::new(None),
         nodes: Mutex::new(VecDeque::with_capacity(config.node_queue_capacity)),
@@ -344,17 +444,29 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         followups_per_sample: config.followups_per_sample,
     });
 
-    // Kuyruğu bootstrap düğümleriyle doldur.
+    // Önce önbellekteki düğümler (DNS beklemeden ağa dön), sonra bootstrap.
+    if !cached_nodes.is_empty() {
+        shared.push_nodes(&cached_nodes);
+    }
     seed_bootstrap(&shared).await;
 
-    let tasks = vec![
+    let mut tasks = vec![
         tokio::spawn(recv_loop(Arc::clone(&shared))),
         tokio::spawn(reply_loop(Arc::clone(&shared), reply_rx)),
         tokio::spawn(crawl_loop(Arc::clone(&shared), config.clone())),
-        tokio::spawn(rotate_loop(Arc::clone(&shared), config.id_rotation)),
         tokio::spawn(flush_repeats_loop(Arc::clone(&shared))),
         tokio::spawn(rebootstrap_loop(Arc::clone(&shared))),
     ];
+    // Kimlik döndürme yalnız açıkça istenirse (0 = kapalı; varsayılan kapalı).
+    if !config.id_rotation.is_zero() {
+        tasks.push(tokio::spawn(rotate_loop(
+            Arc::clone(&shared),
+            config.id_rotation,
+        )));
+    }
+    if let Some(path) = config.state_path.clone() {
+        tasks.push(tokio::spawn(save_state_loop(Arc::clone(&shared), path)));
+    }
 
     Ok(Harvester {
         infohashes: rx,
@@ -363,6 +475,58 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         tasks,
         local_addr,
     })
+}
+
+/// Windows'ta UDP soketinin `WSAECONNRESET` davranışını kapatır.
+///
+/// **Neden gerekli:** Bir DHT hedefi kapalıysa yönlendirici/işletim sistemi ICMP
+/// "port unreachable" döndürür. Windows bunu, bağlantısız bir UDP soketinde bile,
+/// **bir sonraki** `recv_from`/`send_to` çağrısını `WSAECONNRESET` (10054) ile
+/// başarısız kılarak bildirir. Bir crawler ise doğası gereği sürekli ölü hedeflere
+/// paket yollar, dolayısıyla soket sürekli hata verir; hatalar yutulduğu için de
+/// hasat **sebebi görünmeden** yavaşlar: gelen yanıtlar kaybolur, düğüm kuyruğu kurur,
+/// giden sorgu bütçesi kullanılamaz.
+///
+/// `SIO_UDP_CONNRESET = false` bu bildirimi kapatır ve soket, UNIX'teki gibi ICMP
+/// hatalarını yok sayar. Windows dışında bu işlev bir şey yapmaz.
+#[cfg(windows)]
+fn disable_conn_reset(socket: &std::net::UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{WSAIoctl, SIO_UDP_CONNRESET, SOCKET};
+
+    let mut enable: u32 = 0;
+    let mut returned: u32 = 0;
+    // SAFETY: geçerli bir soket tanıtıcısı ve doğru boyutlu bir `u32` tamponu veriliyor;
+    // çağrı yalnız soketin ICMP-hata bildirim bayrağını değiştirir.
+    let rc = unsafe {
+        WSAIoctl(
+            SOCKET(socket.as_raw_socket() as usize),
+            SIO_UDP_CONNRESET,
+            Some(&mut enable as *mut u32 as *mut std::ffi::c_void),
+            std::mem::size_of::<u32>() as u32,
+            None,
+            0,
+            &mut returned,
+            None,
+            None,
+        )
+    };
+    if rc != 0 {
+        warn!("SIO_UDP_CONNRESET ayarlanamadı; ICMP kaynaklı soket hataları görülebilir");
+    }
+}
+
+#[cfg(not(windows))]
+fn disable_conn_reset(_socket: &std::net::UdpSocket) {}
+
+/// İstenen porta bağlanır ve platforma özgü soket ayarlarını uygular.
+async fn bind_socket(addr: SocketAddrV4) -> std::io::Result<UdpSocket> {
+    // Önce std soketi: `SIO_UDP_CONNRESET` ioctl'i bağlanmadan hemen sonra, tokio'ya
+    // devretmeden uygulanmalı.
+    let std_socket = std::net::UdpSocket::bind(addr)?;
+    disable_conn_reset(&std_socket);
+    std_socket.set_nonblocking(true)?;
+    UdpSocket::from_std(std_socket)
 }
 
 /// Bootstrap host'larını çözer ve düğüm kuyruğuna ekler.
@@ -424,6 +588,9 @@ async fn recv_loop(shared: Arc<Shared>) {
         let (len, from) = match shared.socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
+                // Sayılır: Windows'ta bu hatalar sessizce yutulunca hasat sebebi
+                // görünmeden durur (bkz. `disable_conn_reset`).
+                shared.stats.recv_errors.fetch_add(1, Ordering::Relaxed);
                 debug!(error = %e, "recv_from hatası");
                 continue;
             }
@@ -522,12 +689,30 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
                     if *cur != Some(ip) {
                         *cur = Some(ip);
                         drop(cur);
-                        let new_id = *Id::from_ipv4(ip).as_bytes();
-                        *shared.our_id.lock().unwrap() = new_id;
-                        info!(%ip, "dış adres öğrenildi → BEP-42 uyumlu düğüm kimliği kuruldu");
+                        // Geri yüklenen kimlik bu IP için HÂLÂ geçerliyse KORUNUR: ağdaki
+                        // yönlendirme tablolarında biriken yerimiz ancak kimlik sabit
+                        // kalırsa yaşar. Yalnız geçersizse (ör. IP değişmiş) yeniden türetilir.
+                        let mut id = shared.our_id.lock().unwrap();
+                        let already_valid = Id::from_bytes(*id)
+                            .map(|cur| cur.is_valid_for_ip(ip))
+                            .unwrap_or(false);
+                        if already_valid {
+                            info!(%ip, "dış adres öğrenildi; mevcut kimlik BEP-42 uyumlu, korunuyor");
+                        } else {
+                            *id = *Id::from_ipv4(ip).as_bytes();
+                            info!(%ip, "dış adres öğrenildi → BEP-42 uyumlu düğüm kimliği kuruldu");
+                        }
                     }
                 }
             }
+            // YANIT VEREN DÜĞÜMÜ KUYRUĞA GERİ KOY. `pop_nodes` sorguladığı düğümü
+            // kuyruktan çıkarır ve eskiden bir daha geri koymazdı; yani KANITLANMIŞ
+            // canlı düğümler bir kez kullanılıp atılıyor, yerlerini yanıtlarda gelen
+            // kanıtlanmamış (çoğu ölü) adresler alıyordu. Kuyruk böyle kurur ve
+            // `crawl_loop` sorgulayacak düğüm bulamaz: ölçümde giden sorgu 50/sn
+            // bütçeye karşılık 1,5/sn'ye düşmüş, hasat pratikte durmuştu.
+            // Sona eklenir: sıra tekrar gelene kadar kuyruğun tamamı dolaşılır.
+            shared.push_nodes(&[from]);
             if !r.nodes.is_empty() {
                 let added = shared.push_nodes(&r.nodes);
                 shared
@@ -682,11 +867,18 @@ fn emit(
 async fn crawl_loop(shared: Arc<Shared>, config: HarvesterConfig) {
     let mut ticker = tokio::time::interval(config.crawl_tick);
     let mut counter: u32 = 0;
+    // Kuyruk boşaldığında yeniden tohumlama YALNIZ ara ara denenir. Eskiden her tıkta
+    // (100 ms) çağrılıyordu: kuyruk kurumuşsa bu, saniyede 10 kez 4 bootstrap adının DNS
+    // çözümlemesi demekti ve `seed_bootstrap` bir `await` olduğu için crawl döngüsünün
+    // kendisini DNS'e kilitliyordu — yani kuyruk boşken hasat toparlanmak yerine
+    // tamamen duruyordu. (Ayrıca `rebootstrap_loop` zaten 60 sn'de bir aynı işi yapıyor.)
+    let mut last_reseed = Instant::now() - RESEED_MIN_INTERVAL;
     loop {
         ticker.tick().await;
 
-        // Kuyruk boşaldıysa bootstrap'tan yeniden tohumla.
-        if shared.queue_len() == 0 {
+        // Kuyruk boşaldıysa bootstrap'tan yeniden tohumla (hız sınırlı).
+        if shared.queue_len() == 0 && last_reseed.elapsed() >= RESEED_MIN_INTERVAL {
+            last_reseed = Instant::now();
             seed_bootstrap(&shared).await;
         }
 
@@ -714,8 +906,28 @@ async fn crawl_loop(shared: Arc<Shared>, config: HarvesterConfig) {
                 Ok(_) => {
                     shared.stats.queries_sent.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(e) => debug!(error = %e, "crawl sorgusu gönderilemedi"),
+                Err(e) => {
+                    shared.stats.send_errors.fetch_add(1, Ordering::Relaxed);
+                    debug!(error = %e, "crawl sorgusu gönderilemedi");
+                }
             }
+        }
+    }
+}
+
+/// Kimliği ve öğrenilen düğümleri periyodik olarak diske yazar.
+async fn save_state_loop(shared: Arc<Shared>, path: std::path::PathBuf) {
+    let mut ticker = tokio::time::interval(STATE_SAVE_INTERVAL);
+    ticker.tick().await; // ilk anlık tık: hemen yazma.
+    loop {
+        ticker.tick().await;
+        let id = shared.our_id();
+        let nodes: Vec<SocketAddrV4> = {
+            let q = shared.nodes.lock().unwrap();
+            q.iter().take(STATE_NODES).copied().collect()
+        };
+        if let Err(e) = state::save(&path, &id, &nodes) {
+            debug!(error = %e, "DHT durumu yazılamadı");
         }
     }
 }
@@ -761,6 +973,8 @@ impl StatsSnapshot {
             samples_seen: self.samples_seen + o.samples_seen,
             rate_limited: self.rate_limited + o.rate_limited,
             peer_hints: self.peer_hints + o.peer_hints,
+            send_errors: self.send_errors + o.send_errors,
+            recv_errors: self.recv_errors + o.recv_errors,
         }
     }
 }
@@ -775,6 +989,46 @@ mod tests {
         assert!(c.max_queries_per_sec > 0.0);
         assert!(c.channel_capacity > 0);
         assert!(c.crawl_batch > 0);
+    }
+
+    /// Kimlik ve düğüm önbelleği diskte gidip gelmeli. Bu sessizce bozulursa hasat
+    /// yavaşlar ama hiçbir hata görünmez — bu yüzden test edilir.
+    #[test]
+    fn state_roundtrips_id_and_nodes() {
+        let dir = std::env::temp_dir().join("dragnet-dht-state-test");
+        std::fs::create_dir_all(&dir).expect("dizin");
+        let path = dir.join("state.bin");
+        let id = [0x5au8; ID_LEN];
+        let nodes = vec![
+            "1.2.3.4:6881".parse::<SocketAddrV4>().unwrap(),
+            "5.6.7.8:1337".parse::<SocketAddrV4>().unwrap(),
+        ];
+        state::save(&path, &id, &nodes).expect("yazılmalı");
+        let (got_id, got_nodes) = state::load(&path).expect("okunmalı");
+        assert_eq!(got_id, id);
+        assert_eq!(got_nodes, nodes);
+
+        // Bozuk/yabancı dosya sessizce yok sayılır (sıfırdan başlanır), çökmez.
+        std::fs::write(&path, b"bozuk").expect("yaz");
+        assert!(state::load(&path).is_none());
+        assert!(state::load(&dir.join("yok.bin")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Geri yüklenen kimlik, dış IP için hâlâ BEP-42 uyumluysa korunmalıdır — pasif
+    /// hasadın birikimi buna bağlı.
+    #[test]
+    fn bep42_id_stays_valid_across_restart() {
+        let ip = Ipv4Addr::new(159, 146, 35, 97);
+        let id = *Id::from_ipv4(ip).as_bytes();
+        assert!(
+            Id::from_bytes(id).unwrap().is_valid_for_ip(ip),
+            "türetilen kimlik kendi IP'si için geçerli olmalı"
+        );
+        // Başka bir IP'ye taşınırsa geçersizleşir → yeniden türetilmesi beklenir.
+        assert!(!Id::from_bytes(id)
+            .unwrap()
+            .is_valid_for_ip(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
     #[tokio::test]

@@ -26,6 +26,9 @@ pub struct Config {
     pub fetch_workers: usize,
     /// Tek bir metadata çekiminde denenecek eşzamanlı peer sayısı.
     pub fetch_peer_concurrency: usize,
+    /// Aynı anda triyaj edilecek (DHT'de peer'i ölçülecek) aday sayısı. Triyaj, çekimin
+    /// aday arzını üreten aşamadır; ölçümde asıl darboğaz burasıydı.
+    pub triage_concurrency: usize,
     /// Başlangıçta çekilip indekslenecek infohash'ler (40-hex). İndeksi ısıtmak
     /// veya bilinen torrent'leri sabitlemek için. Varsayılan: boş.
     pub seed_infohashes: Vec<String>,
@@ -57,6 +60,7 @@ impl Default for Config {
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 12,
             fetch_peer_concurrency: 12,
+            triage_concurrency: 24,
             seed_infohashes: Vec::new(),
             db_max_gb: 0.0,
             disk_reserve_gb: 5.0,

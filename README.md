@@ -167,6 +167,21 @@ cargo run -p dragnet-dht --example harvest
 cargo run -p dragnet-meta --example fetch -- 08ada5a7a6183aae1e09d831df6748d566095a10
 ```
 
+**"Neden yavaş indeksliyor?" — teşhis araçları.** Çekim hızı bir zincirdir
+(hasat → triyaj → çekim → ad); hangi halkanın darboğaz olduğunu tahmin etmek yerine
+ölçün. Matematiği ve fiziksel sınırları: [`docs/CEKIM-HIZI.md`](docs/CEKIM-HIZI.md).
+
+```bash
+# Boru hattının aşama aşama hızı + aday stoğu + harvester sayaçları + sorgu planları
+cargo run --release -p dragnet-store --example rate -- <db yolu> [pencere_dk]
+
+# Peer hunisi: bir peer denemesi hangi adımda ölüyor (TCP mi, handshake mi?)
+cargo run --release -p dragnet-meta --example peerstat -- db <db yolu> [n] [eşzamanlılık]
+
+# Çekim kuyruğunun bileşimi (sıcak / peer ipuçlu / soğuk)
+cargo run --release -p dragnet-store --example queue -- <db yolu>
+```
+
 **Masaüstü uygulaması (tek exe, önerilen):** tray + dashboard + arama + ayarlar,
 çekirdeği süreç içinde çalıştırır (ayrı daemon gerekmez):
 
