@@ -85,8 +85,9 @@ pub struct HarvesterConfig {
     pub state_path: Option<std::path::PathBuf>,
 }
 
-/// Durum dosyasına yazılacak azami düğüm sayısı (6 bayt/düğüm → ~6 KB).
-const STATE_NODES: usize = 1000;
+/// Durum dosyasına yazılacak azami düğüm sayısı (6 bayt/düğüm → ~48 KB).
+/// Açılışta ağa hızlı dönmek için yeterince geniş; kuyruğun tamamını yazmaya gerek yok.
+const STATE_NODES: usize = 8_000;
 /// Durum dosyasının kaydedilme aralığı.
 const STATE_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 /// Düğüm kuyruğu kuruduğunda yeniden tohumlama denemeleri arasındaki en kısa süre.
@@ -126,7 +127,13 @@ impl Default for HarvesterConfig {
             // CANLI olduğu bilinen) aday üretmenin en ucuz yolu. Ölçüm: kuyruğun %98'i
             // soğuk örnekleme, çekim başarısı ~%2; ipuçlu adaylarda peer zaten bilinir.
             followups_per_sample: 8,
-            node_queue_capacity: 8192,
+            // Kuyruk aynı zamanda "aynı düğüme ne sıklıkla soruyoruz" demektir: kuyruk
+            // dönerek tükendiği için tur süresi = kapasite ÷ sorgu hızı. 8192 ile ve
+            // 72 sorgu/sn ile bu ~2 dakikaydı — oysa BEP-51'de düğümler `interval`
+            // alanıyla "saatler sonra tekrar sor" der. Sonuç: aynı düğümler aynı
+            // örnekleri veriyor ve gelen örneklerin %86,6'sı dedup'a takılıyordu.
+            // 65.536 ile tur ~15 dakikaya çıkar; maliyeti 393 KB bellektir.
+            node_queue_capacity: 65_536,
             state_path: None,
         }
     }

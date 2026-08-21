@@ -228,7 +228,12 @@ const METRIC_RETENTION_SECS: i64 = 30 * 24 * 3600;
 pub mod queries {
     /// Triyaj adayları: henüz ölçülmemiş bekleyen kayıtlar, en taze önce.
     /// Sıra `idx_triage(probe_at, last_seen DESC)` ile birebir örtüşür (sıralama yok).
-    pub const NEXT_TO_TRIAGE: &str = "SELECT infohash FROM torrents
+    /// `INDEXED BY` gerekli: çekim kuyruğu için `idx_fetch_probe(probe_at DESC)` eklenince
+    /// SQLite bu sorgu için de onu seçmeye başladı ve `probe_at = 0` eşleşmesini bulup
+    /// sıralamayı geçici b-tree'ye bıraktı. `idx_triage(probe_at, last_seen DESC)` ise
+    /// hem eşleşmeyi hem sırayı birlikte verir. (Ders: yeni bir indeks, mevcut bir
+    /// sorgunun planını sessizce bozabilir — plan çıktısı her değişiklikten sonra bakılır.)
+    pub const NEXT_TO_TRIAGE: &str = "SELECT infohash FROM torrents INDEXED BY idx_triage
               WHERE metadata_status = 'pending' AND probe_at = 0
               ORDER BY last_seen DESC
               LIMIT ?1";
@@ -242,25 +247,33 @@ pub mod queries {
     /// | sıra                        | peer/aday | hiç peer'i olmayan |
     /// |-----------------------------|-----------|--------------------|
     /// | `probe_peers DESC` (eski)   |  **0,1**  |      **%90**       |
-    /// | `probe_at DESC`             |    19,6   |        %25         |
-    /// | `last_seen DESC` (yeni)     |  **36,4** |        %28         |
+    /// | `probe_at DESC` (seçilen)   |    19,6   |      **%25**       |
+    /// | `last_seen DESC`            |    36,4   |        %28         |
     ///
     /// Sebep iki katlı: (1) yüksek `probe_peers` değerleri ESKİ ölçümlerden gelir ve o
     /// torrentler çoktan ölmüştür; (2) bu kayıtlar sıranın hep başında durduğu için taze
     /// adaylar hiç sıra alamaz (açlık). `probe_peers` canlılık KANITI olarak WHERE'de
     /// kalır — ama önceliği tazelik belirler.
     ///
+    /// Neden `last_seen` değil de `probe_at`: yukarıdaki test adayları `probe_peers > 0`
+    /// ile, yani YALNIZ triyajdan geçmişlerden seçmişti. Üretimin WHERE'i ise daha
+    /// geniştir (hint'li ya da "sıcak" ama henüz triyaj edilmemiş kayıtları da alır) ve
+    /// orada `last_seen DESC`, kanıtsız adayları kanıtlıların önüne geçiriyordu: üretim
+    /// ölçümünde deneme başına başarı %2,4'ten %1,2'ye düştü. `probe_at DESC` ikisini
+    /// birden verir — en son ÖLÇÜLEN aday önce gelir, hiç ölçülmemişler (probe_at = 0)
+    /// doğal olarak sona düşer ve önce triyajdan geçerler.
+    ///
     /// `INDEXED BY` neden gerekli: SQLite kendi maliyet tahminiyle `idx_status`'u seçip
     /// bekleyen yığının TAMAMINI okuyor ve `USE TEMP B-TREE FOR ORDER BY` ile sıralıyordu
     /// (ANALYZE sonrası da değişmedi). Kısmi indeks `last_seen DESC` sırasını hazır verir,
     /// tarama `LIMIT` kadar satırda durur. İndeks migrasyonda zorunlu oluşturulur.
-    pub const NEXT_TO_FETCH_LIVE: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_fresh
+    pub const NEXT_TO_FETCH_LIVE: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_probe
               WHERE metadata_status = 'pending'
                 AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
                 AND (probe_peers >= ?5 OR hint_peers >= ?5
                      OR (probe_peers < 0 AND hint_peers > 0)
                      OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > ?3))
-              ORDER BY last_seen DESC
+              ORDER BY probe_at DESC
               LIMIT ?4";
 
     /// Kodlaması bozuk çıkmış adların bir kerelik yeniden çekimi (küçük, sınırlı kol).
@@ -456,11 +469,13 @@ impl Store {
         ] {
             let _ = sqlx::query(col).execute(&self.pool).await;
         }
-        let _ = sqlx::query(
+        // Hata YUTULMAZ: `queries::NEXT_TO_TRIAGE` bu indeksi `INDEXED BY` ile zorunlu
+        // kılıyor (yoksa triyaj kuyruğu hiç çalışmaz).
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_triage ON torrents(probe_at, last_seen DESC) WHERE metadata_status='pending';",
         )
         .execute(&self.pool)
-        .await;
+        .await?;
         let _ = sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_fetch_queue2 ON torrents(hint_peers DESC, seen_count DESC, last_seen DESC) WHERE metadata_status='pending';",
         )
@@ -476,13 +491,19 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
-        // Çekim kuyruğunun TAZELİK sırası (bkz. `queries::NEXT_TO_FETCH_LIVE`): ölçümde
-        // "en çok peer'i ölçülmüş" sırası aday başına 0,1 peer verirken bu sıra 36,4 verdi.
+        // Çekim kuyruğunun sırası: EN SON ÖLÇÜLEN aday önce (bkz. `queries::NEXT_TO_FETCH_LIVE`).
+        // Ölçümde "en çok peer'i ölçülmüş" sırası aday başına 0,1 peer ve %90 "hiç peer yok"
+        // verirken, ölçüm tazeliğine göre sıralamak 19,6 peer ve %25 verdi.
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_fetch_fresh ON torrents(last_seen DESC) WHERE metadata_status='pending';",
+            "CREATE INDEX IF NOT EXISTS idx_fetch_probe ON torrents(probe_at DESC) WHERE metadata_status='pending';",
         )
         .execute(&self.pool)
         .await?;
+        // Eski deneme (last_seen sırası) artık kullanılmıyor: kanıtsız adayları
+        // kanıtlıların önüne geçiriyordu (bkz. `queries::NEXT_TO_FETCH_LIVE`).
+        let _ = sqlx::query("DROP INDEX IF EXISTS idx_fetch_fresh;")
+            .execute(&self.pool)
+            .await;
         // F13 — BORU HATTI METRİKLERİ (saatlik kova).
         // Neden gerekli: boru hattının iki aşaması işini bitirince kaydı SİLİYOR (triyajda
         // sıfır peer → `delete_pending`; deneme hakkı bitince → `mark_fetch_failed`).
@@ -2694,13 +2715,13 @@ mod tests {
         let now = 1_000_000i64;
         let eski = InfoHash::from_bytes([1u8; 20]);
         let taze = InfoHash::from_bytes([2u8; 20]);
-        // ESKİ: çok peer ölçülmüş ama uzun süredir görülmüyor.
+        // ESKİ: çok peer ölçülmüş ama ölçüm bir gün önce yapılmış.
         store
             .record_sighting_ext(eski, now - 86_400, false)
             .await
             .unwrap();
         store.record_probe(eski, 50, now - 86_400).await.unwrap();
-        // TAZE: az peer ölçülmüş ama az önce görüldü.
+        // TAZE: az peer ölçülmüş ama ölçüm az önce yapıldı.
         store.record_sighting_ext(taze, now, false).await.unwrap();
         store.record_probe(taze, 1, now).await.unwrap();
 
@@ -2708,7 +2729,7 @@ mod tests {
         assert_eq!(
             q.first(),
             Some(&taze),
-            "taze görülen aday önce gelmeli (peer sayısı çok olan eski aday değil)"
+            "ölçümü taze olan aday önce gelmeli (peer sayısı çok olan eski aday değil)"
         );
         assert!(q.contains(&eski), "eski aday da kuyrukta kalır, ama sonra");
     }
