@@ -678,8 +678,13 @@ impl Store {
     /// `unreachable` olur (kalıcı); değilse soğuma sonrası yeniden denenmek üzere
     /// `pending` kalır. (Deneme sayacı `next_to_fetch` seçiminde artırılır.)
     pub async fn mark_fetch_failed(&self, infohash: InfoHash) -> Result<(), StoreError> {
+        // F11: deneme hakkı biten kayıt artık `unreachable` olarak SAKLANMIYOR, SİLİNİYOR.
+        // Gerekçe (kullanıcı): "metadata'sı olmayan infohash bizim işimize yaramıyor;
+        // çekilemeyen bozuk linki hiç uğraşmadan silelim". Ölü kayıtlar hem kuyruğu hem
+        // diski zehirliyordu. Torrent gerçekten canlanırsa DHT'de yeniden görülür ve
+        // taze bir kayıt olarak geri gelir.
         sqlx::query(
-            "UPDATE torrents SET metadata_status = 'unreachable'
+            "DELETE FROM torrents
               WHERE infohash = ?1 AND metadata_status = 'pending' AND fetch_attempts >= ?2",
         )
         .bind(infohash.to_hex())
@@ -687,6 +692,24 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Triyajda peer bulunamayan (ölü) kaydı hemen siler — beklemeye değmez.
+    pub async fn delete_pending(&self, infohash: InfoHash) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM torrents WHERE infohash = ?1 AND metadata_status = 'pending'")
+            .bind(infohash.to_hex())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Bekleyen (adsız) kayıt sayısı — giriş hızını kapasiteye göre kısmak için (F11).
+    pub async fn count_pending(&self) -> Result<i64, StoreError> {
+        let row =
+            sqlx::query("SELECT COUNT(*) AS n FROM torrents WHERE metadata_status = 'pending'")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.get::<i64, _>("n"))
     }
 
     /// Çekim kuyruğu istatistikleri: (pending, sıcak-pending, unreachable, son 1 saatte fetched).
@@ -2287,12 +2310,13 @@ mod tests {
         let much_later = later + FETCH_RETRY_COOLDOWN_SECS + 1;
         let q3 = store.next_to_fetch(10, much_later).await.unwrap();
         assert_eq!(q3[0], ih(1));
-        // 3. deneme yapıldı → başarısızlık artık kalıcı unreachable.
+        // F11: 3. deneme de başarısızsa kayıt `unreachable` olarak SAKLANMAZ, SİLİNİR —
+        // metadata'sı çekilemeyen infohash bizim için değersiz (kullanıcı kararı).
         store.mark_fetch_failed(ih(1)).await.unwrap();
         let (pending, _hot, unreachable, _recent) =
             store.fetch_queue_stats(much_later).await.unwrap();
-        assert_eq!(unreachable, 1);
-        assert_eq!(pending, 2);
+        assert_eq!(unreachable, 0, "artık unreachable tutulmuyor");
+        assert_eq!(pending, 2, "silinen kayıt bekleyenlerden de düştü");
         // Kuyruk tükendi (hepsi 3 denemede).
         assert!(store
             .next_to_fetch(10, much_later + FETCH_RETRY_COOLDOWN_SECS + 1)

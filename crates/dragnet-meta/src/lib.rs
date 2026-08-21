@@ -69,6 +69,9 @@ pub struct MetadataFetcher {
     dht: mainline::async_dht::AsyncDht,
     config: FetchConfig,
     stats: Arc<FetchStats>,
+    /// uTP soketi (F12): TCP zaman aşımından sonra ikinci yol. `None` = açılamadı,
+    /// yalnız TCP kullanılır.
+    utp: Option<Arc<librqbit_utp::UtpSocketUdp>>,
 }
 
 /// Çekim sayaçları (teşhis/pano): boru hattının gerçek verimini görünür kılar.
@@ -91,6 +94,10 @@ pub struct FetchStats {
     pub peer_other: AtomicU64,
     /// Genel internet adresi olmadığı için hiç denenmeyen peer (F8-3 politikası).
     pub peer_not_public: AtomicU64,
+    /// TCP zaman aşımından sonra uTP ile denenip BAŞARILI olan peer sayısı (F12 ölçümü).
+    pub peer_utp_ok: AtomicU64,
+    /// uTP ile de başarısız olanlar.
+    pub peer_utp_fail: AtomicU64,
 }
 
 /// Anlık kopya.
@@ -109,6 +116,8 @@ pub struct FetchStatsSnapshot {
     pub peer_no_metadata_ext: u64,
     pub peer_other: u64,
     pub peer_not_public: u64,
+    pub peer_utp_ok: u64,
+    pub peer_utp_fail: u64,
 }
 
 impl FetchStats {
@@ -136,6 +145,8 @@ impl FetchStats {
             peer_no_metadata_ext: self.peer_no_metadata_ext.load(Ordering::Relaxed),
             peer_other: self.peer_other.load(Ordering::Relaxed),
             peer_not_public: self.peer_not_public.load(Ordering::Relaxed),
+            peer_utp_ok: self.peer_utp_ok.load(Ordering::Relaxed),
+            peer_utp_fail: self.peer_utp_fail.load(Ordering::Relaxed),
         }
     }
 }
@@ -143,12 +154,41 @@ impl FetchStats {
 impl MetadataFetcher {
     /// Yeni bir fetcher oluşturur (kendi DHT istemci düğümünü açar).
     pub fn new(config: FetchConfig) -> std::io::Result<Self> {
-        let dht = Dht::client()?.as_async();
+        // Bootstrap düğümleri normalde alan adıyla çözülür; DNS'in kapalı olduğu
+        // ortamlarda (ölçüm araçları, kısıtlı kabuklar) `DRAGNET_BOOTSTRAP` ortam
+        // değişkeniyle doğrudan IP:port listesi verilebilir.
+        // uTP soketi (F12): TCP zaman aşımından sonraki yedek yol. Açılamazsa yalnız TCP
+        // kullanılır — uTP isteğe bağlı bir iyileştirmedir, zorunlu değil.
+        let dht = match std::env::var("DRAGNET_BOOTSTRAP") {
+            Ok(list) if !list.trim().is_empty() => {
+                let nodes: Vec<String> = list.split(',').map(|s| s.trim().to_string()).collect();
+                mainline::Dht::builder()
+                    .bootstrap(&nodes)
+                    .build()?
+                    .as_async()
+            }
+            _ => Dht::client()?.as_async(),
+        };
         Ok(Self {
             dht,
             config,
             stats: Arc::new(FetchStats::default()),
+            utp: None,
         })
+    }
+
+    /// uTP soketini açar (F12). Başarısız olursa fetcher yalnız TCP ile çalışır.
+    pub async fn enable_utp(&mut self) -> bool {
+        match librqbit_utp::UtpSocket::new_udp("0.0.0.0:0".parse().expect("adres")).await {
+            Ok(s) => {
+                self.utp = Some(s);
+                true
+            }
+            Err(e) => {
+                debug!(error = %e, "uTP soketi açılamadı; yalnız TCP");
+                false
+            }
+        }
     }
 
     /// Sayaçlar (paylaşımlı).
@@ -255,9 +295,28 @@ impl MetadataFetcher {
             while set.len() < conc && launched < max_tries {
                 let Some(addr) = queue.pop_front() else { break };
                 launched += 1;
-                set.spawn(
-                    async move { wire::fetch_info_from_peer(addr, ih_bytes, per_peer).await },
-                );
+                let utp = self.utp.clone();
+                let stats = Arc::clone(&self.stats);
+                set.spawn(async move {
+                    // ÖNCE TCP. Zaman aşımına uğrarsa (ölçüm: denemelerin %97'si böyle)
+                    // aynı peer **uTP** (BEP-29) ile denenir: modern istemcilerin çoğu
+                    // uTP'yi tercih eder ve NAT arkasındaki peer'ler pratikte yalnız uTP
+                    // ile erişilebilir olur. Kazanç sayaçlarla ölçülür (peer_utp_ok).
+                    let first = wire::fetch_info_from_peer(addr, ih_bytes, per_peer).await;
+                    match (first, utp) {
+                        (Err(PeerError::Timeout), Some(sock)) => {
+                            let r = wire::fetch_info_from_peer_utp(&sock, addr, ih_bytes, per_peer)
+                                .await;
+                            if r.is_ok() {
+                                stats.peer_utp_ok.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                stats.peer_utp_fail.fetch_add(1, Ordering::Relaxed);
+                            }
+                            r
+                        }
+                        (other, _) => other,
+                    }
+                });
             }
             let now = Instant::now();
             if now >= deadline {
@@ -352,6 +411,21 @@ impl MetadataFetcher {
     pub async fn count_peers(&self, infohash: InfoHash, timeout: Duration) -> usize {
         let deadline = Instant::now() + timeout;
         self.drain_peers(infohash, deadline, usize::MAX).await.len()
+    }
+
+    /// DHT'den peer adreslerini toplar (ölçüm araçları için; üretim yolu `fetch` içinde
+    /// akışı boru hattıyla tüketir).
+    pub async fn peers_of(
+        &self,
+        infohash: InfoHash,
+        timeout: Duration,
+        max: usize,
+    ) -> Vec<std::net::SocketAddrV4> {
+        let deadline = Instant::now() + timeout;
+        self.drain_peers(infohash, deadline, max)
+            .await
+            .into_iter()
+            .collect()
     }
 }
 

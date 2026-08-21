@@ -17,7 +17,7 @@
 use std::net::SocketAddrV4;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use mainline::Id;
@@ -103,10 +103,21 @@ async fn fetch_inner(addr: SocketAddrV4, infohash: [u8; 20]) -> Result<Vec<u8>, 
     if !is_public_peer(&addr) {
         return Err(PeerError::NotPublic);
     }
-    let mut stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+    let stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
         Ok(s) => s?,
         Err(_) => return Err(PeerError::Timeout),
     };
+    fetch_over_stream(stream, infohash).await
+}
+
+/// BEP-3/BEP-10/BEP-9 akışı — **aktarımdan bağımsız**. TCP soketiyle de uTP akışıyla da
+/// çalışır (F12 ölçümü: peer denemelerinin %97'si TCP zaman aşımı; modern istemcilerin
+/// çoğu uTP tercih ediyor ve NAT arkasındaki peer'ler pratikte yalnız uTP ile erişilebilir).
+pub async fn fetch_over_stream<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    infohash: [u8; 20],
+) -> Result<Vec<u8>, PeerError> {
+    let mut stream = stream;
 
     // --- BEP-3 handshake ---
     stream.write_all(&build_handshake(&infohash)).await?;
@@ -265,7 +276,9 @@ fn build_extended_message(ext_id: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Extended handshake'i bekler; `(peer_ut_metadata_id, metadata_size)` döner.
-async fn read_extended_handshake(stream: &mut TcpStream) -> Result<(u8, i64), PeerError> {
+async fn read_extended_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> Result<(u8, i64), PeerError> {
     for _ in 0..MAX_HANDSHAKE_MESSAGES {
         let (id, payload) = read_message(stream).await?;
         if id != MSG_EXTENDED || payload.is_empty() || payload[0] != EXT_HANDSHAKE_ID {
@@ -283,7 +296,9 @@ async fn read_extended_handshake(stream: &mut TcpStream) -> Result<(u8, i64), Pe
 }
 
 /// Uzunluk-önekli bir peer mesajı okur. `(id, payload)` döner; keep-alive'ları atlar.
-async fn read_message(stream: &mut TcpStream) -> Result<(u8, Vec<u8>), PeerError> {
+async fn read_message<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> Result<(u8, Vec<u8>), PeerError> {
     loop {
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
@@ -472,5 +487,28 @@ mod public_peer_tests {
     fn genel_adres_kabul_edilir() {
         assert!(is_public_peer(&a([8, 8, 8, 8], 6881)));
         assert!(is_public_peer(&a([88, 230, 12, 4], 51413)));
+    }
+}
+
+/// Aynı BEP-9 akışını **uTP** (BEP-29, UDP üstü) ile yürütür. TCP'ye kapalı ama uTP'ye
+/// açık peer'ler için ikinci yol; ölçüm aracı ve (kazanç doğrulanırsa) üretim yolu.
+pub async fn fetch_info_from_peer_utp(
+    socket: &std::sync::Arc<librqbit_utp::UtpSocketUdp>,
+    addr: SocketAddrV4,
+    infohash: [u8; 20],
+    timeout: Duration,
+) -> Result<Vec<u8>, PeerError> {
+    if !is_public_peer(&addr) {
+        return Err(PeerError::NotPublic);
+    }
+    let connect = tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(addr.into()));
+    let stream = match connect.await {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) => return Err(PeerError::ConnectionClosed),
+        Err(_) => return Err(PeerError::Timeout),
+    };
+    match tokio::time::timeout(timeout, fetch_over_stream(stream, infohash)).await {
+        Ok(r) => r,
+        Err(_) => Err(PeerError::Timeout),
     }
 }

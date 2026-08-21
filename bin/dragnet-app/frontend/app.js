@@ -180,7 +180,7 @@ function renderFetch(f, q, on) {
   $("fetch-summary").textContent = f.attempts ? `${nf(f.ok)} başarılı · ${nf(f.no_peers)} peer yok · ${nf(f.all_peers_failed)} peer başarısız · ${nf(renderFetch._hints || 0)} peer ipucu` : "";
   // Peer hata dökümü (teşhis): denemelerin neden başarısız olduğunu gösterir.
   const pt = (f.peer_ok||0)+(f.peer_timeout||0)+(f.peer_io||0)+(f.peer_bad_handshake||0)+(f.peer_no_ext||0)+(f.peer_not_public||0)+(f.peer_other||0);
-  $("peer-breakdown").innerHTML = pt ? `Peer denemeleri: <b>${nf(f.peer_ok||0)}</b> başarılı · ${nf(f.peer_timeout||0)} zaman aşımı · ${nf(f.peer_io||0)} bağlantı hatası · ${nf(f.peer_bad_handshake||0)} handshake · ${nf(f.peer_no_ext||0)} metadata yok · ${nf(f.peer_not_public||0)} genel-olmayan adres · ${nf(f.peer_other||0)} diğer` : "";
+  $("peer-breakdown").innerHTML = pt ? `Peer denemeleri: <b>${nf(f.peer_ok||0)}</b> başarılı · ${nf(f.peer_timeout||0)} zaman aşımı · ${nf(f.peer_io||0)} bağlantı hatası · ${nf(f.peer_bad_handshake||0)} handshake · ${nf(f.peer_no_ext||0)} metadata yok · ${nf(f.peer_not_public||0)} genel-olmayan adres · ${nf(f.peer_other||0)} diğer` + ((f.peer_utp_ok||f.peer_utp_fail) ? ` · <b>uTP yedek yolu:</b> ${nf(f.peer_utp_ok||0)} başarılı / ${nf((f.peer_utp_ok||0)+(f.peer_utp_fail||0))} deneme` : "") : "";
   $("fetch-detail").textContent = f.attempts
     ? `Ort. ${f.avg_peers.toFixed(1)} peer/çekim. Peer bulunamayan çekimler DHT'de o an kimsenin sunmadığı (ölü) torrent'lerdir; ` +
       `peer bulunup başarısız olanlar çoğunlukla NAT arkasındaki ya da metadata paylaşmayan peer'lerdir. Kuyruk sıcak › popüler › taze sırasıyla işlenir; başarısızlar 6 saat sonra tekrar denenir (en çok 3).`

@@ -149,6 +149,7 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
             "peer_ok": f.peer_ok, "peer_timeout": f.peer_timeout, "peer_io": f.peer_io,
             "peer_bad_handshake": f.peer_bad_handshake, "peer_no_ext": f.peer_no_metadata_ext,
             "peer_not_public": f.peer_not_public, "peer_other": f.peer_other,
+            "peer_utp_ok": f.peer_utp_ok, "peer_utp_fail": f.peer_utp_fail,
         })),
         "queue": queue.map(|(p, h, u, r)| json!({ "pending": p, "hot": h, "unreachable": u, "fetched_last_hour": r })),
         "semantic": state.semantic.status_json().await,

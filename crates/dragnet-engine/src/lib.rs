@@ -11,7 +11,7 @@ pub mod semantic_indexer;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -67,6 +67,10 @@ impl Default for EngineConfig {
 const TRIAGE_BATCH: i64 = 8;
 /// Triyaj peer sayımı için süre bütçesi: "peer var mı" sorusu, tam arama değil.
 const TRIAGE_TIMEOUT: Duration = Duration::from_secs(6);
+/// Bekleyen kuyruk üst sınırı (F11): bunun üstünde soğuk BEP-51 örnekleri alınmaz.
+/// Çekim kapasitesi saatte ~300-400 ad; birkaç saatlik iş kuyrukta yeterlidir. Daha
+/// fazlası, sıra gelene kadar ölen torrent'leri biriktirmekten başka işe yaramaz.
+const MAX_PENDING_BACKLOG: i64 = 20_000;
 /// Ölü bekleyen kayıtlar bu süreden eskiyse silinir (kullanıcı isteği: 3 gün).
 const DEAD_PURGE_AFTER_SECS: i64 = 3 * 24 * 3600;
 
@@ -161,10 +165,15 @@ impl Engine {
         );
         let mut harvester = harvesters.remove(0);
 
-        let fetcher = Arc::new(MetadataFetcher::new(FetchConfig {
+        let mut fetcher_inner = MetadataFetcher::new(FetchConfig {
             concurrency: config.fetch_peer_concurrency,
             ..Default::default()
-        })?);
+        })?;
+        // F12: uTP yedek yolu. TCP zaman aşımına uğrayan peer'ler uTP ile yeniden
+        // denenir; kazanç `peer_utp_ok` sayacıyla üretimde ölçülür.
+        let utp_ready = fetcher_inner.enable_utp().await;
+        info!(utp = utp_ready, "metadata fetcher hazır");
+        let fetcher = Arc::new(fetcher_inner);
         // Tüm kimliklerin sayaçları toplanarak raporlanır; ek kimliklerin infohash
         // akışları birincil kanala aktarılır (tüketici tarafı değişmez).
         let mut harvester_stats = vec![harvester.stats()];
@@ -244,7 +253,14 @@ impl Engine {
                         handles.push(tokio::spawn(async move {
                             // Kısa bütçe: bu bir "var mı yok mu" ölçümü, tam arama değil.
                             let peers = fetcher.count_peers(ih, TRIAGE_TIMEOUT).await;
-                            let _ = store.record_probe(ih, peers as i64, now_unix()).await;
+                            if peers == 0 {
+                                // F11: peer'i olmayan torrent'in metadata'sı çekilemez;
+                                // saklamak kuyruğu ve diski zehirliyor → hemen sil.
+                                // Gerçekten canlanırsa DHT'de yeniden görülür.
+                                let _ = store.delete_pending(ih).await;
+                            } else {
+                                let _ = store.record_probe(ih, peers as i64, now_unix()).await;
+                            }
                         }));
                     }
                     for h in handles {
@@ -327,7 +343,22 @@ impl Engine {
             let store = store.clone();
             let hints = Arc::clone(&hints);
             tasks.push(tokio::spawn(async move {
+                // GİRİŞ KISMA (F11): infohash toplamak metadata çekmekten kat kat hızlı.
+                // Kuyruk kapasitenin üstüne çıkınca **soğuk** örnekler (BEP-51) alınmaz;
+                // sıcak sinyaller (announce/get_peers) ve peer'li görülmeler her zaman
+                // kabul edilir. Kullanıcı teşhisi: "metadata sorgusu yapabildiğimizin biraz
+                // fazlası kadar infohash çekelim; boşuna infohash'te hızlanıp metadata'da
+                // çakılmaya gerek yok."
+                let mut pending = 0i64;
+                let mut last_count = Instant::now() - Duration::from_secs(60);
                 while let Some(s) = harvester.infohashes.recv().await {
+                    if last_count.elapsed() >= Duration::from_secs(10) {
+                        pending = store.count_pending().await.unwrap_or(pending);
+                        last_count = Instant::now();
+                    }
+                    if pending > MAX_PENDING_BACKLOG && !s.source.is_hot() && s.peers.is_empty() {
+                        continue; // kuyruk dolu: soğuk örneği alma
+                    }
                     if !s.peers.is_empty() {
                         hints
                             .lock()
