@@ -2519,7 +2519,10 @@ mod tests {
         // (`hot_seen` tazelenir) ya da triyaj ölçümü (`probe_peers`). Kayıt kaybolmaz:
         // `probe_at` hâlâ 0 olduğu için triyaj sırasındadır, orada ya peer bulunup canlı
         // kola döner ya da sıfır peer'le silinir.
-        assert!(!q2.contains(&ih(2)), "yalnız-sıcak aday yeni kanıt beklemeli");
+        assert!(
+            !q2.contains(&ih(2)),
+            "yalnız-sıcak aday yeni kanıt beklemeli"
+        );
         assert!(
             store
                 .next_to_triage(10, later)
@@ -2573,17 +2576,26 @@ mod tests {
         store.add_metric(metric::TRIAGE_DEAD, 7, now).await.unwrap();
         // Aynı kovaya yazılanlar toplanır.
         assert_eq!(
-            store.metric_since(metric::TRIAGE_DONE, now, 600).await.unwrap(),
+            store
+                .metric_since(metric::TRIAGE_DONE, now, 600)
+                .await
+                .unwrap(),
             3
         );
         assert_eq!(
-            store.metric_since(metric::TRIAGE_DEAD, now, 600).await.unwrap(),
+            store
+                .metric_since(metric::TRIAGE_DEAD, now, 600)
+                .await
+                .unwrap(),
             7
         );
         // Sıfır/negatif artış yazılmaz (harvester farkı hesaplanırken oluşabilir).
         store.add_metric(metric::TRIAGE_DEAD, 0, now).await.unwrap();
         assert_eq!(
-            store.metric_since(metric::TRIAGE_DEAD, now, 600).await.unwrap(),
+            store
+                .metric_since(metric::TRIAGE_DEAD, now, 600)
+                .await
+                .unwrap(),
             7
         );
         // Pencere dışındaki eski kova sayılmaz.

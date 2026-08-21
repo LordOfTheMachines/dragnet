@@ -138,7 +138,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {
             let conc = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(32);
             (
-                a[3..].iter().filter_map(|h| InfoHash::from_hex(h)).collect(),
+                a[3..]
+                    .iter()
+                    .filter_map(|h| InfoHash::from_hex(h))
+                    .collect(),
                 conc,
             )
         }

@@ -416,7 +416,10 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
     let persisted = config.state_path.as_deref().and_then(state::load);
     let (initial_id, cached_nodes) = match persisted {
         Some((id, nodes)) => {
-            info!(nodes = nodes.len(), "önceki DHT kimliği ve düğümler geri yüklendi");
+            info!(
+                nodes = nodes.len(),
+                "önceki DHT kimliği ve düğümler geri yüklendi"
+            );
             (id, nodes)
         }
         None => (*Id::random().as_bytes(), Vec::new()),

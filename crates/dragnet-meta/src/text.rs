@@ -116,5 +116,4 @@ mod tests {
         assert_eq!(get_text(&d, "name").as_deref(), Some("电影"));
         assert!(get_text(&d, "missing").is_none());
     }
-
 }

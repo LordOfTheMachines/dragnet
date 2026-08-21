@@ -29,7 +29,10 @@ async fn main() {
     // olmayan kayıtları saniyeler içinde siler, dolayısıyla keşfedilenlerin çoğu sayım
     // anında tabloda yoktur. Gerçek hız `DHT_HARVESTED` olay sayacından okunur; bu satır
     // "kuyrukta biriken" anlamına gelir.
-    let kept = n(format!("SELECT COUNT(*) FROM torrents WHERE first_seen > {since}")).await;
+    let kept = n(format!(
+        "SELECT COUNT(*) FROM torrents WHERE first_seen > {since}"
+    ))
+    .await;
     // ÖNEMLİ: triyaj ve çekim aşamaları işini bitirince kaydı SİLİYOR (sıfır peer →
     // `delete_pending`, deneme hakkı bitti → `mark_fetch_failed`). Bu yüzden hızlarını
     // tablodaki satırları sayarak ölçmek YANILTIR — silinenler görünmez. Ölçümde tam
@@ -62,7 +65,8 @@ async fn main() {
     ))
     .await;
     let triage_backlog = n(
-        "SELECT COUNT(*) FROM torrents WHERE metadata_status='pending' AND probe_at = 0".to_string(),
+        "SELECT COUNT(*) FROM torrents WHERE metadata_status='pending' AND probe_at = 0"
+            .to_string(),
     )
     .await;
     // Triyajı işaretlenmiş ama sonucu yazılmamış (probe_at>0 & probe_peers=-1): sızıntı.
@@ -76,21 +80,45 @@ async fn main() {
     println!("PENCERE: son {win_min} dakika\n");
     println!("AŞAMA HIZI (saatlik projeksiyon)");
     let discovered = m(dragnet_store::metric::DHT_HARVESTED).await;
-    println!("  1. hasat (yeni infohash)  : {discovered:>7}  → {:>8.0}/saat", per_h(discovered));
+    println!(
+        "  1. hasat (yeni infohash)  : {discovered:>7}  → {:>8.0}/saat",
+        per_h(discovered)
+    );
     println!("     · kuyrukta kalan       : {kept:>7}  (gerisini triyaj ölü bulup sildi)");
-    println!("  2. triyaj (peer ölçümü)   : {probed:>7}  → {:>8.0}/saat", per_h(probed));
-    println!("  3. çekim denemesi         : {attempted:>7}  → {:>8.0}/saat", per_h(attempted));
-    println!("  4. BAŞARI (ad indekslendi): {succeeded:>7}  → {:>8.0}/saat", per_h(succeeded));
+    println!(
+        "  2. triyaj (peer ölçümü)   : {probed:>7}  → {:>8.0}/saat",
+        per_h(probed)
+    );
+    println!(
+        "  3. çekim denemesi         : {attempted:>7}  → {:>8.0}/saat",
+        per_h(attempted)
+    );
+    println!(
+        "  4. BAŞARI (ad indekslendi): {succeeded:>7}  → {:>8.0}/saat",
+        per_h(succeeded)
+    );
     if attempted > 0 {
-        println!("\n  deneme başına başarı     : %{:.1}", 100.0 * succeeded as f64 / attempted as f64);
+        println!(
+            "\n  deneme başına başarı     : %{:.1}",
+            100.0 * succeeded as f64 / attempted as f64
+        );
     }
     if probed > 0 {
-        println!("  triyajda ölü çıkan       : %{:.1}  ({triage_dead})", 100.0 * triage_dead as f64 / probed as f64);
-        println!("  triyaj → aday dönüşümü   : %{:.1}", 100.0 * (probed - triage_dead) as f64 / probed as f64);
+        println!(
+            "  triyajda ölü çıkan       : %{:.1}  ({triage_dead})",
+            100.0 * triage_dead as f64 / probed as f64
+        );
+        println!(
+            "  triyaj → aday dönüşümü   : %{:.1}",
+            100.0 * (probed - triage_dead) as f64 / probed as f64
+        );
     }
     if succeeded > 0 {
         // F13 kazancının doğrudan kanıtı: DHT araması hiç yapılmadan biten çekimler.
-        println!("  DHT aramasız başarı      : %{:.1}  ({hinted_ok}/{succeeded})", 100.0 * hinted_ok as f64 / succeeded as f64);
+        println!(
+            "  DHT aramasız başarı      : %{:.1}  ({hinted_ok}/{succeeded})",
+            100.0 * hinted_ok as f64 / succeeded as f64
+        );
     }
     // HARVESTER: hasat düşükse sebebi burada görünür — aktif örnekleme mi durdu
     // (samples), yoksa ağ bizi tanımıyor mu (announce/get_peers sıfıra yakın)?
@@ -101,27 +129,49 @@ async fn main() {
     let limited = m(dragnet_store::metric::DHT_RATE_LIMITED).await;
     println!("\nHARVESTER (DHT)");
     let dups = m(dragnet_store::metric::DHT_DUPLICATES).await;
-    println!("  BEP-51 örnek (aktif)      : {samples:>7}  → {:>8.1}/sn", samples as f64 / win_secs as f64);
+    println!(
+        "  BEP-51 örnek (aktif)      : {samples:>7}  → {:>8.1}/sn",
+        samples as f64 / win_secs as f64
+    );
     if samples > 0 {
         // Bu oran %100'e yaklaşıyorsa aynı düğümlerden aynı örnekler geliyordur:
         // örnekleme dönüyor ama YENİ infohash üretmiyordur.
-        println!("    · tekrar (dedup)        : {dups:>7}  (%{:.1} örnek boşa)",
-            100.0 * dups as f64 / samples as f64);
+        println!(
+            "    · tekrar (dedup)        : {dups:>7}  (%{:.1} örnek boşa)",
+            100.0 * dups as f64 / samples as f64
+        );
     }
-    println!("  gelen announce (pasif)    : {announce:>7}  → {:>8.0}/saat", per_h(announce));
-    println!("  gelen get_peers (pasif)   : {gp:>7}  → {:>8.0}/saat", per_h(gp));
-    println!("  gönderilen sorgu          : {sent:>7}  → {:>8.1}/sn", sent as f64 / win_secs as f64);
+    println!(
+        "  gelen announce (pasif)    : {announce:>7}  → {:>8.0}/saat",
+        per_h(announce)
+    );
+    println!(
+        "  gelen get_peers (pasif)   : {gp:>7}  → {:>8.0}/saat",
+        per_h(gp)
+    );
+    println!(
+        "  gönderilen sorgu          : {sent:>7}  → {:>8.1}/sn",
+        sent as f64 / win_secs as f64
+    );
     if sent + limited > 0 {
-        println!("  rate-limit ile düşen      : {limited:>7}  (%{:.0} talep reddedildi)",
-            100.0 * limited as f64 / (sent + limited) as f64);
+        println!(
+            "  rate-limit ile düşen      : {limited:>7}  (%{:.0} talep reddedildi)",
+            100.0 * limited as f64 / (sent + limited) as f64
+        );
     }
     let resp = m(dragnet_store::metric::DHT_RESPONSES).await;
     let learned = m(dragnet_store::metric::DHT_NODES_LEARNED).await;
     let dropped = m(dragnet_store::metric::DHT_DROPPED).await;
     if sent > 0 {
-        println!("  gelen yanıt               : {resp:>7}  (sorgu başına %{:.0})", 100.0 * resp as f64 / sent as f64);
+        println!(
+            "  gelen yanıt               : {resp:>7}  (sorgu başına %{:.0})",
+            100.0 * resp as f64 / sent as f64
+        );
     }
-    println!("  öğrenilen düğüm           : {learned:>7}  → {:>8.1}/sn", learned as f64 / win_secs as f64);
+    println!(
+        "  öğrenilen düğüm           : {learned:>7}  → {:>8.1}/sn",
+        learned as f64 / win_secs as f64
+    );
     println!("  kanal doluluğundan düşen  : {dropped:>7}");
     let sockerr = m(dragnet_store::metric::DHT_SOCK_ERR).await;
     println!("  UDP soket hatası          : {sockerr:>7}  (Windows ICMP/WSAECONNRESET)");

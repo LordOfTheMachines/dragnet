@@ -309,9 +309,7 @@ impl Engine {
                             let _permit = permit;
                             // Kısa bütçe: bu bir "var mı yok mu" ölçümü, tam arama değil.
                             // `TRIAGE_PEER_CAP` peer bulununca arama erkenden biter.
-                            let peers = fetcher
-                                .peers_of(ih, TRIAGE_TIMEOUT, TRIAGE_PEER_CAP)
-                                .await;
+                            let peers = fetcher.peers_of(ih, TRIAGE_TIMEOUT, TRIAGE_PEER_CAP).await;
                             // Olay olarak sayılır: ölü kayıt SİLİNDİĞİ için tablodaki
                             // satırlara bakarak triyaj hızı ölçülemez (bkz. `metrics`).
                             let _ = store.bump_metric(metric::TRIAGE_DONE, now_unix()).await;
@@ -385,8 +383,14 @@ impl Engine {
                             metric::DHT_QUERIES_SENT,
                             cur.queries_sent - prev.queries_sent,
                         ),
-                        (metric::DHT_RATE_LIMITED, cur.rate_limited - prev.rate_limited),
-                        (metric::DHT_RESPONSES, cur.responses_seen - prev.responses_seen),
+                        (
+                            metric::DHT_RATE_LIMITED,
+                            cur.rate_limited - prev.rate_limited,
+                        ),
+                        (
+                            metric::DHT_RESPONSES,
+                            cur.responses_seen - prev.responses_seen,
+                        ),
                         (
                             metric::DHT_NODES_LEARNED,
                             cur.nodes_learned - prev.nodes_learned,
@@ -656,9 +660,7 @@ async fn fetch_and_store(
             // İpucu adresleri, DHT araması devreye girmeden (HINT_GRACE) sonuç verdiyse
             // bu çekim ağa hiç arama maliyeti ödetmedi — F13'ün asıl kazancı budur.
             if hinted && started.elapsed() < dragnet_meta::HINT_GRACE {
-                let _ = store
-                    .bump_metric(metric::FETCH_OK_HINTED, now_unix())
-                    .await;
+                let _ = store.bump_metric(metric::FETCH_OK_HINTED, now_unix()).await;
             }
             match store.upsert_torrent(&record).await {
                 Ok(()) => info!(infohash = %infohash, name = %name, files, "metadata indekslendi"),
