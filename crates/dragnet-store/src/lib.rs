@@ -793,6 +793,23 @@ impl Store {
         Ok(row.get::<i64, _>("n"))
     }
 
+    /// **İŞLENMEMİŞ** iş yükü: henüz triyaj edilmemiş bekleyen kayıt sayısı.
+    ///
+    /// Giriş kısma kararı bunu kullanmalıdır, `count_pending`'i DEĞİL. Fark ölçümle
+    /// görüldü: bekleyen 23.166 iken bunun 14.648'i zaten triyajdan geçmiş, denenmiş ve
+    /// yeniden-deneme soğumasında bekleyen kayıttı — yani **bitmiş iş**. Toplam sayıya
+    /// bakan kısma, bu bitmiş işi "kuyruk dolu" sayıp taze infohash girişini kesiyordu;
+    /// oysa triyaj kuyruğu boşalmış, sistem aç bekliyordu.
+    pub async fn count_triage_backlog(&self) -> Result<i64, StoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n FROM torrents
+              WHERE metadata_status = 'pending' AND probe_at = 0",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
     /// Çekim kuyruğu istatistikleri: (pending, sıcak-pending, unreachable, son 1 saatte fetched).
     pub async fn fetch_queue_stats(&self, now: i64) -> Result<(i64, i64, i64, i64), StoreError> {
         let r = sqlx::query(
@@ -2642,6 +2659,33 @@ mod tests {
                 .unwrap()
         );
         assert!(now - w2 > now - w1);
+    }
+
+    /// Giriş kısma, İŞLENMEMİŞ yükü ölçmelidir. Triyajdan geçmiş kayıtlar "bitmiş iş"tir
+    /// ve kuyruk doluluğu sayılmamalıdır — aksi hâlde bitmiş iş taze infohash girişini
+    /// keser (ölçümde bekleyen 23.166'nın 14.648'i bu durumdaydı ve hasat boğuluyordu).
+    #[tokio::test]
+    async fn intake_throttle_counts_only_untriaged_work() {
+        let store = Store::in_memory().await.unwrap();
+        let now = 1_000_000i64;
+        let ih = |n: u8| InfoHash::from_bytes([n; 20]);
+        for i in 1..=3u8 {
+            store.record_sighting_ext(ih(i), now, false).await.unwrap();
+        }
+        assert_eq!(store.count_pending().await.unwrap(), 3);
+        assert_eq!(store.count_triage_backlog().await.unwrap(), 3);
+
+        // İkisi triyajdan geçti (biri sağlıklı, biri ölçülüp peer'siz ama kayıtta kaldı).
+        store.record_probe(ih(1), 5, now).await.unwrap();
+        store.record_probe(ih(2), 0, now).await.unwrap();
+
+        // Toplam bekleyen değişmedi; ama İŞLENMEMİŞ yük düştü — kısma bunu görmeli.
+        assert_eq!(store.count_pending().await.unwrap(), 3);
+        assert_eq!(
+            store.count_triage_backlog().await.unwrap(),
+            1,
+            "triyajdan geçmiş kayıtlar iş yükü sayılmamalı"
+        );
     }
 
     /// Yarım kalmış triyaj işareti (`probe_at` set, sonuç yok) kaydı sonsuza dek

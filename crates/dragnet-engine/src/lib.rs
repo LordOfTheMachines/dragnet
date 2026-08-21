@@ -76,9 +76,15 @@ const TRIAGE_TIMEOUT: Duration = Duration::from_secs(6);
 /// toplanan adresler çekim aşamasına ipucu olarak devredilir. `PeerHints` zaten 16'da
 /// kırptığı için daha fazlasını toplamak boşuna DHT trafiği olurdu.
 const TRIAGE_PEER_CAP: usize = 16;
-/// Bekleyen kuyruk üst sınırı (F11): bunun üstünde soğuk BEP-51 örnekleri alınmaz.
-/// Çekim kapasitesi saatte ~300-400 ad; birkaç saatlik iş kuyrukta yeterlidir. Daha
-/// fazlası, sıra gelene kadar ölen torrent'leri biriktirmekten başka işe yaramaz.
+/// **Triyaj bekleyen** kuyruğun üst sınırı (F11, F13'te anlamı düzeltildi): bunun
+/// üstünde soğuk BEP-51 örnekleri alınmaz; sıcak sinyaller ve peer'li görülmeler her
+/// zaman kabul edilir.
+///
+/// Ölçülen triyaj kapasitesi saatte ~8.000-16.000, dolayısıyla 20.000 yaklaşık 1,5-2
+/// saatlik iştir — sıra gelene kadar ölen torrent biriktirmemek için bu kadarı yeterli.
+/// Sayım İŞLENMEMİŞ yükü almalıdır (`count_triage_backlog`): toplam bekleyeni saymak,
+/// triyajdan geçmiş ve yalnız soğumada bekleyen kayıtları da "iş" sanıp girişi
+/// gereksiz yere kesiyordu.
 const MAX_PENDING_BACKLOG: i64 = 20_000;
 /// Ölü bekleyen kayıtlar bu süreden eskiyse silinir (kullanıcı isteği: 3 gün).
 const DEAD_PURGE_AFTER_SECS: i64 = 3 * 24 * 3600;
@@ -478,11 +484,17 @@ impl Engine {
                 let mut last_count = Instant::now() - Duration::from_secs(60);
                 while let Some(s) = harvester.infohashes.recv().await {
                     if last_count.elapsed() >= Duration::from_secs(10) {
-                        pending = store.count_pending().await.unwrap_or(pending);
+                        // İŞLENMEMİŞ yük ölçülür (triyaj bekleyenler), toplam bekleyen
+                        // DEĞİL: toplam sayı, triyajdan geçmiş ve yalnız yeniden-deneme
+                        // soğumasında bekleyen kayıtları da içeriyordu. Ölçümde bekleyen
+                        // 23.166'nın 14.648'i böyleydi — yani bitmiş iş "kuyruk dolu"
+                        // sayılıp taze infohash girişini kesiyordu, oysa triyaj kuyruğu
+                        // boşalmış ve sistem aç bekliyordu.
+                        pending = store.count_triage_backlog().await.unwrap_or(pending);
                         last_count = Instant::now();
                     }
                     if pending > MAX_PENDING_BACKLOG && !s.source.is_hot() && s.peers.is_empty() {
-                        continue; // kuyruk dolu: soğuk örneği alma
+                        continue; // triyaj kuyruğu dolu: soğuk örneği alma
                     }
                     if !s.peers.is_empty() {
                         hints

@@ -89,11 +89,15 @@ async fn main() {
     );
     println!("AŞAMA HIZI (saatlik projeksiyon)");
     let discovered = m(dragnet_store::metric::DHT_HARVESTED).await;
+    // DİKKAT: bu, DHT'de KEŞFEDİLEN benzersiz infohash sayısıdır — kuyruğa GİREN değil.
+    // Bekleyen yığın `MAX_PENDING_BACKLOG`'u aşınca soğuk örnekler bilerek alınmaz
+    // (giriş kısma), dolayısıyla bu sayı triyaj kapasitesinin kat kat üstünde olabilir
+    // ve öyle olması normaldir: darboğaz keşif değil, triyajdır.
     println!(
-        "  1. hasat (yeni infohash)  : {discovered:>7}  → {:>8.0}/saat",
+        "  1. hasat (keşfedilen)     : {discovered:>7}  → {:>8.0}/saat",
         per_h(discovered)
     );
-    println!("     · kuyrukta kalan       : {kept:>7}  (gerisini triyaj ölü bulup sildi)");
+    println!("     · kuyrukta kalan       : {kept:>7}  (gerisi kısıldı ya da triyajda ölü çıktı)");
     println!(
         "  2. triyaj (peer ölçümü)   : {probed:>7}  → {:>8.0}/saat",
         per_h(probed)
