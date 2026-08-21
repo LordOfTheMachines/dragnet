@@ -281,6 +281,33 @@ olarak WHERE'de kalır, ama **önceliği tazelik belirler**.
 filtre olabilir. Bayat bir ölçüt sıralamada kullanılırsa sistem kendini eski verinin
 içine kilitler ve taze veriyi hiç göremez.
 
+### Sıralama seçimi: `last_seen` değil `probe_at`
+
+İlk düzeltmede `last_seen DESC` seçildi (tablodaki en yüksek peer/aday değeri) ama
+üretimde deneme başına başarı %2,4'ten %1,2'ye **düştü**. Sebep, testin kapsamıydı:
+`ordertest` adayları `probe_peers > 0` ile, yani yalnız triyajdan geçmişlerden seçiyordu.
+Üretimin `WHERE`'i ise daha geniştir — hint'li ya da "sıcak" ama henüz **ölçülmemiş**
+kayıtları da alır. `last_seen DESC` bu kanıtsız adayları kanıtlıların önüne geçiriyordu.
+
+`probe_at DESC` ikisini birden verir: en son **ölçülen** aday önce gelir, hiç ölçülmemişler
+(`probe_at = 0`) doğal olarak sona düşer ve önce triyajdan geçerler. Bu, "dar bir testin
+sonucunu geniş bir bağlama taşımanın" tipik tuzağıdır — testin filtresi, üretimin filtresi
+değildi.
+
+### Sonuç (2026-08-22, 12,8 dakikalık kesintisiz pencere)
+
+| Ölçüm | Çöküş anında | Düzeltme sonrası |
+|---|---|---|
+| İsim üretimi | 38/saat | **~272/saat** |
+| Deneme başına başarı | %0,4 | **%2,6** |
+| Triyaj | — | 19.777/saat |
+| BEP-51 örnek | 62/sn | **149/sn** |
+| Keşfedilen infohash | — | **416.000/saat** |
+
+Uygulanan ayarlar: eşzamanlı TCP 384 → **96** (ölçülen verim tepesi), triyaj eşzamanlılığı
+24 → **12** (her triyaj ~50 UDP paketi), harvester bütçesi 50 → **120/sn** ve `crawl_batch`
+4 → **16** (harvester sorguları tek pakettir, ucuzdur), düğüm kuyruğu 8.192 → **65.536**.
+
 ## 9. Çürüyen hipotezler (tekrar denemeyin)
 
 Bunlar ölçülüp reddedildi; gerekçeleri `docs/PLAN-FAZ-F.md` §F9–F12'de:

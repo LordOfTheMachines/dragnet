@@ -10,6 +10,9 @@
 //! Kullanım:
 //!   peerstat live <conc> <infohash...>  — verilen infohash'ler (bilinen-canlı test için)
 //!   peerstat db <db yolu> <n> <conc>    — depodan sağlıklı (triyajdan geçmiş) adaylar
+//!   peerstat sweep <db> <n>             — eşzamanlılık × zaman aşımı taraması
+//!   peerstat lookups <db> <n>           — eşzamanlı DHT araması taraması (peer/arama)
+//!   peerstat ordertest <db>             — aday sıralaması: hangi sıra CANLI aday veriyor
 use std::net::SocketAddrV4;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

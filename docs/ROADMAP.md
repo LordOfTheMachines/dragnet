@@ -118,6 +118,18 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       Ölçüm: giden sorgu 1,5 → 46/sn, BEP-51 örnek 0,9 → 85/sn, triyaj 1.406 → 11.260/saat,
       **isim üretimi 146 → ~270-400/saat**. Yeni teşhis araçları: `--example rate` (aşama
       hızları + sorgu planları) ve `--example peerstat` (peer hunisi).
+- [x] Faz F (F13-2): **çekim %0'a düştü — sebep ADAY SIRALAMASI.** Kuyruk
+      `probe_peers DESC` ile sıralıyordu; o ölçümler eski, torrentler ölü ve bu kayıtlar
+      hep başta olduğu için taze adaylar hiç sıra alamıyordu. Ölçüm (`peerstat ordertest`):
+      bu sıra aday başına **0,1 peer / %90 hiç peer yok**, `probe_at DESC` 19,6 peer / %25.
+      Ayrıca ölçüldü: eşzamanlı TCP verim tepesi **96** (384'te modem tablosu taşıyor,
+      bağlanma %18,1 → %14,4); zaman aşımını uzatmak handshake oranını artırıyor
+      (%12,4 → %15,4) ama **verimi 13 kat düşürüyor**; `mainline` tıkanması hipotezi
+      çürüdü (48 eşzamanlı aramada bile 19,7 peer/arama). Harvester tarafı: `crawl_batch`
+      4 → 16 ve bütçe 50 → 120/sn (sorguları TEK PAKET, ucuz), düğüm kuyruğu 8.192 → 65.536
+      (aynı düğüme 2 dakikada bir soruluyordu, örneklerin %86'sı tekrardı).
+      **Sonuç: isim üretimi 38 → ~272/saat, BEP-51 örnek 62 → 149/sn.**
+      Yeni teşhis modları: `peerstat sweep|lookups|ordertest`.
 - [x] Faz F (F4-2, F4-3): yazım düzeltme (indeks sözlüğü + eş-geçiş doğrulaması), kategori
       gözatma, kavram sözlüğü, tanınmayan tek kelime → boş; hit@5 %84→%90, MRR 0.82.
 - [ ] Faz F (F7 — kullanıcı önerisi): çevrim içi zenginleştirme (Wikidata öncelikli;
