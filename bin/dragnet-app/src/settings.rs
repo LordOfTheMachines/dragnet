@@ -73,11 +73,16 @@ fn default_disk_reserve() -> f64 {
     5.0
 }
 
-/// Varsayılan triyaj eşzamanlılığı. Ölçüm (F13): eski bariyerli 8'lik tur saatte yalnız
-/// ~900-1.400 aday ölçebiliyordu, oysa hasat saatte ~2.800-3.600 yeni infohash getiriyor —
-/// yani çekimin aday arzını triyaj kısıyordu.
+/// Varsayılan triyaj eşzamanlılığı.
+///
+/// Ölçüm (F13): eski bariyerli 8'lik tur saatte yalnız ~900-1.400 aday ölçebiliyordu.
+/// Ama 24'e çıkarmak da yanlıştı: her triyaj bir DHT ARAMASIDIR ve bir arama ~50 UDP
+/// sorgusu eder (harvester'ın tek-paketlik sorgularının aksine). 24 eşzamanlı arama
+/// tek başına ~400 sorgu/sn demekti ve çekimin aramalarıyla birlikte modemi taşırıyordu.
+/// 12, hem aday arzını besler hem toplam UDP yükünü tavanın altında tutar
+/// (hesap: `docs/CEKIM-HIZI.md` §4).
 fn default_triage_concurrency() -> usize {
-    24
+    12
 }
 
 fn default_tier() -> String {
@@ -98,10 +103,14 @@ impl Default for Settings {
             harvester_port: 6881,
             // Nazik varsayılan (router/internet dostu).
             harvester_max_queries_per_sec: 50.0,
-            // Ölçüm (2026-08-20): 12 işçi ile saatte ~165 ad. Deneme başına ort. 3,1 sn ve
-            // başarı ~%2 olduğu için isim üretimi doğrudan eşzamanlılıkla ölçekleniyor.
-            fetch_workers: 24,
-            fetch_peer_concurrency: 16,
+            // ÖLÇÜM (2026-08-22, `peerstat sweep`): eşzamanlı giden TCP sayısı
+            // `fetch_workers × fetch_peer_concurrency`'dir ve verim burada tepe yapıyor:
+            //   conc=8 → %13,7 bağlanma (0,08 metadata/sn) | conc=32 → %16,7 (0,35)
+            //   conc=96 → %18,1 (1,17 metadata/sn, TEPE)   | conc=384 → %14,4 (0,82)
+            // 384'te bağlanma oranı DÜŞÜYOR: modemin bağlantı-izleme tablosu taşıyor ve
+            // kendi SYN paketlerimiz düşüyor. 12 × 8 = 96 tepe noktasıdır.
+            fetch_workers: 12,
+            fetch_peer_concurrency: 8,
             triage_concurrency: default_triage_concurrency(),
             autostart: false,
             auto_scan: true,

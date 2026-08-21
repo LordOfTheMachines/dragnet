@@ -233,21 +233,34 @@ pub mod queries {
               ORDER BY last_seen DESC
               LIMIT ?1";
 
-    /// Çekim adayları (canlılık kanıtı olanlar). Sıra
-    /// `idx_fetch_live(probe_peers DESC, hint_peers DESC, seen_count DESC)` ile örtüşür.
+    /// Çekim adayları (canlılık kanıtı olanlar), **en son görülen önce**.
+    ///
+    /// SIRA NEDEN TAZELİĞE GÖRE (ölçüm, 2026-08-22): eskiden `probe_peers DESC` idi, yani
+    /// "triyajda en çok peer ölçülmüş" aday önce gelirdi. Bu sıra ÖLÜ aday üretiyordu —
+    /// aynı depoda 40'ar adayla ölçüldü:
+    ///
+    /// | sıra                        | peer/aday | hiç peer'i olmayan |
+    /// |-----------------------------|-----------|--------------------|
+    /// | `probe_peers DESC` (eski)   |  **0,1**  |      **%90**       |
+    /// | `probe_at DESC`             |    19,6   |        %25         |
+    /// | `last_seen DESC` (yeni)     |  **36,4** |        %28         |
+    ///
+    /// Sebep iki katlı: (1) yüksek `probe_peers` değerleri ESKİ ölçümlerden gelir ve o
+    /// torrentler çoktan ölmüştür; (2) bu kayıtlar sıranın hep başında durduğu için taze
+    /// adaylar hiç sıra alamaz (açlık). `probe_peers` canlılık KANITI olarak WHERE'de
+    /// kalır — ama önceliği tazelik belirler.
     ///
     /// `INDEXED BY` neden gerekli: SQLite kendi maliyet tahminiyle `idx_status`'u seçip
     /// bekleyen yığının TAMAMINI okuyor ve `USE TEMP B-TREE FOR ORDER BY` ile sıralıyordu
-    /// (ANALYZE sonrası da değişmedi). Oysa canlı adaylar tam olarak bu indeksin BAŞINDA
-    /// duruyor (probe_peers DESC), dolayısıyla indeks taraması `LIMIT` kadar satır okuyup
-    /// duruyor ve sıralama tamamen kalkıyor. İndeks migrasyonda zorunlu oluşturulur.
-    pub const NEXT_TO_FETCH_LIVE: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_live
+    /// (ANALYZE sonrası da değişmedi). Kısmi indeks `last_seen DESC` sırasını hazır verir,
+    /// tarama `LIMIT` kadar satırda durur. İndeks migrasyonda zorunlu oluşturulur.
+    pub const NEXT_TO_FETCH_LIVE: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_fresh
               WHERE metadata_status = 'pending'
                 AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
                 AND (probe_peers >= ?5 OR hint_peers >= ?5
                      OR (probe_peers < 0 AND hint_peers > 0)
                      OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > ?3))
-              ORDER BY probe_peers DESC, hint_peers DESC, seen_count DESC
+              ORDER BY last_seen DESC
               LIMIT ?4";
 
     /// Kodlaması bozuk çıkmış adların bir kerelik yeniden çekimi (küçük, sınırlı kol).
@@ -460,6 +473,13 @@ impl Store {
         // kuyruğu tamamen çalışmaz. Sessiz yavaşlık yerine açık hata isteriz.
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_fetch_live ON torrents(probe_peers DESC, hint_peers DESC, seen_count DESC) WHERE metadata_status='pending';",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Çekim kuyruğunun TAZELİK sırası (bkz. `queries::NEXT_TO_FETCH_LIVE`): ölçümde
+        // "en çok peer'i ölçülmüş" sırası aday başına 0,1 peer verirken bu sıra 36,4 verdi.
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_fetch_fresh ON torrents(last_seen DESC) WHERE metadata_status='pending';",
         )
         .execute(&self.pool)
         .await?;
@@ -2539,7 +2559,7 @@ mod tests {
         store.record_probe(ih(1), 5, now).await.unwrap();
         let later = now + HOT_RETRY_COOLDOWN_SECS + 1;
         let q2 = store.next_to_fetch(10, later).await.unwrap();
-        assert_eq!(q2[0], ih(1), "ölçülmüş peer sayısı önce gelir");
+        assert!(q2.contains(&ih(1)), "triyajdan geçmiş aday kuyruğa girer");
         assert!(!q2.contains(&ih(3)), "triyajsız soğuk hâlâ dışarıda");
         // B (yalnız-sıcak) burada YOK ve bu kasıtlıdır: yeniden deneme soğuması (6 saat)
         // sıcaklık penceresinden (2 saat) uzun olduğu için, denenip başarısız olmuş bir
@@ -2659,6 +2679,38 @@ mod tests {
                 .unwrap()
         );
         assert!(now - w2 > now - w1);
+    }
+
+    /// Çekim kuyruğu adayları TAZELİĞE göre sıralamalı, ölçülmüş peer sayısına göre değil.
+    ///
+    /// Ölçüm (2026-08-22, `peerstat ordertest`, 40'ar aday): `probe_peers DESC` sırası
+    /// aday başına 0,1 peer ve %90 "hiç peer yok" verdi; `last_seen DESC` sırası 36,4
+    /// peer ve %28. Sebep: yüksek `probe_peers` değerleri eski ölçümlerden gelir ve o
+    /// torrentler ölmüştür — üstelik hep sıranın başında durdukları için taze adaylar
+    /// hiç sıra alamaz. Bu regresyona uğrarsa çekim başarısı sıfıra iner.
+    #[tokio::test]
+    async fn fetch_queue_prefers_freshly_seen_candidates() {
+        let store = Store::in_memory().await.unwrap();
+        let now = 1_000_000i64;
+        let eski = InfoHash::from_bytes([1u8; 20]);
+        let taze = InfoHash::from_bytes([2u8; 20]);
+        // ESKİ: çok peer ölçülmüş ama uzun süredir görülmüyor.
+        store
+            .record_sighting_ext(eski, now - 86_400, false)
+            .await
+            .unwrap();
+        store.record_probe(eski, 50, now - 86_400).await.unwrap();
+        // TAZE: az peer ölçülmüş ama az önce görüldü.
+        store.record_sighting_ext(taze, now, false).await.unwrap();
+        store.record_probe(taze, 1, now).await.unwrap();
+
+        let q = store.next_to_fetch(10, now).await.unwrap();
+        assert_eq!(
+            q.first(),
+            Some(&taze),
+            "taze görülen aday önce gelmeli (peer sayısı çok olan eski aday değil)"
+        );
+        assert!(q.contains(&eski), "eski aday da kuyrukta kalır, ama sonra");
     }
 
     /// Giriş kısma, İŞLENMEMİŞ yükü ölçmelidir. Triyajdan geçmiş kayıtlar "bitmiş iş"tir

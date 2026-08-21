@@ -104,7 +104,13 @@ impl Default for HarvesterConfig {
             // Port-forward + iyi bağlantısı olanlar artırabilir.
             max_queries_per_sec: 50.0,
             crawl_tick: Duration::from_millis(100),
-            crawl_batch: 4,
+            // Tık başına gönderilen sorgu. 100 ms tık ile bu, saniyede en fazla
+            // `crawl_batch × 10` sorgu demektir — yani 4 iken bütçe 50 verilse bile tavan
+            // 40'ta kalıyordu. Harvester sorguları (find_node / sample_infohashes) TEK
+            // PAKETTİR; DHT *aramalarının* (~50 paket) aksine ucuzdur, dolayısıyla
+            // infohash keşfini hızlandırmanın en ucuz yolu buradan geçer. Asıl kısılması
+            // gereken triyaj/çekim aramalarıdır (bkz. `docs/CEKIM-HIZI.md` §4).
+            crawl_batch: 16,
             // KİMLİK DÖNDÜRME VARSAYILAN OLARAK KAPALI (0). Gerekçe: her döndürmede
             // (BEP-42 rastgele bileşeni değişir) ağ bizi YENİ bir düğüm sanar ve
             // tablolarındaki girdimiz bayatlar; pasif trafik (announce/get_peers) ise ancak

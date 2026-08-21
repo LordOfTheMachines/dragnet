@@ -227,7 +227,61 @@ yönlendirmesi + kimliğin korunması → gelen `announce_peer` sayısı artar �
 BEP-51 örneklemesinin çok üstüne çıkar. İkinci kaldıraç `TRIAGE_PEER_CAP`'i büyütmektir
 (§5.2): DHT bütçesi harcamaz, yalnız TCP denemesi ister.
 
-## 8. Çürüyen hipotezler (tekrar denemeyin)
+## 8. Çekimin çöküşü: aday sıralaması ölü aday seçiyordu (2026-08-22)
+
+F13 sonrası panoda çekim başarı oranı **%0**'a düştü: 29.572 denemede yalnız 122 başarı,
+74.570 zaman aşımı. Kullanıcının iki hipotezi vardı — zaman aşımı çok kısa olabilir, ya da
+port yönlendirmesi çalışmıyordur. İkisi de ölçüldü; **asıl sebep üçüncü bir şeydi.**
+
+### Ölçüm 1 — eşzamanlılık ve zaman aşımı (`peerstat sweep`)
+
+Aynı peer havuzu, her ayara tüm torrentlerden eşit örnek:
+
+| Ayar | bağlandı | handshake | metadata | süre | verim |
+|---|---|---|---|---|---|
+| conc=8 | %13,7 | %10,7 | %3,3 | 120 s | 0,08 md/sn |
+| conc=32 | %16,7 | %12,4 | %3,7 | 32 s | 0,35 |
+| **conc=96** | **%18,1** | %13,0 | %4,7 | **12 s** | **1,17** |
+| conc=384 | %14,4 | %11,7 | %3,0 | 11 s | 0,82 |
+| conc=32, to=10 s | %17,4 | %14,4 | %3,7 | 80 s | 0,14 |
+| conc=32, to=20 s | %18,4 | **%15,4** | %4,7 | 147 s | 0,10 |
+
+İki sonuç: (a) eşzamanlılık 384'te bağlanma oranını düşürüyor — modem tablosu taşıyor —
+ve verim **96**'da tepe yapıyor; (b) zaman aşımını uzatmak handshake oranını gerçekten
+artırıyor (%12,4 → %15,4, yani yavaş ama canlı peer'ler var) ama süreyi 12× uzattığı için
+**verimi 13 kat düşürüyor**. Yani "daha uzun bekleyelim" doğru sezgi, yanlış çözüm.
+
+Ama bu tablodaki en düşük satır bile %13 bağlanma verirken üretim **%0,25** veriyordu:
+50 kat fark ve bunu ne eşzamanlılık ne zaman aşımı açıklıyor.
+
+### Ölçüm 2 — eşzamanlı DHT araması (`peerstat lookups`)
+
+Şüphe: tek `mainline` istemcisini 48 arama paylaşıyor, aktör döngüsü tıkanıyor olabilir.
+Ölçüm bunu **çürüttü** — 48 eşzamanlı aramada bile arama başına 19,7 peer bulunuyor.
+
+### Ölçüm 3 — ADAY SIRALAMASI (`peerstat ordertest`) ← sebep burada
+
+Aynı depo, 40'ar aday, aynı ağ koşulu:
+
+| Sıra | peer/aday | hiç peer'i olmayan |
+|---|---|---|
+| **`probe_peers DESC`** (üretimin kullandığı) | **0,1** | **%90** |
+| `probe_at DESC` | 19,6 | %25 |
+| **`last_seen DESC`** | **36,4** | %28 |
+
+Üretim, "triyajda en çok peer ölçülmüş" adayı önce çekiyordu. Ama yüksek `probe_peers`
+değerleri **eski** ölçümlerden gelir; o torrentler çoktan ölmüştür. Üstelik bu kayıtlar
+sıranın hep başında durduğu için **taze adaylar hiç sıra alamıyordu** (açlık). Aday başına
+0,1 peer ile metadata çekmek imkânsızdır — çekim boşa kürek çekiyordu.
+
+Düzeltme: `ORDER BY last_seen DESC` (+ `idx_fetch_fresh`). `probe_peers` canlılık **kanıtı**
+olarak WHERE'de kalır, ama **önceliği tazelik belirler**.
+
+**Ders:** "en iyi aday" ölçütü zamanla bayatlıyorsa, sıralama ölçütü olamaz — yalnız
+filtre olabilir. Bayat bir ölçüt sıralamada kullanılırsa sistem kendini eski verinin
+içine kilitler ve taze veriyi hiç göremez.
+
+## 9. Çürüyen hipotezler (tekrar denemeyin)
 
 Bunlar ölçülüp reddedildi; gerekçeleri `docs/PLAN-FAZ-F.md` §F9–F12'de:
 
@@ -239,7 +293,7 @@ Bunlar ölçülüp reddedildi; gerekçeleri `docs/PLAN-FAZ-F.md` §F9–F12'de:
 - **MSE (şifreli bağlantı) hipotezi**: `peerstat` ile ölçüldü — bağlanabilen peer'lerin
   yalnız %1–2,5'i handshake vermiyor. Sorun şifreleme değil, **erişilemezlik**.
 
-## 9. Ölçüm disiplini
+## 10. Ölçüm disiplini
 
 - **Kısa pencere yalan söyler.** 7–8 dakikalık pencerelerde aynı kurulum 255 ile 325
   arasında ölçüldü. Karar için en az 30 dakika, tercihen "son 1 saat" kullanılmalı.
