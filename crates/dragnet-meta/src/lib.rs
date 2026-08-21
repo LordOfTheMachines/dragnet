@@ -179,6 +179,10 @@ impl MetadataFetcher {
 
     /// uTP soketini açar (F12). Başarısız olursa fetcher yalnız TCP ile çalışır.
     pub async fn enable_utp(&mut self) -> bool {
+        // Varsayılan KAPALI (bkz. ölçüm notu `fetch` içinde); DRAGNET_UTP=1 ile açılır.
+        if std::env::var("DRAGNET_UTP").unwrap_or_default() != "1" {
+            return false;
+        }
         match librqbit_utp::UtpSocket::new_udp("0.0.0.0:0".parse().expect("adres")).await {
             Ok(s) => {
                 self.utp = Some(s);

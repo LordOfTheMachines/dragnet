@@ -67,6 +67,12 @@ async fn main() {
             .to_string(),
     )
     .await;
+    let fresh5 = q(format!(
+        "SELECT COUNT(*) FROM torrents WHERE first_seen > {}",
+        now - 300
+    ))
+    .await;
+    println!("HASAT: son 5 dakikada keşfedilen: {fresh5}");
     println!("KUYRUK BİLEŞİMİ");
     println!("  bekleyen (pending)      : {pending}");
     println!("    · sıcak (son 2 saat)  : {hot2h}");

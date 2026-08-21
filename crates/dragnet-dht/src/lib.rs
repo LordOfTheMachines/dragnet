@@ -353,6 +353,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         tokio::spawn(crawl_loop(Arc::clone(&shared), config.clone())),
         tokio::spawn(rotate_loop(Arc::clone(&shared), config.id_rotation)),
         tokio::spawn(flush_repeats_loop(Arc::clone(&shared))),
+        tokio::spawn(rebootstrap_loop(Arc::clone(&shared))),
     ];
 
     Ok(Harvester {
@@ -380,9 +381,39 @@ async fn seed_bootstrap(shared: &Shared) {
         }
     }
     if resolved.is_empty() {
-        warn!("hiçbir bootstrap düğümü çözülemedi; ağ erişimi yok olabilir");
+        // DNS geçici olarak çalışmıyorsa (ölçüm: bu makinede gün içinde birkaç kez
+        // yaşandı) hasat TAMAMEN durur — düğüm kuyruğu boş kalır, sorgu gidemez,
+        // dolayısıyla kimse bizi tanımaz ve pasif trafik de gelmez. Bu yüzden bilinen
+        // bootstrap düğümlerinin IP'leri gömülü yedek olarak kullanılır.
+        warn!("bootstrap adları çözülemedi; gömülü IP yedekleri kullanılıyor");
+        shared.push_nodes(&FALLBACK_BOOTSTRAP);
     } else {
         shared.push_nodes(&resolved);
+    }
+}
+
+/// DNS çalışmadığında kullanılacak bootstrap düğümü IP'leri (router.utorrent.com,
+/// dht.transmissionbt.com, router.bittorrent.com). Adresler değişebilir; yalnız
+/// DNS başarısız olduğunda devreye girerler.
+const FALLBACK_BOOTSTRAP: [SocketAddrV4; 3] = [
+    SocketAddrV4::new(Ipv4Addr::new(82, 221, 103, 244), 6881),
+    SocketAddrV4::new(Ipv4Addr::new(87, 98, 162, 88), 6881),
+    SocketAddrV4::new(Ipv4Addr::new(67, 215, 246, 10), 6881),
+];
+
+/// Düğüm kuyruğu boşaldıysa (bootstrap başarısız ya da ağ kesintisi) yeniden tohumlar.
+/// Hasadın sessizce ölmesini engeller: ölçümde bir oturum boyunca BEP-51 örnek/sn = 0
+/// ve gelen sorgu = 0 kaldı, çünkü açılışta bootstrap çözülememişti.
+async fn rebootstrap_loop(shared: Arc<Shared>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(60));
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let empty = shared.nodes.lock().unwrap().is_empty();
+        if empty {
+            warn!("düğüm kuyruğu boş — bootstrap yeniden deneniyor");
+            seed_bootstrap(&shared).await;
+        }
     }
 }
 
