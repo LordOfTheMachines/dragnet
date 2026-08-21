@@ -35,6 +35,11 @@ pub struct EngineConfig {
     pub harvester_max_queries_per_sec: f64,
     pub fetch_workers: usize,
     pub fetch_peer_concurrency: usize,
+    /// Aynı anda kaç aday triyaj edilsin (her biri bir DHT araması). Triyaj, çekimin
+    /// aday arzını üreten aşamadır; ölçümde asıl darboğaz burasıydı (saatte ~900-1.400
+    /// ölçüm, buna karşılık ~2.800-3.600 yeni infohash). Her ölçüm çoğunlukla ağ
+    /// beklemesidir, CPU'ya neredeyse dokunmaz.
+    pub triage_concurrency: usize,
     pub seed_infohashes: Vec<String>,
     /// Depolama büyüme freni (F8-4), bayt: veritabanı bütçesi ve disk rezervi (0 = kapalı).
     /// Motor kendi `Store` örneğini açtığı için sınırlar buradan geçirilmelidir —
@@ -55,6 +60,7 @@ impl Default for EngineConfig {
             harvester_max_queries_per_sec: 50.0,
             fetch_workers: 12,
             fetch_peer_concurrency: 12,
+            triage_concurrency: 24,
             seed_infohashes: Vec::new(),
             db_max_bytes: 0,
             disk_reserve_bytes: 0,
@@ -63,10 +69,13 @@ impl Default for EngineConfig {
     }
 }
 
-/// Triyajda bir turda ölçülecek infohash sayısı (eşzamanlı DHT peer sayımı).
-const TRIAGE_BATCH: i64 = 8;
 /// Triyaj peer sayımı için süre bütçesi: "peer var mı" sorusu, tam arama değil.
 const TRIAGE_TIMEOUT: Duration = Duration::from_secs(6);
+/// Triyajda bir aday için toplanacak azami peer adresi. Bu sayıya ulaşılınca DHT araması
+/// erkenden biter (ölçüm: canlı adaylarda ilk peer'ler ~0,3-1,0 sn içinde geliyor), ve
+/// toplanan adresler çekim aşamasına ipucu olarak devredilir. `PeerHints` zaten 16'da
+/// kırptığı için daha fazlasını toplamak boşuna DHT trafiği olurdu.
+const TRIAGE_PEER_CAP: usize = 16;
 /// Bekleyen kuyruk üst sınırı (F11): bunun üstünde soğuk BEP-51 örnekleri alınmaz.
 /// Çekim kapasitesi saatte ~300-400 ad; birkaç saatlik iş kuyrukta yeterlidir. Daha
 /// fazlası, sıra gelene kadar ölen torrent'leri biriktirmekten başka işe yaramaz.
@@ -227,44 +236,89 @@ impl Engine {
             }
         }
 
+        // Peer ipuçları (infohash → taze adresler; bellek-içi, sınırlı). İki kaynaktan
+        // dolar: BEP-51 takip `get_peers` yanıtları (harvester) ve TRİYAJ (aşağıda).
+        // Çekim zamanlayıcısı bir adayı alırken ipuçlarını da alır ve DHT aramasını
+        // beklemeden doğrudan dener.
+        let hints: Arc<std::sync::Mutex<PeerHints>> =
+            Arc::new(std::sync::Mutex::new(PeerHints::new(50_000)));
+
         // TRİYAJ (F10): metadata çekmeden ÖNCE ucuz bir DHT peer sayımı. Yalnız peer'i
         // olan (sağlıklı) torrent'ler pahalı çekime girsin diye. Kullanıcı teşhisi:
         // "hiç paylaşanı olmayan eski bir torrent'i istediğin kadar çağır, indiremezsin".
         // Ölçüm de aynı yeri gösteriyordu (peer denemelerinin %97'si zaman aşımı).
+        //
+        // F13 — İKİ ÖLÇÜLMÜŞ DEĞİŞİKLİK:
+        //
+        // 1) BULUNAN PEER ADRESLERİ ARTIK SAKLANIYOR. Eskiden triyaj `count_peers` ile
+        //    yalnız SAYIYI alıp adresleri çöpe atıyordu; sonra çekim aşaması aynı
+        //    infohash için DHT aramasını SIFIRDAN tekrarlıyordu. Ölçüm (peerstat):
+        //    triyajdan geçmiş adaylarda bir arama medyan 15 / ortalama 64 peer buluyor
+        //    ve medyan 2,7 sn sürüyor — yani her adayda hem ~2,7 sn hem de onlarca taze
+        //    adres iki kez ödeniyordu. Artık adresler ipucu olarak çekime devrediliyor.
+        //
+        // 2) TUR BARİYERİ KALKTI. Eskiden 8'lik parti alınıp `for h in handles { await }`
+        //    ile hepsinin bitmesi bekleniyordu; tur en yavaş ölçüme kilitleniyor ve
+        //    ölçülen verim saatte yalnız ~900-1.400 oluyordu. Artık çekim zamanlayıcısıyla
+        //    aynı desen: izin (semaphore) boşaldıkça sürekli akış.
         {
             let store = store.clone();
             let fetcher = Arc::clone(&fetcher);
+            let hints = Arc::clone(&hints);
+            let triage_sem = Arc::new(Semaphore::new(config.triage_concurrency.max(1)));
+            let cap = config.triage_concurrency.max(1);
             tasks.push(tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(Duration::from_millis(500));
                 loop {
-                    ticker.tick().await;
                     if store.growth_paused() {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
-                    let now = now_unix();
-                    let batch = match store.next_to_triage(TRIAGE_BATCH, now).await {
+                    let free = triage_sem.available_permits();
+                    if free == 0 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    let batch = match store.next_to_triage(free.min(cap) as i64, now_unix()).await {
                         Ok(b) if !b.is_empty() => b,
-                        _ => continue,
+                        Ok(_) => {
+                            // Triyaj kuyruğu boş: hasadın yeni aday getirmesini bekle.
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "triyaj kuyruğu okunamadı");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
                     };
-                    let mut handles = Vec::new();
                     for ih in batch {
+                        let Ok(permit) = Arc::clone(&triage_sem).acquire_owned().await else {
+                            return;
+                        };
                         let store = store.clone();
                         let fetcher = Arc::clone(&fetcher);
-                        handles.push(tokio::spawn(async move {
+                        let hints = Arc::clone(&hints);
+                        tokio::spawn(async move {
+                            let _permit = permit;
                             // Kısa bütçe: bu bir "var mı yok mu" ölçümü, tam arama değil.
-                            let peers = fetcher.count_peers(ih, TRIAGE_TIMEOUT).await;
-                            if peers == 0 {
+                            // `TRIAGE_PEER_CAP` peer bulununca arama erkenden biter.
+                            let peers = fetcher
+                                .peers_of(ih, TRIAGE_TIMEOUT, TRIAGE_PEER_CAP)
+                                .await;
+                            if peers.is_empty() {
                                 // F11: peer'i olmayan torrent'in metadata'sı çekilemez;
                                 // saklamak kuyruğu ve diski zehirliyor → hemen sil.
                                 // Gerçekten canlanırsa DHT'de yeniden görülür.
                                 let _ = store.delete_pending(ih).await;
                             } else {
-                                let _ = store.record_probe(ih, peers as i64, now_unix()).await;
+                                hints
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .insert(ih, peers.clone());
+                                let _ =
+                                    store.record_probe(ih, peers.len() as i64, now_unix()).await;
                             }
-                        }));
-                    }
-                    for h in handles {
-                        let _ = h.await;
+                        });
                     }
                 }
             }));
@@ -335,10 +389,6 @@ impl Engine {
         // pasif get_peers/announce = sıcak). Çekim burada TETİKLENMEZ — Faz E: firehose
         // içinden "izin boşsa çek" yaklaşımı hem rastgeleydi hem de işçiler doluyken gelen
         // hash'leri hiç denemiyordu; onun yerine aşağıdaki öncelikli zamanlayıcı çalışır.
-        // Peer ipuçları (BEP-51 takip get_peers'ten): infohash → taze adresler; bellek-içi,
-        // sınırlı; çekim zamanlayıcısı önce bunları dener.
-        let hints: Arc<std::sync::Mutex<PeerHints>> =
-            Arc::new(std::sync::Mutex::new(PeerHints::new(50_000)));
         {
             let store = store.clone();
             let hints = Arc::clone(&hints);

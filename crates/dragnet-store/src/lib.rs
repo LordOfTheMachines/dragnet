@@ -208,6 +208,8 @@ const FTS_MAX_PATHS: i64 = 48;
 const SPELL_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 /// Sözlüğe alınacak en sık geçen terim sayısı (bellek: terim başına ~40 bayt).
 const SPELL_TERMS: i64 = 300_000;
+/// WAL dosyası üst sınırı (bayt): checkpoint sonrası bu boyuta kırpılır.
+const WAL_SIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 impl Store {
     /// Bir dosya yolundan depo açar (yoksa oluşturur) ve şemayı hazırlar.
@@ -219,6 +221,11 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
+            // WAL dosyası checkpoint sonrası KÜÇÜLTÜLSÜN. Varsayılan davranışta WAL bir
+            // kez büyüyünce öyle kalır: ölçümde 104 MB'lık veritabanının yanında 421 MB'lık
+            // bir WAL birikmişti. Bu hem diski hem de F8-4 depolama-basıncı hesabını
+            // (WAL + shm sayılıyor) şişirir; yeterince büyürse büyüme gereksiz yere durur.
+            .pragma("journal_size_limit", WAL_SIZE_LIMIT_BYTES.to_string())
             .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -226,6 +233,15 @@ impl Store {
             .await?;
         let store = Self::with_pool(pool, path.to_string());
         store.migrate().await?;
+        // Açılışta bir kez WAL'i kırp: `journal_size_limit` yalnız BİR SONRAKİ
+        // checkpoint'te devreye girer, dolayısıyla önceden şişmiş bir WAL kendiliğinden
+        // küçülmez. Açılışta başka okuyucu olmadığı için TRUNCATE burada güvenlidir.
+        if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&store.pool)
+            .await
+        {
+            debug!(error = %e, "açılış WAL checkpoint'i atlandı");
+        }
         Ok(store)
     }
 
@@ -383,6 +399,14 @@ impl Store {
         .await;
         let _ = sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_fetch_queue2 ON torrents(hint_peers DESC, seen_count DESC, last_seen DESC) WHERE metadata_status='pending';",
+        )
+        .execute(&self.pool)
+        .await;
+        // F13: `next_to_fetch` canlı kolunun ORDER BY'ıyla birebir örtüşen kısmi indeks.
+        // Olmadan plan `USE TEMP B-TREE FOR ORDER BY` çıkıyor ve zamanlayıcı her turda
+        // (saniyede birkaç kez) tüm bekleyen yığını sıralıyordu.
+        let _ = sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_fetch_live ON torrents(probe_peers DESC, hint_peers DESC, seen_count DESC) WHERE metadata_status='pending';",
         )
         .execute(&self.pool)
         .await;
@@ -606,6 +630,12 @@ impl Store {
         // Artık peer ipucu olan (peer'i BİLİNEN) ve sıcak (son 2 saatte gerçek trafikte
         // görülen) kayıtlar öncelikli çekilir; soğuklar yalnız kalan kotayı doldurur.
         let warm_limit = limit.max(0);
+        // ÖLÇÜM (F13): eski sıra `probe_peers DESC, hint_peers DESC, hot_seen DESC,
+        // seen_count DESC` idi ve hiçbir indeksle eşleşmiyordu (TEMP B-TREE). `hot_seen`
+        // sıralamadan çıkarıldı — `probe_peers`/`hint_peers` zaten daha güçlü canlılık
+        // sinyalleri ve `hot_seen` WHERE'de koşul olarak duruyor — böylece kalan sıra
+        // `idx_fetch_live(probe_peers DESC, hint_peers DESC, seen_count DESC)` ile birebir
+        // örtüşür ve sıralama maliyeti kalkar (LIMIT erken çıkar).
         let mut rows = sqlx::query(
             "SELECT infohash FROM torrents
               WHERE metadata_status = 'pending'
@@ -613,7 +643,7 @@ impl Store {
                 AND (probe_peers >= ?5 OR hint_peers >= ?5
                      OR (probe_peers < 0 AND hint_peers > 0)
                      OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > ?3))
-              ORDER BY probe_peers DESC, hint_peers DESC, hot_seen DESC, seen_count DESC
+              ORDER BY probe_peers DESC, hint_peers DESC, seen_count DESC
               LIMIT ?4",
         )
         .bind(MAX_FETCH_ATTEMPTS)
@@ -623,33 +653,31 @@ impl Store {
         .bind(MIN_HEALTHY_PEERS)
         .fetch_all(&self.pool)
         .await?;
-        // Soğuk kota: canlı aday VARSA kotanın yalnız ¼'ü soğuklara ayrılır (canlıların
-        // önünü tıkamasınlar); HİÇ canlı aday yoksa işçileri boşta bırakmamak için kota
-        // tamamen soğuklarla doldurulur — eski ama hâlâ canlı torrent'ler de çıkabiliyor.
-        let cold_cap = if rows.is_empty() {
-            limit.max(0)
-        } else {
-            (limit.max(0) / 4).max(1)
-        };
-        if (rows.len() as i64) < limit && cold_cap > 0 {
+        // TRİYAJ EDİLMEMİŞ ("soğuk") KAYITLAR ARTIK ÇEKİLMİYOR (F13, ölçümle).
+        // Eskiden canlı aday bulunamayınca kota tamamen soğuklarla doldurulurdu
+        // ("işçiyi boşta bırakma"). Ölçüm bunun zararlı olduğunu gösterdi: saatte 6.181
+        // çekim denemesinin ~%87'si triyajdan geçmemiş kayda gidiyordu, deneme başına
+        // başarı %2,4'e düşüyordu ve asıl zarar şuydu — her soğuk deneme **bir DHT
+        // lookup** harcıyor, bu da triyajı (asıl aday üreten aşamayı) yavaşlatıyordu.
+        // Soğuk kaydın doğru yolu triyajdır: orada ölçülür, ölüyse silinir, canlıysa
+        // buraya sağlıklı aday olarak döner. Boşta işçi, ölü kayda saldıran işçiden iyidir.
+        //
+        // Tek istisna: kodlaması bozuk çıkmış (`garbled`) adlar. Kodlama tespiti artık
+        // devrede (dragnet-meta `text::get_text`), dolayısıyla bunları bir kez yeniden
+        // çekmek gerçekten düzeltir — küçük ve sınırlı bir kol olarak kalır.
+        if (rows.len() as i64) < limit {
             let more = sqlx::query(
                 "SELECT infohash FROM torrents
-                  WHERE (metadata_status = 'pending'
-                         AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
-                         AND hint_peers = 0
-                         AND (hot_seen IS NULL OR hot_seen <= ?3))
-                     OR (metadata_status = 'fetched' AND garbled = 1 AND fetch_attempts = 0)
-                  ORDER BY seen_count DESC, hot_count DESC, last_seen DESC
-                  LIMIT ?4",
+                  WHERE metadata_status = 'fetched' AND garbled = 1 AND fetch_attempts = 0
+                  ORDER BY seen_count DESC
+                  LIMIT ?1",
             )
-            .bind(MAX_FETCH_ATTEMPTS)
-            .bind(cooldown)
-            .bind(hot_window)
-            .bind(cold_cap.min(limit - rows.len() as i64))
+            .bind((limit - rows.len() as i64).min(GARBLED_REFETCH_CAP))
             .fetch_all(&self.pool)
             .await?;
             rows.extend(more);
         }
+        let _ = cooldown;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let hex: String = r.get("infohash");
@@ -1160,14 +1188,20 @@ impl Store {
     /// ölçmek anlamsızdır. Seçilenlerin `probe_at`'ı hemen işaretlenir ki eşzamanlı
     /// çağrılar aynı adayları almasın.
     pub async fn next_to_triage(&self, limit: i64, now: i64) -> Result<Vec<InfoHash>, StoreError> {
+        let _ = now;
+        // ÖLÇÜM (F13): eski sıra `(hot_seen…) DESC, hint_peers DESC, last_seen DESC` idi.
+        // İlk anahtar parametreye bağlı bir İFADE olduğu için hiçbir indeks karşılayamıyor;
+        // plan `SEARCH idx_status + USE TEMP B-TREE FOR ORDER BY` çıkıyordu, yani her turda
+        // ~40.000 bekleyen satır okunup geçici b-tree'de sıralanıyordu (saniyede birkaç kez).
+        // Yalnız `last_seen DESC` bırakıldı: `idx_triage(probe_at, last_seen DESC)` bunu
+        // tam karşılar, sıralama tamamen kalkar. Önceliği kaybetmiyoruz — hint'li ve sıcak
+        // kayıtlar triyajı BEKLEMEDEN çekim kuyruğunun canlı koluna zaten giriyor.
         let rows = sqlx::query(
             "SELECT infohash FROM torrents
               WHERE metadata_status = 'pending' AND probe_at = 0
-              ORDER BY (hot_seen IS NOT NULL AND hot_seen > ?1) DESC,
-                       hint_peers DESC, last_seen DESC
-              LIMIT ?2",
+              ORDER BY last_seen DESC
+              LIMIT ?1",
         )
-        .bind(now - HOT_WINDOW_SECS)
         .bind(limit.max(0))
         .fetch_all(&self.pool)
         .await?;
@@ -1221,8 +1255,27 @@ impl Store {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        if a + b > 0 {
-            debug!(pending = a, unreachable = b, "ölü kayıtlar temizlendi");
+        // TRİYAJ SIZINTISI onarımı: `next_to_triage` adayı seçerken `probe_at`'ı hemen
+        // işaretler (eşzamanlı çağrılar aynı kaydı almasın diye). Ölçüm bitmeden süreç
+        // kapanırsa kayıt `probe_at > 0, probe_peers = -1` kalır — bir daha ne triyaja
+        // girer ne de canlı kola; sessizce kaybolur. Ölçümü belirgin biçimde eskimiş
+        // olanları yeniden triyaja aç.
+        let c = sqlx::query(
+            "UPDATE torrents SET probe_at = 0
+              WHERE metadata_status = 'pending' AND probe_peers < 0
+                AND probe_at > 0 AND probe_at < ?1",
+        )
+        .bind(now - STALE_PROBE_SECS)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if a + b + c > 0 {
+            debug!(
+                pending = a,
+                unreachable = b,
+                probe_reset = c,
+                "ölü kayıtlar temizlendi"
+            );
         }
         Ok(a + b)
     }
@@ -1583,6 +1636,13 @@ pub const HOT_RETRY_COOLDOWN_SECS: i64 = 6 * 3600;
 pub const MIN_HEALTHY_PEERS: i64 = 1;
 /// "Sıcak" sayılma penceresi (sn): bu süre içinde pasif trafikte görülen infohash öncelikli.
 pub const HOT_WINDOW_SECS: i64 = 2 * 3600;
+/// Bir çekim partisinde kodlaması bozuk (`garbled`) adların yeniden çekimine ayrılan
+/// azami yer. Kodlama tespiti devreye girdikten sonra bunlar gerçekten düzelir, ama
+/// kuyruğun tamamını kaplamamalı — taze adaylar önceliklidir.
+const GARBLED_REFETCH_CAP: i64 = 2;
+/// Yarım kalmış bir triyaj işaretinin (probe_at set, sonuç yok) eskimiş sayılma süresi.
+/// Bu süreden eski işaretler temizlikte sıfırlanır ve kayıt yeniden ölçülebilir olur.
+const STALE_PROBE_SECS: i64 = 3600;
 
 /// Hibrit sıralamada yumuşak artırma (sorgu niyeti): kategori eşleşmesi ve yıl aralığı.
 /// Filtre DEĞİL — eşleşmeyenler listede kalır, eşleşenler öne çıkar (kategori sezgiseli
@@ -2274,11 +2334,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_queue_prioritizes_hot_then_popular_and_retries_with_cooldown() {
+    async fn fetch_queue_only_takes_live_candidates_and_respects_cooldown() {
         let store = Store::in_memory().await.unwrap();
         let ih = |n: u8| InfoHash::from_bytes([n; 20]);
         let now = 1_000_000i64;
-        // A: 5 kez görülmüş (popüler); B: 1 kez ama sıcak; C: 1 kez soğuk; D: fetched.
+        // A: 5 kez görülmüş ama soğuk ve triyajsız; B: 1 kez ama sıcak; C: taze-soğuk;
+        // D: zaten çekilmiş.
         for _ in 0..5 {
             store
                 .record_sighting_ext(ih(1), now - 100, false)
@@ -2302,32 +2363,60 @@ mod tests {
             .await
             .unwrap();
 
-        // Sıra: sıcak (B) > popüler (A) > taze-soğuk (C); D (fetched) yok.
+        // F13: triyajdan geçmemiş soğuk kayıtlar ARTIK ÇEKİLMEZ (ölçüm: denemelerin
+        // ~%87'si bunlara gidiyor ve deneme başına başarı %2,4'e düşüyordu; üstelik her
+        // deneme bir DHT araması harcayıp triyajı yavaşlatıyordu). Yalnız canlılık sinyali
+        // olan aday gelir → burada sadece sıcak olan B. D zaten `fetched`.
         let q = store.next_to_fetch(10, now).await.unwrap();
-        assert_eq!(q, vec![ih(2), ih(1), ih(3)]);
-        // Seçilenler işaretlendi → hemen tekrar sorulunca gelmezler (soğuma).
+        assert_eq!(q, vec![ih(2)]);
+        // Seçilen işaretlendi → hemen tekrar sorulunca gelmez (soğuma).
         assert!(store.next_to_fetch(10, now).await.unwrap().is_empty());
-        // Soğuma dolunca tekrar gelirler (deneme 2).
-        let later = now + FETCH_RETRY_COOLDOWN_SECS + 1;
-        assert_eq!(store.next_to_fetch(10, later).await.unwrap().len(), 3);
-        // Sıcaklık penceresi geçince B artık öne çıkmaz → popüler A önce.
-        let much_later = later + FETCH_RETRY_COOLDOWN_SECS + 1;
-        let q3 = store.next_to_fetch(10, much_later).await.unwrap();
-        assert_eq!(q3[0], ih(1));
-        // F11: 3. deneme de başarısızsa kayıt `unreachable` olarak SAKLANMAZ, SİLİNİR —
+
+        // Triyaj A'da peer bulunca A kuyruğa girer; ÖLÇÜLMÜŞ peer sayısı en güçlü
+        // canlılık sinyali olduğu için sıralamada başa geçer.
+        store.record_probe(ih(1), 5, now).await.unwrap();
+        let later = now + HOT_RETRY_COOLDOWN_SECS + 1;
+        let q2 = store.next_to_fetch(10, later).await.unwrap();
+        assert_eq!(q2[0], ih(1), "ölçülmüş peer sayısı önce gelir");
+        assert!(!q2.contains(&ih(3)), "triyajsız soğuk hâlâ dışarıda");
+        // B (yalnız-sıcak) burada YOK ve bu kasıtlıdır: yeniden deneme soğuması (6 saat)
+        // sıcaklık penceresinden (2 saat) uzun olduğu için, denenip başarısız olmuş bir
+        // kayıt ancak YENİ bir canlılık kanıtıyla geri gelir — ya taze bir pasif görülme
+        // (`hot_seen` tazelenir) ya da triyaj ölçümü (`probe_peers`). Kayıt kaybolmaz:
+        // `probe_at` hâlâ 0 olduğu için triyaj sırasındadır, orada ya peer bulunup canlı
+        // kola döner ya da sıfır peer'le silinir.
+        assert!(!q2.contains(&ih(2)), "yalnız-sıcak aday yeni kanıt beklemeli");
+        assert!(
+            store
+                .next_to_triage(10, later)
+                .await
+                .unwrap()
+                .contains(&ih(2)),
+            "denenmiş sıcak aday triyaj sırasında karar bekler"
+        );
+
+        // Deneme hakkı tükenince kayıt `unreachable` olarak SAKLANMAZ, SİLİNİR (F11) —
         // metadata'sı çekilemeyen infohash bizim için değersiz (kullanıcı kararı).
+        // A ilk denemesini `q2`'de aldı; kalan hakkı soğuma aralıklarıyla tüket.
+        let mut much_later = later;
+        for _ in 1..MAX_FETCH_ATTEMPTS {
+            much_later += HOT_RETRY_COOLDOWN_SECS + 1;
+            assert!(
+                store
+                    .next_to_fetch(10, much_later)
+                    .await
+                    .unwrap()
+                    .contains(&ih(1)),
+                "triyajdan geçmiş aday soğuma sonrası tekrar denenir"
+            );
+        }
         store.mark_fetch_failed(ih(1)).await.unwrap();
         let (pending, _hot, unreachable, _recent) =
             store.fetch_queue_stats(much_later).await.unwrap();
         assert_eq!(unreachable, 0, "artık unreachable tutulmuyor");
         assert_eq!(pending, 2, "silinen kayıt bekleyenlerden de düştü");
-        // Kuyruk tükendi (hepsi 3 denemede).
-        assert!(store
-            .next_to_fetch(10, much_later + FETCH_RETRY_COOLDOWN_SECS + 1)
-            .await
-            .unwrap()
-            .is_empty());
-        // Başarı: upsert → fetched + fetched_at set, sayaçtan düşer.
+
+        // Başarı: upsert → fetched + fetched_at set, "son 1 saat" sayacına girer.
         let mut r = record("0202020202020202020202020202020202020202", "Hot Item", 1);
         r.first_seen = much_later;
         r.last_seen = much_later;
@@ -2335,6 +2424,35 @@ mod tests {
         let (_p, _h, _u, recent) = store.fetch_queue_stats(much_later + 10).await.unwrap();
         assert_eq!(recent, 1, "fetched_at ile son 1 saat sayacı");
     }
+
+    /// Yarım kalmış triyaj işareti (`probe_at` set, sonuç yok) kaydı sonsuza dek
+    /// görünmez kılmamalı: temizlik eskimiş işaretleri sıfırlayıp yeniden ölçülebilir yapar.
+    #[tokio::test]
+    async fn stale_probe_marks_are_reset_by_purge() {
+        let store = Store::in_memory().await.unwrap();
+        let now = 1_000_000i64;
+        let ih = InfoHash::from_bytes([9u8; 20]);
+        store.record_sighting_ext(ih, now, false).await.unwrap();
+        // Triyaj adayı seçer (probe_at işaretlenir) ama sonuç hiç yazılmaz.
+        assert_eq!(store.next_to_triage(10, now).await.unwrap(), vec![ih]);
+        assert!(store.next_to_triage(10, now).await.unwrap().is_empty());
+        // Temizlik: işaret eskiyince kayıt yeniden triyaja açılır.
+        store
+            .purge_dead(now + STALE_PROBE_SECS + 1, DAY_SECS_FOR_TEST)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .next_to_triage(10, now + STALE_PROBE_SECS + 1)
+                .await
+                .unwrap(),
+            vec![ih]
+        );
+    }
+
+    /// `purge_dead` testinde kullanılan "ölü sayılma yaşı" (kaydın silinmemesi için
+    /// yeterince büyük).
+    const DAY_SECS_FOR_TEST: i64 = 30 * 24 * 3600;
 
     #[test]
     fn fts_query_sanitizes_special_chars() {

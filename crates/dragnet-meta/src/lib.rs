@@ -64,6 +64,11 @@ impl Default for FetchConfig {
     }
 }
 
+/// İpucu adresleri denenirken DHT aramasının bekletileceği süre (F13). İpuçları taze
+/// olduğu için çekimlerin çoğu bu pencerede biter ve arama hiç yapılmaz; bitmezse
+/// normal yola dönülür. TCP bağlanma bütçesi (3,5 sn) ile aynı mertebede tutuldu.
+const HINT_GRACE: Duration = Duration::from_secs(3);
+
 /// DHT üzerinden metadata çeken fetcher. İçinde bir mainline DHT istemcisi tutar.
 pub struct MetadataFetcher {
     dht: mainline::async_dht::AsyncDht,
@@ -281,7 +286,16 @@ impl MetadataFetcher {
         let deadline = Instant::now() + self.config.overall_timeout;
 
         let id = Id::from_bytes(infohash.as_bytes()).expect("infohash 20 bayttır");
-        let mut stream = self.dht.get_peers(id);
+        // DHT ARAMASINI GECİKTİR (F13). İpucu adresleri varsa (triyajdan ya da BEP-51
+        // takip `get_peers`'ten gelen taze adresler) önce onlar denenir; arama ancak
+        // ipuçları tükenirse ya da `HINT_GRACE` dolarsa başlatılır.
+        //
+        // Gerekçe ölçümle: bir `get_peers` araması medyan 2,7 sn sürüyor ve ~50 giden UDP
+        // sorgusu harcıyor. Aynı adresler triyaj sırasında zaten bulunmuştu; aramayı
+        // tekrarlamak hem bu süreyi ikinci kez ödemek hem de DHT bütçesini — asıl aday
+        // arzını üreten triyajdan — çalmak demekti.
+        let mut stream = hints.is_empty().then(|| self.dht.get_peers(id));
+        let dht_at = Instant::now() + HINT_GRACE;
         let mut stream_done = false;
         let mut seen: HashSet<SocketAddrV4> = HashSet::new();
         let mut queue: std::collections::VecDeque<SocketAddrV4> = std::collections::VecDeque::new();
@@ -326,15 +340,27 @@ impl MetadataFetcher {
             if now >= deadline {
                 break;
             }
-            let all_done =
-                stream_done && set.is_empty() && (queue.is_empty() || launched >= max_tries);
+            // İpuçları tükendiyse ya da nezaket süresi dolduysa DHT aramasını devreye al.
+            if stream.is_none() && (now >= dht_at || (queue.is_empty() && set.is_empty())) {
+                stream = Some(self.dht.get_peers(id));
+            }
+            let all_done = stream.is_some()
+                && stream_done
+                && set.is_empty()
+                && (queue.is_empty() || launched >= max_tries);
             if all_done {
                 break;
             }
             let remaining = deadline - now;
+            // DHT araması henüz başlamadıysa, başlatma anında uyanmak için kısa bekle.
+            let wake = match stream {
+                Some(_) => remaining,
+                None => remaining.min(dht_at.saturating_duration_since(now)),
+            };
             tokio::select! {
-                // Yeni peer partisi (akış bitmediyse).
-                batch = stream.next(), if !stream_done => match batch {
+                // Yeni peer partisi (akış başladıysa ve bitmediyse).
+                batch = async { stream.as_mut().expect("akış var").next().await },
+                    if stream.is_some() && !stream_done => match batch {
                     Some(batch) => {
                         for p in batch {
                             if seen.insert(p) {
@@ -351,6 +377,13 @@ impl MetadataFetcher {
                         Some(Ok(Ok(info_bytes))) => match parse_info_dict(&info_bytes, infohash) {
                             Ok(record) => {
                                 self.stats.peer_ok.fetch_add(1, Ordering::Relaxed);
+                                // `attempts` her çekimde arttığı için `peers_found` da
+                                // BAŞARI yolunda sayılmalı; yoksa `avg_peers` yalnız
+                                // başarısızlıkların (yani peer'i az olanların) ortalamasını
+                                // gösterir ve boru hattı olduğundan kötü görünür.
+                                self.stats
+                                    .peers_found
+                                    .fetch_add(seen.len() as u64, Ordering::Relaxed);
                                 return Ok(record); // set drop → kalanlar iptal
                             }
                             Err(e) => debug!(error = %e, "info sözlüğü çözülemedi"),
@@ -372,7 +405,12 @@ impl MetadataFetcher {
                         _ => {}
                     }
                 }
-                _ = tokio::time::sleep(remaining) => break,
+                // İki iş görür: bütçe dolduysa çıkış, DHT'yi devreye almak için uyanış.
+                _ = tokio::time::sleep(wake) => {
+                    if stream.is_some() || wake == remaining {
+                        break;
+                    }
+                }
             }
         }
         self.stats
@@ -450,9 +488,12 @@ pub fn parse_info_dict(info_bytes: &[u8], infohash: InfoHash) -> Result<TorrentR
         return Err(PeerError::BadInfoDict("info bir sözlük değil"));
     };
 
-    let name = match dict.get(b"name".as_ref()) {
-        Some(Value::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
-        _ => return Err(PeerError::BadInfoDict("name")),
+    // Kodlama: BEP-3 UTF-8 ister ama eski/bölgesel torrent'lerde GBK/Shift-JIS/CP1251
+    // yaygındır. `from_utf8_lossy` bunları `�` yapar; ad okunmaz olur, kayıt `garbled`
+    // işaretlenip boşuna yeniden çekilir (yeniden çekmek kodlamayı düzeltmez). Bu yüzden
+    // `text::get_text` kullanılır: önce `name.utf-8`, sonra kodlama tespiti (bkz. text.rs).
+    let Some(name) = text::get_text(&dict, "name") else {
+        return Err(PeerError::BadInfoDict("name"));
     };
 
     let (files, total_size) = if let Some(Value::List(list)) = dict.get(b"files".as_ref()) {
@@ -468,15 +509,19 @@ pub fn parse_info_dict(info_bytes: &[u8], infohash: InfoHash) -> Result<TorrentR
                 _ => return Err(PeerError::BadInfoDict("files.length")),
             };
             let mut parts = vec![name.clone()];
-            match fd.get(b"path".as_ref()) {
-                Some(Value::List(comps)) => {
-                    for c in comps {
-                        if let Value::Bytes(b) = c {
-                            parts.push(String::from_utf8_lossy(b).into_owned());
-                        }
-                    }
-                }
+            // `path.utf-8` (yaygın uzantı) varsa önceliklidir; yoksa `path` bileşenleri
+            // ad ile aynı kodlama tespitinden geçer.
+            let comps = match fd
+                .get(b"path.utf-8".as_ref())
+                .or_else(|| fd.get(b"path".as_ref()))
+            {
+                Some(Value::List(comps)) => comps,
                 _ => return Err(PeerError::BadInfoDict("files.path")),
+            };
+            for c in comps {
+                if let Value::Bytes(b) = c {
+                    parts.push(text::decode_bytes(b));
+                }
             }
             total = total.saturating_add(size);
             files.push(TorrentFile {

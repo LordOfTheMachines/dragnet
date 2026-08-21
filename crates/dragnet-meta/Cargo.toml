@@ -26,6 +26,10 @@ librqbit-utp = "0.7"
 [dev-dependencies]
 anyhow = "1"
 tracing-subscriber = { workspace = true }
+# `peerstat` teşhis örneği: depodan triyajdan geçmiş aday seçmek için (yalnız örnekte
+# kullanılır; kütüphane dragnet-store'a bağımlı DEĞİL — katman sırası korunur).
+dragnet-store = { path = "../dragnet-store" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
 [[example]]
 name = "fetch"

@@ -16,6 +16,12 @@ pub struct Settings {
     pub harvester_max_queries_per_sec: f64,
     pub fetch_workers: usize,
     pub fetch_peer_concurrency: usize,
+    /// Aynı anda triyaj edilecek (DHT'de peer'i ölçülecek) aday sayısı. Triyaj, çekimin
+    /// aday arzını üreten aşamadır; ölçümde asıl darboğaz burasıydı. Her ölçüm ağ
+    /// beklemesidir — CPU'ya dokunmaz — ama her biri bir DHT araması olduğu için çok
+    /// yüksek değerler giden UDP trafiğini artırır (modem/ISS sınırlarına dikkat).
+    #[serde(default = "default_triage_concurrency")]
+    pub triage_concurrency: usize,
     /// Windows'ta başlangıçta başlat.
     pub autostart: bool,
     /// Uygulama açılınca taramayı otomatik başlat.
@@ -67,6 +73,13 @@ fn default_disk_reserve() -> f64 {
     5.0
 }
 
+/// Varsayılan triyaj eşzamanlılığı. Ölçüm (F13): eski bariyerli 8'lik tur saatte yalnız
+/// ~900-1.400 aday ölçebiliyordu, oysa hasat saatte ~2.800-3.600 yeni infohash getiriyor —
+/// yani çekimin aday arzını triyaj kısıyordu.
+fn default_triage_concurrency() -> usize {
+    24
+}
+
 fn default_tier() -> String {
     "auto".to_string()
 }
@@ -89,6 +102,7 @@ impl Default for Settings {
             // başarı ~%2 olduğu için isim üretimi doğrudan eşzamanlılıkla ölçekleniyor.
             fetch_workers: 24,
             fetch_peer_concurrency: 16,
+            triage_concurrency: default_triage_concurrency(),
             autostart: false,
             auto_scan: true,
             block_keywords: Vec::new(),
@@ -161,6 +175,7 @@ impl Settings {
             harvester_max_queries_per_sec: self.harvester_max_queries_per_sec,
             fetch_workers: self.fetch_workers,
             fetch_peer_concurrency: self.fetch_peer_concurrency,
+            triage_concurrency: self.triage_concurrency,
             seed_infohashes: self.seed_infohashes.clone(),
             harvester_instances: self.harvester_instances.clamp(1, 8),
             db_max_bytes: self.storage_limits().0,
