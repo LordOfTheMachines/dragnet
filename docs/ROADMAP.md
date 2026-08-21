@@ -128,7 +128,9 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       çürüdü (48 eşzamanlı aramada bile 19,7 peer/arama). Harvester tarafı: `crawl_batch`
       4 → 16 ve bütçe 50 → 120/sn (sorguları TEK PAKET, ucuz), düğüm kuyruğu 8.192 → 65.536
       (aynı düğüme 2 dakikada bir soruluyordu, örneklerin %86'sı tekrardı).
-      **Sonuç: isim üretimi 38 → ~272/saat, BEP-51 örnek 62 → 149/sn.**
+      **Sonuç: isim üretimi 38 → ~241-280/saat, deneme başına başarı %0,4 → %3,1, BEP-51
+      örnek 62 → 208/sn. Ayrıca düğüm kuyruğunu büyütmek aday KALİTESİNİ de üçe katladı:
+      triyajda ölü çıkan %88 → %58,8 (daha çeşitli düğüm = ağın daha geniş kesiti).**
       Yeni teşhis modları: `peerstat sweep|lookups|ordertest`.
 - [x] Faz F (F4-2, F4-3): yazım düzeltme (indeks sözlüğü + eş-geçiş doğrulaması), kategori
       gözatma, kavram sözlüğü, tanınmayan tek kelime → boş; hit@5 %84→%90, MRR 0.82.

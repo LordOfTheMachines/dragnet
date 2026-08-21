@@ -294,15 +294,27 @@ kayıtları da alır. `last_seen DESC` bu kanıtsız adayları kanıtlıların �
 sonucunu geniş bir bağlama taşımanın" tipik tuzağıdır — testin filtresi, üretimin filtresi
 değildi.
 
-### Sonuç (2026-08-22, 12,8 dakikalık kesintisiz pencere)
+### Sonuç (2026-08-22, 31 dakikalık pencere)
 
-| Ölçüm | Çöküş anında | Düzeltme sonrası |
-|---|---|---|
-| İsim üretimi | 38/saat | **~272/saat** |
-| Deneme başına başarı | %0,4 | **%2,6** |
-| Triyaj | — | 19.777/saat |
-| BEP-51 örnek | 62/sn | **149/sn** |
-| Keşfedilen infohash | — | **416.000/saat** |
+| Ölçüm | Çöküş anında | F13 öncesi | Düzeltme sonrası |
+|---|---|---|---|
+| İsim üretimi | 38/saat | 146/saat | **~241–280/saat** |
+| Deneme başına başarı | %0,4 | %2,4 | **%3,1** |
+| **Triyajda ölü çıkan** | %88 | %88 | **%58,8** |
+| BEP-51 örnek | 62/sn | — | **208/sn** |
+| Keşfedilen infohash | — | — | **421.000/saat** |
+| Gelen `get_peers` (pasif) | — | — | 1.921/saat |
+
+**Beklenmeyen bulgu — düğüm kuyruğu aday KALİTESİNİ de belirliyor.** Kuyruk 8.192 →
+65.536 yapıldığında triyajda ölü çıkan oran %88'den **%58,8'e** düştü, yani sağlıklı aday
+oranı %12'den %41'e çıktı. Beklenen etki yalnız tekrar oranıydı (aynı düğüme daha seyrek
+sormak); ama aynı zamanda **daha çeşitli düğüme** soruluyor ve BEP-51 örnekleri ağın daha
+geniş bir kesitinden geliyor. Dar bir düğüm kümesi yalnız aynı infohash'leri değil, aynı
+*kalitede* (bayat) infohash'leri veriyormuş.
+
+Bu, §1'deki zincir denklemindeki `P(sağlıklı)` teriminin — §5'te "en büyük kaldıraç" diye
+işaretlenen ve port yönlendirmesi gerektirdiği sanılan terimin — aslında **tamamen kendi
+kontrolümüzdeki bir ayarla** üçe katlanabildiğini gösterir.
 
 Uygulanan ayarlar: eşzamanlı TCP 384 → **96** (ölçülen verim tepesi), triyaj eşzamanlılığı
 24 → **12** (her triyaj ~50 UDP paketi), harvester bütçesi 50 → **120/sn** ve `crawl_batch`
