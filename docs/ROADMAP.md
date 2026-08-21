@@ -105,6 +105,19 @@ Fazlar sırayla ilerler; her faz kendi başına test edilebilir bir çıktı ür
       politikası, depolama büyüme freni. Ölçüm: isim üretimi saatte ~135 → ~280-320.
       **Çürüyen hipotezler** (ayrıntı `docs/PLAN-FAZ-F.md`): çoklu düğüm kimliği, uTP
       yedek yolu, kısa zaman aşımları, sıcak kayıtlarda kısa yeniden deneme.
+- [x] Faz F (F13): **çekim hızının matematiği + sessiz bozukluklar** — belge:
+      `docs/CEKIM-HIZI.md`. Kullanıcının "fiziksel sınıra mı takılıyoruz?" sorusu ölçümle
+      cevaplandı: **takılmıyorduk, sistem sessizce bozuktu.** Harvester sorgu bütçesinin
+      %97'sini kullanamıyordu (yanıt vermiş düğümler kuyruktan atılıyor, kuyruk boşken
+      100 ms'de bir DNS fırtınası, Windows ICMP→`WSAECONNRESET` yutulan soket hataları);
+      kuyruk dolunca YENİ düğümler atıldığı için örneklerin %99,7'si tekrardı; triyaj
+      bulduğu peer adreslerini çöpe atıp çekim aynı aramayı tekrarlıyordu; triyajdan
+      geçmemiş kayıtlar çekilip DHT bütçesini yakıyordu; üç sıcak kuyruk sorgusu 40 bin
+      satırı tarayıp sıralıyordu; `dragnet-meta/src/text.rs` (kodlama tespiti) ölü koddu;
+      WAL 421 MB'a şişmişti. Ayrıca **kalıcı DHT kimliği + bootstrap önbelleği** eklendi.
+      Ölçüm: giden sorgu 1,5 → 46/sn, BEP-51 örnek 0,9 → 85/sn, triyaj 1.406 → 11.260/saat,
+      **isim üretimi 146 → ~320/saat**. Yeni teşhis araçları: `--example rate` (aşama
+      hızları + sorgu planları) ve `--example peerstat` (peer hunisi).
 - [x] Faz F (F4-2, F4-3): yazım düzeltme (indeks sözlüğü + eş-geçiş doğrulaması), kategori
       gözatma, kavram sözlüğü, tanınmayan tek kelime → boş; hit@5 %84→%90, MRR 0.82.
 - [ ] Faz F (F7 — kullanıcı önerisi): çevrim içi zenginleştirme (Wikidata öncelikli;

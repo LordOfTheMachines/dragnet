@@ -196,7 +196,34 @@ yalnız sistemi yavaşlatıyorlardı ve hiçbiri loglara yansımıyordu. Bu yüz
 tablosuna soket hatası, öğrenilen düğüm ve gelen yanıt sayaçları eklendi: bir daha aynı
 biçimde sessizce ölemesin.
 
-## 7. Çürüyen hipotezler (tekrar denemeyin)
+## 7. F13 sonrası ölçüm (2026-08-21)
+
+Aynı makine, aynı ayarlar (`fetch_workers = 24`, `fetch_peer_concurrency = 16`,
+`harvester_max_queries_per_sec = 50`), aynı veritabanı:
+
+| Ölçüm | Önce | Sonra | Kat |
+|---|---|---|---|
+| Giden DHT sorgusu | 1,5/sn | **46/sn** (bütçenin %92'si) | 31× |
+| BEP-51 örnek (aktif hasat) | 0,9/sn | **85/sn** | 94× |
+| Öğrenilen düğüm | ~0/sn | **124/sn** | — |
+| Sorgu başına gelen yanıt | %6 | **%34** | 5,7× |
+| Örneklerde tekrar (dedup) | %99,7 | **%64** | — |
+| Triyaj (aday ölçümü) | 1.406/saat | **11.260/saat** | 8× |
+| **İsim üretimi** | **146/saat** | **~320/saat** | **2,2×** |
+
+Son satır neden yalnız 2,2×? Çünkü zincirin ilk halkaları açıldıktan sonra tavanı artık
+**aday kalitesi** belirliyor: triyaj edilen adayların %88'inde DHT'de hiç peer yok
+(`P(sağlıklı) ≈ %12`). Bol miktarda infohash bulmak, çekilebilir torrent bulmakla aynı
+şey değil. Ayrıca bu ölçüm **ısınma dönemindedir**: pasif trafik (gelen `announce`)
+hâlâ saatte tek haneli, çünkü ağın yönlendirme tablolarında yer edinmek saatler alır ve
+ölçüm boyunca uygulama defalarca yeniden başlatıldı.
+
+**Buradan sonraki en büyük kaldıraç `P(sağlıklı)`'dir** (§5.1): modemde 6881/UDP
+yönlendirmesi + kimliğin korunması → gelen `announce_peer` sayısı artar → aday kalitesi
+BEP-51 örneklemesinin çok üstüne çıkar. İkinci kaldıraç `TRIAGE_PEER_CAP`'i büyütmektir
+(§5.2): DHT bütçesi harcamaz, yalnız TCP denemesi ister.
+
+## 8. Çürüyen hipotezler (tekrar denemeyin)
 
 Bunlar ölçülüp reddedildi; gerekçeleri `docs/PLAN-FAZ-F.md` §F9–F12'de:
 
@@ -208,7 +235,7 @@ Bunlar ölçülüp reddedildi; gerekçeleri `docs/PLAN-FAZ-F.md` §F9–F12'de:
 - **MSE (şifreli bağlantı) hipotezi**: `peerstat` ile ölçüldü — bağlanabilen peer'lerin
   yalnız %1–2,5'i handshake vermiyor. Sorun şifreleme değil, **erişilemezlik**.
 
-## 8. Ölçüm disiplini
+## 9. Ölçüm disiplini
 
 - **Kısa pencere yalan söyler.** 7–8 dakikalık pencerelerde aynı kurulum 255 ile 325
   arasında ölçüldü. Karar için en az 30 dakika, tercihen "son 1 saat" kullanılmalı.
