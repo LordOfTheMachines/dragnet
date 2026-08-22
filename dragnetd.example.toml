@@ -2,6 +2,18 @@
 # Kullanım: bu dosyayı `dragnetd.toml` olarak kopyalayın ve düzenleyin.
 # Ortam değişkeni ile de geçersiz kılınabilir, örn: DRAGNET_API_BIND=0.0.0.0:9000
 
+# !!! DİKKAT — buradaki eşzamanlılık değerleri SUNUCU içindir (NAT'sız, kesintisiz
+# bağlantı). Bunu bir EV bağlantısında çalıştıracaksanız önce şunları düşürün; aksi
+# hâlde modemin bağlantı-izleme (conntrack) tablosu dolar ve yalnız Dragnet değil
+# TÜM internetiniz yavaşlar, hatta kilitlenir:
+#
+#   harvester_max_queries_per_sec = 40
+#   fetch_workers                 = 6     # 6 × 8 = 48 eşzamanlı giden TCP
+#   fetch_peer_concurrency        = 8
+#   triage_concurrency            = 6     # her triyaj ~50 UDP paketlik bir DHT araması
+#
+# Masaüstü uygulamasının varsayılanları zaten bunlardır. Ölçüm: docs/CEKIM-HIZI.md
+
 # SQLite veritabanı dosyası (yoksa oluşturulur).
 db_path = "dragnet.db"
 
