@@ -287,6 +287,21 @@ pub mod queries {
               ORDER BY probe_peers DESC, hint_peers DESC, seen_count DESC
               LIMIT ?4";
 
+    /// SICAK adaylar: pasif DHT trafiğinde (`get_peers`/`announce_peer`) **az önce**
+    /// görülmüş, yani birileri o torrenti şu anda arıyor ya da paylaşıyor.
+    ///
+    /// Neden ayrı bir kol: bu adaylar henüz triyajdan geçmemiş olabilir (`probe_peers`
+    /// = -1) ve canlı kolun `ORDER BY probe_peers DESC` sırasında -1 en sona düşer —
+    /// yani depoda 11.000 sıcak aday beklerken hiçbiri sıra alamıyordu. Oysa ölçümde
+    /// (2026-08-22) sıfır-peer oranı en düşük olan kaynak bunlardı:
+    /// sıcak %35, triyaj ortalaması %48.
+    pub const NEXT_TO_FETCH_HOT: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_hot
+                  WHERE metadata_status = 'pending'
+                    AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
+                    AND hot_seen > ?3
+                  ORDER BY hot_seen DESC
+                  LIMIT ?4";
+
     /// Kodlaması bozuk çıkmış adların bir kerelik yeniden çekimi (küçük, sınırlı kol).
     /// `ORDER BY` bilerek yok: kota zaten birkaç satır ve sıralamak, çekilmiş kayıtların
     /// tamamını okuyup geçici b-tree kurmak demekti (her zamanlayıcı turunda).
@@ -507,6 +522,12 @@ impl Store {
         // verirken, ölçüm tazeliğine göre sıralamak 19,6 peer ve %25 verdi.
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_fetch_probe ON torrents(probe_at DESC) WHERE metadata_status='pending';",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Sıcak kolun sırası (`queries::NEXT_TO_FETCH_HOT`).
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_fetch_hot ON torrents(hot_seen DESC) WHERE metadata_status='pending';",
         )
         .execute(&self.pool)
         .await?;
@@ -757,7 +778,21 @@ impl Store {
         // sinyalleri ve `hot_seen` WHERE'de koşul olarak duruyor — böylece kalan sıra
         // `idx_fetch_live(probe_peers DESC, hint_peers DESC, seen_count DESC)` ile birebir
         // örtüşür ve sıralama maliyeti kalkar (LIMIT erken çıkar).
-        let mut rows = sqlx::query(queries::NEXT_TO_FETCH_LIVE)
+        // SICAK KOL ÖNCE (kotanın yarısı). Bu adaylar pasif trafikte az önce görüldü;
+        // ölçümde sıfır-peer oranı en düşük kaynak bunlardı (%35, triyaj ortalaması %48).
+        // Ayrı kol gerekli çünkü çoğu henüz triyajdan geçmemiştir (`probe_peers = -1`)
+        // ve canlı kolun `probe_peers DESC` sırasında en sona düşerler — depoda 11.000
+        // sıcak aday beklerken hiçbiri sıra alamıyordu.
+        let hot_quota = (limit.max(0) / 2).max(1);
+        let mut rows = sqlx::query(queries::NEXT_TO_FETCH_HOT)
+            .bind(MAX_FETCH_ATTEMPTS)
+            .bind(hot_cooldown)
+            .bind(hot_window)
+            .bind(hot_quota)
+            .fetch_all(&self.pool)
+            .await?;
+        let warm_limit = (warm_limit - rows.len() as i64).max(0);
+        let more = sqlx::query(queries::NEXT_TO_FETCH_LIVE)
             .bind(MAX_FETCH_ATTEMPTS)
             .bind(hot_cooldown)
             .bind(hot_window)
@@ -766,6 +801,7 @@ impl Store {
             .bind(now - FRESH_PROBE_SECS)
             .fetch_all(&self.pool)
             .await?;
+        rows.extend(more);
         // TRİYAJ EDİLMEMİŞ ("soğuk") KAYITLAR ARTIK ÇEKİLMİYOR (F13, ölçümle).
         // Eskiden canlı aday bulunamayınca kota tamamen soğuklarla doldurulurdu
         // ("işçiyi boşta bırakma"). Ölçüm bunun zararlı olduğunu gösterdi: saatte 6.181
@@ -785,11 +821,16 @@ impl Store {
                 .await?;
             rows.extend(more);
         }
+        // Kollar örtüşebilir (sıcak bir aday triyajdan da geçmiş olabilir); aynı
+        // infohash'i iki kez çekmeye çalışmak bir işçiyi boşa harcar.
         let mut out = Vec::with_capacity(rows.len());
+        let mut seen = std::collections::HashSet::with_capacity(rows.len());
         for r in rows {
             let hex: String = r.get("infohash");
             if let Some(ih) = InfoHash::from_hex(&hex) {
-                out.push(ih);
+                if seen.insert(ih) {
+                    out.push(ih);
+                }
             }
         }
         if !out.is_empty() {
@@ -2794,6 +2835,36 @@ mod tests {
             !store.next_to_triage(10, now).await.unwrap().contains(&eski),
             "temizlik bayat kaydı kuyruktan düşürmeli"
         );
+    }
+
+    /// SICAK adaylar (pasif trafikte az önce görülmüş) kuyrukta sıra ALMALI.
+    ///
+    /// Regresyon: bu adaylar çoğu zaman triyajdan geçmemiştir (`probe_peers = -1`) ve
+    /// canlı kolun `ORDER BY probe_peers DESC` sırasında -1 en sona düşer. Ölçümde depoda
+    /// 11.000 sıcak aday beklerken hiçbiri sıra almıyordu — oysa sıfır-peer oranı en
+    /// düşük kaynak onlardı (%35, triyaj ortalaması %48). Bu yüzden ayrı kol var.
+    #[tokio::test]
+    async fn fetch_queue_gives_hot_candidates_their_own_quota() {
+        let store = Store::in_memory().await.unwrap();
+        let now = 1_000_000i64;
+        let sicak = InfoHash::from_bytes([7u8; 20]);
+        // Triyajdan geçmiş, bol peer'li adaylarla kuyruğu doldur (canlı kol bunları sever).
+        for i in 10..40u8 {
+            let ih = InfoHash::from_bytes([i; 20]);
+            store.record_sighting_ext(ih, now, false).await.unwrap();
+            store.record_probe(ih, 50, now).await.unwrap();
+        }
+        // Tek bir SICAK aday: pasif trafikte az önce görüldü, henüz ÖLÇÜLMEDİ.
+        store.record_sighting_ext(sicak, now, true).await.unwrap();
+
+        let q = store.next_to_fetch(10, now).await.unwrap();
+        assert!(
+            q.contains(&sicak),
+            "sıcak aday, bol peer'li ölçülmüşlerin arasında kaybolmamalı"
+        );
+        // Aynı kayıt iki koldan da gelirse bir işçi boşa gider.
+        let uniq: std::collections::HashSet<_> = q.iter().collect();
+        assert_eq!(uniq.len(), q.len(), "kuyruk tekil olmalı");
     }
 
     /// Giriş kısma, İŞLENMEMİŞ yükü ölçmelidir. Triyajdan geçmiş kayıtlar "bitmiş iş"tir
