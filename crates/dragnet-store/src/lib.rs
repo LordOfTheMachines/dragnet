@@ -1904,6 +1904,11 @@ pub mod metric {
     /// bildirimleri soketi `WSAECONNRESET` ile patlatır; bu sayaç sıfırdan belirgin
     /// biçimde farklıysa hasat sessizce yavaşlıyor demektir.
     pub const DHT_SOCK_ERR: &str = "dht_sock_err";
+    /// Motorun kalp atışı: metrik görevi her turda (60 sn) bunu artırır. Pencere içinde
+    /// beklenen değerden AZSA motor o sürede durmuş ya da askıya alınmış demektir —
+    /// boru hattı sayaçlarının "sıfır" olmasıyla "donmuş" olmasını ayırt eder.
+    pub const ENGINE_ALIVE: &str = "engine_alive";
+
     /// Dedup filtresine takılan (daha önce görülmüş) infohash. `DHT_SAMPLES`'a oranı
     /// keşif çeşitliliğini ölçer: %100'e yaklaşıyorsa aynı düğümlerden aynı örnekler
     /// geliyordur ve örnekleme boşa dönüyordur.

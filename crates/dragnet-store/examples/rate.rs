@@ -81,11 +81,24 @@ async fn main() {
     )
     .await;
 
+    // MOTOR YAŞIYOR MU? Metrik görevi 60 sn'de bir bunu artırır. Beklenenden azsa
+    // sayaçlar "sıfır" değil DONMUŞ demektir — yani sorun boru hattında değil, motorun
+    // kendisi durmuştur. (Bir teşhis oturumunda 11 dakika boyunca bu ayrım yapılamadı.)
+    let alive = m(dragnet_store::metric::ENGINE_ALIVE).await;
     let per_h = |v: i64| v as f64 * 3600.0 / covered as f64;
     let per_s = |v: i64| v as f64 / covered as f64;
+    let beklenen = covered / 60;
     println!(
-        "PENCERE: istenen {win_min} dk → sayaçların GERÇEKTE kapsadığı {:.1} dk\n",
+        "PENCERE: istenen {win_min} dk → sayaçların GERÇEKTE kapsadığı {:.1} dk",
         covered as f64 / 60.0
+    );
+    println!(
+        "MOTOR   : {alive}/{beklenen} kalp atışı{}\n",
+        if beklenen > 0 && alive * 4 < beklenen * 3 {
+            "  ← DİKKAT: motor bu pencerenin bir kısmında ÇALIŞMIYORDU"
+        } else {
+            ""
+        }
     );
     println!("AŞAMA HIZI (saatlik projeksiyon)");
     let discovered = m(dragnet_store::metric::DHT_HARVESTED).await;

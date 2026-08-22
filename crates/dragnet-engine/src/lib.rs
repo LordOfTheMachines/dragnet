@@ -378,6 +378,12 @@ impl Engine {
                     ticker.tick().await;
                     let cur = snap(&stats);
                     let now = now_unix();
+                    // KALP ATIŞI: motorun yaşadığını gösterir. Bir teşhis oturumunda
+                    // sayaçlar 11 dakika boyunca kıpırdamadı ve bunun "sistem yavaş" mı
+                    // yoksa "motor durmuş" mu olduğu ayırt edilemedi — sayaçların DONMASI
+                    // ile SIFIR OLMASI aynı görünüyordu. Bu metrik her turda artar;
+                    // artmıyorsa sorun boru hattında değil, motorun kendisindedir.
+                    let _ = store.bump_metric(metric::ENGINE_ALIVE, now).await;
                     for (name, d) in [
                         (metric::DHT_SAMPLES, cur.samples_seen - prev.samples_seen),
                         (metric::DHT_ANNOUNCE, cur.announce_seen - prev.announce_seen),
