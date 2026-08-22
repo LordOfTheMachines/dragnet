@@ -78,7 +78,31 @@ async function pollStats() {
     renderFetch._hints = s.peer_hints;
     renderFetch(s.fetch, s.queue, scanning);
     renderReach(s, scanning);
+    renderSync(s.sync);
   } catch (e) {}
+}
+
+/// Uzak indeks kartı. Yalnız yerel modda gizlenir — kullanıcı sunucu kullanmıyorsa
+/// panoda boş bir kart görmesin.
+function renderSync(sy) {
+  const card = $("sync-card");
+  if (!sy || sy.mode === "local") { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  const uzak = sy.mode === "remote";
+  $("sy-mode").textContent = uzak ? "Yalnız uzak" : "Hibrit";
+  $("sy-records").textContent = nf(sy.records || 0);
+  $("sy-cursor").textContent = nf(sy.cursor || 0);
+  $("sy-errors").textContent = nf(sy.errors || 0);
+  // Kayıt akıyorsa yeşil; hata varsa ve hiç kayıt gelmediyse kırmızı.
+  const akiyor = (sy.records || 0) > 0;
+  const bozuk = (sy.errors || 0) > 0 && !akiyor;
+  $("sync-pill").className = "pill " + (bozuk ? "off" : akiyor ? "on" : "off");
+  $("sync-text").textContent = bozuk ? "Sunucuya ulaşılamıyor" : akiyor ? "Senkron çalışıyor" : "Bekleniyor…";
+  $("sync-note").textContent = bozuk
+    ? `${sy.url} adresine ulaşılamıyor. Adresi ve token'ı Ayarlar'dan kontrol edin.`
+    : uzak
+      ? `İndeks ${sy.url} adresinden çekiliyor; bu bilgisayarda DHT taraması yapılmıyor. Semantik arama yerelde çalışır.`
+      : `Hibrit: kendi taramanız sürüyor, ek olarak ${sy.url} adresinden de kayıt çekiliyor.`;
 }
 
 // --- Depolama basıncı uyarısı (F8-4): büyüme duraklatıldıysa üstte şerit ---
@@ -723,6 +747,9 @@ async function loadSettings() {
     $("set-port").value = s.harvester_port;
     $("set-autostart").checked = s.autostart;
     $("set-autoscan").checked = s.auto_scan;
+    $("set-sync-mode").value = s.sync_mode || "local";
+    $("set-sync-url").value = s.sync_url || "";
+    $("set-sync-token").value = s.sync_token || "";
     $("set-nodes").value = s.harvester_instances ?? 1;
     $("set-dbmax").value = s.db_max_gb ?? 0;
     $("set-diskres").value = s.disk_reserve_gb ?? 5;
@@ -744,6 +771,9 @@ $("btn-save").addEventListener("click", async () => {
   s.autostart = $("set-autostart").checked;
   s.auto_scan = $("set-autoscan").checked;
   s.block_keywords = blockKw.slice();
+  s.sync_mode = $("set-sync-mode").value || "local";
+  s.sync_url = $("set-sync-url").value.trim();
+  s.sync_token = $("set-sync-token").value;
   s.harvester_instances = Math.min(8, Math.max(1, Number($("set-nodes").value) || 1));
   s.db_max_gb = Number($("set-dbmax").value) || 0;
   s.disk_reserve_gb = Number($("set-diskres").value) || 0;

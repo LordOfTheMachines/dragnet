@@ -52,3 +52,14 @@ semantic_device = "auto"
 semantic_models_dir = "models"
 # Cross-encoder yeniden sıralayıcı (bge-reranker-v2-m3, ~570 MB, CPU): daha isabetli, +~0.25 s/sorgu
 semantic_rerank = true
+
+# --- Sunucu modu (7/24 crawler) ---
+# Ayrıntılı kurulum: docs/SUNUCU.md
+#
+# Sunucuda çalıştırırken:
+#  · api_token MUTLAKA ayarlayın — /changes uç noktası tüm indeksi kopyalamaya izin verir.
+#  · api_bind'i 127.0.0.1'de bırakıp dışarıya Cloudflare Tunnel / nginx ile açın.
+#  · UDP 6881 hem giden hem GELEN yönde açık olmalı; pasif hasat buna bağlıdır ve
+#    ölçümde en kaliteli aday kaynağı odur (docs/CEKIM-HIZI.md §12).
+#  · semantic_enabled sunucuda gereksizdir: arama istemcide semantikleşir, model ve
+#    vektör indeksi kullanıcının makinesinde kalır.

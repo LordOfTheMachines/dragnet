@@ -35,6 +35,21 @@
         <div class="tile"><div class="tval" id="t-unique">0</div><div class="tlabel">Hasat (bu oturum)</div></div>
       </div>
 
+      <!-- Yalnız uzak/hibrit modda görünür: indeksin sunucudan beslendiğini gösterir. -->
+      <div class="card hidden" id="sync-card">
+        <div class="card-head">
+          <h3>Uzak indeks</h3>
+          <span id="sync-pill" class="pill off"><span class="dot"></span><span id="sync-text">–</span></span>
+        </div>
+        <div class="tiles tiles-6">
+          <div class="tile sm"><div class="tval" id="sy-mode">–</div><div class="tlabel">Çalışma modu</div></div>
+          <div class="tile sm"><div class="tval" id="sy-records">0</div><div class="tlabel">Çekilen kayıt</div></div>
+          <div class="tile sm"><div class="tval" id="sy-cursor">0</div><div class="tlabel">Senkron imleci</div></div>
+          <div class="tile sm"><div class="tval" id="sy-errors">0</div><div class="tlabel">Hata</div></div>
+        </div>
+        <p class="muted small" id="sync-note"></p>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <h3>DHT erişilebilirliği</h3>
@@ -180,6 +195,30 @@
         <div class="card settings">
           <div class="card-head"><h3>Tarama</h3><span class="muted small">DHT hasat ve metadata çekimi</span></div>
 
+          <div class="setsep">İndeks kaynağı</div>
+          <div class="setrow">
+            <div class="setlab"><span>Çalışma modu</span><em>indeks nereden beslenir</em></div>
+            <select id="set-sync-mode">
+              <option value="local">Yalnız yerel — kendi taramam</option>
+              <option value="remote">Yalnız uzak — sunucudan çek</option>
+              <option value="hybrid">Hibrit — ikisi birden</option>
+            </select>
+          </div>
+          <div class="setrow">
+            <div class="setlab"><span>Sunucu adresi</span><em>https://…</em></div>
+            <input id="set-sync-url" type="text" placeholder="https://dragnet.ornek.com" />
+          </div>
+          <div class="setrow">
+            <div class="setlab"><span>Sunucu token'ı</span><em>gerekiyorsa</em></div>
+            <input id="set-sync-token" type="password" placeholder="(boş bırakılabilir)" />
+          </div>
+          <p class="sethelp"><b>Yalnız yerel:</b> bugünkü davranış — indeksi kendi DHT taramanız üretir.
+            <b>Yalnız uzak:</b> hiç tarama yapılmaz, indeks sunucudan çekilir; internetiniz hiç yorulmaz.
+            <b>Hibrit:</b> ikisi birden — sunucudan gelenle kendi bulduklarınız aynı indekste birleşir.
+            Sunucu adresi boşsa mod ne olursa olsun yerel taramaya dönülür. <b>Semantik arama her modda
+            bu bilgisayarda çalışır</b>; sunucudan gelen kayıtlar da yerelde indekslenir.</p>
+
+          <div class="setsep">Hız</div>
           <div class="setrow">
             <div class="setlab"><span>Harvester hız limiti</span><em>sorgu/sn</em></div>
             <input id="set-rate" type="number" min="5" max="500" />
