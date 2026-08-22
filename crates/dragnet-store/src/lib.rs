@@ -1001,6 +1001,82 @@ impl Store {
         Ok(())
     }
 
+    /// SENKRONİZASYON: verilen imleçten sonraki **çekilmiş** kayıtları dosyalarıyla verir.
+    ///
+    /// İmleç `torrents.rowid`'dir: yeni kayıtlarda monoton artar, mevcut kaydın
+    /// güncellenmesi (ör. `peer_count`) imleci değiştirmez. Bu bilinçlidir — istemci
+    /// canlılık bilgisini zaten kendi ölçer; senkronizasyonun taşıması gereken şey
+    /// **yeni metadata**dır. Böylece imleç basit kalır ve istemci "en son gördüğüm
+    /// rowid"i saklamakla yetinir.
+    ///
+    /// Döndürdüğü: `(kayıtlar, son_imleç)`. Kayıtlar boşsa imleç değişmez.
+    pub async fn changes_since(
+        &self,
+        cursor: i64,
+        limit: i64,
+    ) -> Result<(Vec<TorrentRecord>, i64), StoreError> {
+        let limit = limit.clamp(1, 1000);
+        let rows = sqlx::query(
+            "SELECT rowid, infohash, name, total_size, first_seen, last_seen, seen_count
+               FROM torrents
+              WHERE rowid > ?1 AND metadata_status = 'fetched'
+              ORDER BY rowid
+              LIMIT ?2",
+        )
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok((Vec::new(), cursor));
+        }
+        let mut son_imlec = cursor;
+        let mut kayitlar: Vec<TorrentRecord> = Vec::with_capacity(rows.len());
+        let mut sira: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(rows.len());
+        for r in &rows {
+            son_imlec = son_imlec.max(r.get::<i64, _>("rowid"));
+            let hex: String = r.get("infohash");
+            let Some(ih) = InfoHash::from_hex(&hex) else {
+                continue;
+            };
+            sira.insert(hex, kayitlar.len());
+            kayitlar.push(TorrentRecord {
+                infohash: ih,
+                name: r.get::<String, _>("name"),
+                total_size: r.get::<i64, _>("total_size") as u64,
+                files: Vec::new(),
+                first_seen: r.get::<i64, _>("first_seen"),
+                last_seen: r.get::<i64, _>("last_seen"),
+                seen_count: r.get::<i64, _>("seen_count") as u64,
+            });
+        }
+        // Dosyalar TEK sorguda çekilir: kayıt başına ayrı sorgu, 1000'lik bir partide
+        // 1000 gidiş-dönüş demekti ve senkronizasyonu kullanılamaz hâle getirirdi.
+        if !sira.is_empty() {
+            let ph = std::iter::repeat_n("?", sira.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT infohash, path, size FROM files WHERE infohash IN ({ph}) ORDER BY id"
+            );
+            let mut q = sqlx::query(&sql);
+            for hex in sira.keys() {
+                q = q.bind(hex);
+            }
+            for f in q.fetch_all(&self.pool).await? {
+                let hex: String = f.get("infohash");
+                if let Some(&i) = sira.get(&hex) {
+                    kayitlar[i].files.push(TorrentFile {
+                        path: f.get::<String, _>("path"),
+                        size: f.get::<i64, _>("size") as u64,
+                    });
+                }
+            }
+        }
+        Ok((kayitlar, son_imlec))
+    }
+
     /// Bir infohash'in tam kaydını (dosyalarıyla) getirir.
     pub async fn get(&self, infohash: InfoHash) -> Result<Option<TorrentRecord>, StoreError> {
         let hex = infohash.to_hex();
@@ -2870,6 +2946,53 @@ mod tests {
         // Aynı kayıt iki koldan da gelirse bir işçi boşa gider.
         let uniq: std::collections::HashSet<_> = q.iter().collect();
         assert_eq!(uniq.len(), q.len(), "kuyruk tekil olmalı");
+    }
+
+    /// Senkronizasyon akışı: imleçten sonrasını dosyalarıyla vermeli, imleci ilerletmeli
+    /// ve tükenince duraklamalı. İstemci bu imleci saklayıp kaldığı yerden devam eder.
+    #[tokio::test]
+    async fn changes_since_streams_records_with_files() {
+        let store = Store::in_memory().await.unwrap();
+        for (hex, ad) in [
+            ("1111111111111111111111111111111111111111", "Birinci"),
+            ("2222222222222222222222222222222222222222", "İkinci"),
+            ("3333333333333333333333333333333333333333", "Üçüncü"),
+        ] {
+            let mut r = record(hex, ad, 100);
+            r.files = vec![
+                TorrentFile {
+                    path: format!("{ad}/a.mkv"),
+                    size: 60,
+                },
+                TorrentFile {
+                    path: format!("{ad}/b.srt"),
+                    size: 40,
+                },
+            ];
+            store.upsert_torrent(&r).await.unwrap();
+        }
+        // Bekleyen (adsız) kayıt senkronizasyona GİRMEMELİ: istemciye yalnız ad taşırız.
+        store
+            .record_sighting(InfoHash::from_bytes([9u8; 20]), 1000)
+            .await
+            .unwrap();
+
+        let (ilk, imlec1) = store.changes_since(0, 2).await.unwrap();
+        assert_eq!(ilk.len(), 2, "limit uygulanmalı");
+        assert_eq!(ilk[0].name, "Birinci");
+        assert_eq!(ilk[0].files.len(), 2, "dosyalar da gelmeli");
+        assert_eq!(ilk[0].files[0].path, "Birinci/a.mkv");
+        assert!(imlec1 > 0);
+
+        let (ikinci, imlec2) = store.changes_since(imlec1, 100).await.unwrap();
+        assert_eq!(ikinci.len(), 1, "kaldığı yerden devam etmeli");
+        assert_eq!(ikinci[0].name, "Üçüncü");
+        assert!(imlec2 > imlec1);
+
+        // Akış tükendi: boş liste, imleç sabit (istemci boşuna ilerlemez).
+        let (bos, imlec3) = store.changes_since(imlec2, 100).await.unwrap();
+        assert!(bos.is_empty());
+        assert_eq!(imlec3, imlec2);
     }
 
     /// Giriş kısma, İŞLENMEMİŞ yükü ölçmelidir. Triyajdan geçmiş kayıtlar "bitmiş iş"tir

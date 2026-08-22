@@ -146,6 +146,28 @@ struct StatsResponse {
     semantic: Option<dragnet_semantic::SemanticStatus>,
 }
 
+/// `/changes` sorgu parametreleri.
+#[derive(Debug, Deserialize)]
+struct ChangesParams {
+    /// İstemcinin en son gördüğü imleç (ilk çağrıda 0).
+    #[serde(default)]
+    since: i64,
+    /// Bir partide istenen azami kayıt (sunucu 1000'de sınırlar).
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `/changes` yanıtı: artımlı senkronizasyon partisi.
+#[derive(Debug, Serialize)]
+struct ChangesResponse {
+    /// Bu partideki kayıtlar (ad + boyut + dosya listesi).
+    records: Vec<dragnet_core::TorrentRecord>,
+    /// İstemcinin saklayıp bir sonraki çağrıda göndereceği imleç.
+    cursor: i64,
+    /// `true` ise sunucuda daha fazla kayıt var; istemci hemen devam edebilir.
+    more: bool,
+}
+
 /// Verilen store ve yapılandırmayla axum router'ı kurar (semantik kapalı).
 pub fn router(store: Store, config: &ApiConfig) -> Router {
     router_with_semantic(store, config, search::empty_slot())
@@ -163,6 +185,7 @@ pub fn router_with_semantic(store: Store, config: &ApiConfig, semantic: Semantic
         .route("/healthz", get(healthz))
         .route("/search", get(search))
         .route("/stats", get(stats))
+        .route("/changes", get(changes))
         .with_state(Arc::new(state))
 }
 
@@ -283,6 +306,40 @@ async fn search(
         Err(e) => {
             tracing::error!(error = %e, "arama hatası");
             (StatusCode::INTERNAL_SERVER_ERROR, "arama hatası").into_response()
+        }
+    }
+}
+
+/// `GET /changes?since=<imleç>&limit=<n>` — artımlı senkronizasyon akışı.
+///
+/// İstemci (uzak/hibrit mod) bu uç noktayı sürekli çağırıp kendi indeksini besler:
+/// dönen `cursor` saklanır, bir sonraki çağrıda `since` olarak gönderilir. `more`
+/// alanı doluysa istemci beklemeden devam edebilir; boşsa akış tükenmiştir.
+///
+/// Yalnız **adı bilinen** (metadata'sı çekilmiş) kayıtlar taşınır — bekleyen infohash
+/// yığınının istemciye bir faydası olmaz, onu her düğüm kendi DHT'sinden zaten görür.
+async fn changes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<ChangesParams>,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let limit = params.limit.unwrap_or(500).clamp(1, 1000);
+    match state.store.changes_since(params.since.max(0), limit).await {
+        Ok((records, cursor)) => {
+            let more = records.len() as i64 == limit;
+            Json(ChangesResponse {
+                records,
+                cursor,
+                more,
+            })
+            .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "changes hatası");
+            (StatusCode::INTERNAL_SERVER_ERROR, "changes hatası").into_response()
         }
     }
 }
@@ -416,6 +473,90 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["fetched_torrents"], 1);
         assert_eq!(json["total_infohashes"], 1);
+    }
+
+    /// `/changes` senkronizasyon sözleşmesi: imleç ilerlemeli, `more` bayrağı doğru
+    /// olmalı, akış tükenince boş dönmeli. İstemci (uzak/hibrit mod) buna göre yazılır,
+    /// dolayısıyla sözleşmenin sessizce değişmesi senkronizasyonu bozar.
+    #[tokio::test]
+    async fn changes_endpoint_streams_incrementally() {
+        let store = seeded_store().await;
+        store
+            .upsert_torrent(&record(
+                "2222222222222222222222222222222222222222",
+                "Fedora Workstation 40",
+                2,
+            ))
+            .await
+            .unwrap();
+        let app = || router(store.clone(), &ApiConfig::default());
+
+        // İlk parti: limit=1 → bir kayıt ve "devamı var".
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/changes?since=0&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["records"].as_array().unwrap().len(), 1);
+        assert_eq!(json["more"], true, "devamı olduğu bildirilmeli");
+        let cursor = json["cursor"].as_i64().unwrap();
+        assert!(cursor > 0);
+        // Kayıt, istemcinin indeksi kurabilmesi için gereken alanları taşımalı.
+        assert!(json["records"][0]["name"].is_string());
+        assert!(json["records"][0]["files"].is_array());
+
+        // İmleçten devam: kalan kayıt gelir.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/changes?since={cursor}&limit=100"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["records"].as_array().unwrap().len(), 1);
+        assert_eq!(json["more"], false, "akış tükendi");
+        let cursor2 = json["cursor"].as_i64().unwrap();
+
+        // Tükenmiş akış: boş liste, imleç sabit.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/changes?since={cursor2}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert!(json["records"].as_array().unwrap().is_empty());
+        assert_eq!(json["cursor"].as_i64().unwrap(), cursor2);
+    }
+
+    /// Token ayarlıysa `/changes` de korunmalı — indeks dağıtımı kimliksiz açılmamalı.
+    #[tokio::test]
+    async fn changes_endpoint_respects_token() {
+        let cfg = ApiConfig {
+            token: Some("gizli".into()),
+            ..ApiConfig::default()
+        };
+        let resp = router(seeded_store().await, &cfg)
+            .oneshot(
+                Request::builder()
+                    .uri("/changes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
