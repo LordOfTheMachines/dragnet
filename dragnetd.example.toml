@@ -63,3 +63,22 @@ semantic_rerank = true
 #    ölçümde en kaliteli aday kaynağı odur (docs/CEKIM-HIZI.md §12).
 #  · semantic_enabled sunucuda gereksizdir: arama istemcide semantikleşir, model ve
 #    vektör indeksi kullanıcının makinesinde kalır.
+
+# --- İndeks kaynağı: kendi taraman mı, sunucudan çekme mi? ---
+# Ayrıntı ve sunucu kurulumu: docs/SUNUCU.md
+#
+#  "local"  → yalnız kendi taraması (varsayılan; bugünkü davranış)
+#  "remote" → HİÇ tarama yapmaz, indeksi sunucudan çeker — tek bir DHT paketi bile
+#             göndermez. Zayıf makine, kotalı bağlantı ya da "ağımı yormasın" için.
+#  "hybrid" → hem tarar hem sunucudan çeker
+#
+# Semantik arama her üç modda da YERELDEDİR; sunucudan gelen kayıtlar da yerel
+# indeksleyici tarafından embed edilir.
+sync_mode = "local"
+
+# Sunucunun API kökü (uç nokta değil): istemci buna "/changes" ekler.
+# Boş bırakılırsa uzak/hibrit istekleri uyarı ile "local"e düşer.
+# sync_url = "https://dragnet.ornek.com"
+
+# Sunucudaki api_token ile aynı olmalı.
+# sync_token = ""

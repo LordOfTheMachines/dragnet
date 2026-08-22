@@ -36,20 +36,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "dragnetd başlıyor"
     );
 
-    let engine = Engine::start(EngineConfig {
-        db_path: cfg.db_path.clone(),
-        harvester_port: cfg.harvester_port,
-        harvester_max_queries_per_sec: cfg.harvester_max_queries_per_sec,
-        fetch_workers: cfg.fetch_workers,
-        fetch_peer_concurrency: cfg.fetch_peer_concurrency,
-        triage_concurrency: cfg.triage_concurrency,
-        seed_infohashes: cfg.seed_infohashes.clone(),
-        harvester_instances: 1,
-        db_max_bytes: (cfg.db_max_gb.max(0.0) * 1_073_741_824.0) as u64,
-        disk_reserve_bytes: (cfg.disk_reserve_gb.max(0.0) * 1_073_741_824.0) as u64,
-    })
-    .await?;
-    info!(addr = %engine.harvester_addr(), "boru hattı çalışıyor (Ctrl+C ile durur)");
+    // İndeks kaynağı: "yalnız uzak" modda çekirdek HİÇ başlatılmaz — o modu seçen
+    // kullanıcı tek bir DHT paketi bile göndermek istemiyordur (bkz. docs/SUNUCU.md).
+    let mode = dragnet_engine::sync::SyncMode::parse(&cfg.sync_mode);
+    let mode = if mode.syncs() && cfg.sync_url.trim().is_empty() {
+        warn!("sync_mode uzak/hibrit ama sync_url boş; yalnız yerele dönülüyor");
+        dragnet_engine::sync::SyncMode::Local
+    } else {
+        mode
+    };
+
+    let engine = if mode.crawls() {
+        Some(
+            Engine::start(EngineConfig {
+                db_path: cfg.db_path.clone(),
+                harvester_port: cfg.harvester_port,
+                harvester_max_queries_per_sec: cfg.harvester_max_queries_per_sec,
+                fetch_workers: cfg.fetch_workers,
+                fetch_peer_concurrency: cfg.fetch_peer_concurrency,
+                triage_concurrency: cfg.triage_concurrency,
+                seed_infohashes: cfg.seed_infohashes.clone(),
+                harvester_instances: 1,
+                db_max_bytes: (cfg.db_max_gb.max(0.0) * 1_073_741_824.0) as u64,
+                disk_reserve_bytes: (cfg.disk_reserve_gb.max(0.0) * 1_073_741_824.0) as u64,
+            })
+            .await?,
+        )
+    } else {
+        info!("yalnız-uzak mod: yerel tarama kapalı, indeks sunucudan çekilecek");
+        None
+    };
+    if let Some(e) = &engine {
+        info!(addr = %e.harvester_addr(), "boru hattı çalışıyor (Ctrl+C ile durur)");
+    }
+
+    // Uzak indeks senkronizasyonu (uzak/hibrit). Çekirdekten bağımsızdır: yalnız depoya
+    // yazar, dolayısıyla tarama kapalıyken de çalışır.
+    // Tek bir depo tanıtıcısı: çekirdek kapalıyken de (yalnız-uzak mod) senkronizasyon
+    // ve API bu tanıtıcıyı kullanır.
+    let store = dragnet_store::Store::open(&cfg.db_path).await?;
+    let _sync_task = mode.syncs().then(|| {
+        let scfg = dragnet_engine::sync::SyncConfig {
+            url: cfg.sync_url.trim().to_string(),
+            token: {
+                let t = cfg.sync_token.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            },
+            ..Default::default()
+        };
+        info!(mode = mode.as_str(), url = %scfg.url, "uzak senkronizasyon açık");
+        dragnet_engine::sync::spawn(
+            store.clone(),
+            scfg,
+            std::sync::Arc::new(dragnet_engine::sync::SyncStats::default()),
+        )
+    });
 
     // Semantik arama (opt-in): model indir → yükle → kalıcı indeksi RAM'e al → arka plan
     // indeksleyici. Yuva API ile paylaşılır; başarısızlıkta arama saf FTS olarak sürer.
@@ -67,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             device: dragnet_semantic::Device::parse(&cfg.semantic_device),
             models_dir: std::path::PathBuf::from(&cfg.semantic_models_dir),
         };
-        let store = engine.store();
+        let store = store.clone();
         let slot = semantic_slot.clone();
         let cfg_rerank = cfg.semantic_rerank;
         tokio::spawn(async move {
@@ -144,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             token: cfg.api_token.clone(),
             ..Default::default()
         };
-        let api_store = engine.store();
+        let api_store = store.clone();
         let api_slot = semantic_slot.clone();
         tokio::spawn(async move {
             if let Err(e) = dragnet_api::serve_with_semantic(api_cfg, api_store, api_slot).await {
@@ -159,7 +200,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let s = engine.snapshot().await;
+                // Yalnız-uzak modda çekirdek yok; durum logu senkronizasyona düşer.
+                let Some(eng) = &engine else {
+                    info!(indekslenen = store.count_fetched().await.unwrap_or(0),
+                          bilinen = store.count_total().await.unwrap_or(0), "durum (yalnız uzak)");
+                    continue;
+                };
+                let s = eng.snapshot().await;
                 info!(
                     dht_gonderilen = s.harvester.queries_sent,
                     dht_yanit = s.harvester.responses_seen,
@@ -194,10 +241,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let s = engine.snapshot().await;
     info!(
-        fetched = s.fetched_torrents,
-        total = s.total_infohashes,
+        fetched = store.count_fetched().await.unwrap_or(0),
+        total = store.count_total().await.unwrap_or(0),
         "dragnetd durdu"
     );
     Ok(())

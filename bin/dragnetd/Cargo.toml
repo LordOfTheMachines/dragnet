@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 dragnet-engine = { path = "../../crates/dragnet-engine" }
+# Senkronizasyon ve API icin dogrudan depo erisimi (cekirdek kapaliyken de gerekir).
+dragnet-store = { path = "../../crates/dragnet-store" }
 dragnet-api = { path = "../../crates/dragnet-api" }
 dragnet-semantic = { path = "../../crates/dragnet-semantic" }
 tokio = { workspace = true }
