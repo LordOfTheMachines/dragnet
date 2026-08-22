@@ -90,6 +90,11 @@ pub struct HarvesterConfig {
 const STATE_NODES: usize = 8_000;
 /// Durum dosyasının kaydedilme aralığı.
 const STATE_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+/// Dış adresin kabul edilmesi için gereken en az oy (bkz. `Shared::vote_public_ip`).
+/// Tek bir düğümün bildirimi yeterli değildir: DHT'de yanlış `ip` bildiren düğümler var
+/// ve her bildirimde kimlik değiştirmek pasif hasadı öldürüyordu.
+const IP_VOTE_THRESHOLD: u32 = 8;
+
 /// Düğüm kuyruğu kuruduğunda yeniden tohumlama denemeleri arasındaki en kısa süre.
 const RESEED_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -302,11 +307,29 @@ pub struct Harvester {
     /// Aynı kanalın yazan ucu (ek kimliklerin akışını buraya aktarmak için).
     sink: mpsc::Sender<Sighting>,
     stats: Arc<Stats>,
+    /// Paylaşımlı iç durum (yalnız testlerde dışarı verilir).
+    shared: Arc<Shared>,
     tasks: Vec<JoinHandle<()>>,
     local_addr: SocketAddr,
 }
 
 impl Harvester {
+    /// Test kancası: iç durumu doğrudan sınamak için (ör. dış adres oylaması).
+    #[cfg(test)]
+    pub(crate) fn shared_for_test(&self) -> Arc<Shared> {
+        Arc::clone(&self.shared)
+    }
+
+    /// Çoğunlukla doğrulanmış dış adresimiz (BEP-42 kimliği bundan türetilir).
+    /// `None` = henüz yeterli oy toplanmadı; kimlik hâlâ rastgele/geri yüklenmiş olabilir.
+    pub fn public_ip(&self) -> Option<Ipv4Addr> {
+        *self
+            .shared
+            .public_ip
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Bu hasatçının infohash kanalına yazan uç. Çoklu kimlik çalıştırıldığında ek
     /// kimliklerin akışını tek bir tüketiciye aktarmak için kullanılır (F9).
     pub fn sink(&self) -> mpsc::Sender<Sighting> {
@@ -341,6 +364,13 @@ struct Shared {
     /// yönlendirme tablosuna ALMAZ, dolayısıyla bize pasif trafik (announce/get_peers)
     /// gelmez — hasadın en canlı kaynağı budur.
     public_ip: Mutex<Option<std::net::Ipv4Addr>>,
+    /// Dış adres için OYLAR. Tek bir düğümün bildirimine güvenilemez: ölçümde (2026-08-22
+    /// üretim logu) üç farklı adres bildiriliyordu — biri gerçek, ikisi hatalı ya da kötü
+    /// niyetli — ve her bildirimde kimlik yeniden kuruluyordu. Sonuç: **düğüm kimliği
+    /// saniyede birkaç kez değişiyor**, hiçbir düğüm bizi yönlendirme tablosunda tutamıyor
+    /// ve pasif hasat (announce/get_peers) sıfıra yakın kalıyordu. Kimlik ancak bir adres
+    /// açık çoğunluğa ulaşınca değiştirilir.
+    ip_votes: Mutex<HashMap<std::net::Ipv4Addr, u32>>,
     nodes: Mutex<VecDeque<SocketAddrV4>>,
     limiter: Mutex<TokenBucket>,
     dedup: Mutex<RecentSet>,
@@ -400,6 +430,58 @@ impl Shared {
         self.nodes.lock().unwrap().len()
     }
 
+    /// Bir düğümün bildirdiği dış adrese oy verir; adres **açık çoğunluğa** ulaşınca
+    /// düğüm kimliğini ona göre kurar.
+    ///
+    /// Neden oylama: DHT'de bazı düğümler yanlış `ip` bildirir (hatalı istemci ya da
+    /// kasıtlı). Üretim logunda üç farklı adres dönüşümlü geliyordu ve her bildirimde
+    /// kimlik yeniden kuruluyordu — yani kimlik saniyede birkaç kez değişiyordu. Ağdaki
+    /// yönlendirme tablolarında yer edinmek saatler alır; kimlik o kadar sık değişince
+    /// birikim hiç oluşmaz ve pasif hasat (bu boru hattındaki EN KALİTELİ aday kaynağı)
+    /// sıfıra yakın kalır.
+    fn vote_public_ip(&self, ip: Ipv4Addr) {
+        let (lider, lider_oy, ikinci_oy) = {
+            let mut votes = self.ip_votes.lock().unwrap();
+            *votes.entry(ip).or_insert(0) += 1;
+            // Sayaçlar sınırsız büyümesin; ara sıra yarıya indirerek eski oyları soldur
+            // (adres gerçekten değişirse yeni adres öne geçebilsin).
+            let total: u32 = votes.values().sum();
+            if total > 4 * IP_VOTE_THRESHOLD {
+                votes.retain(|_, v| {
+                    *v /= 2;
+                    *v > 0
+                });
+            }
+            let mut sirali: Vec<_> = votes.iter().map(|(k, v)| (*k, *v)).collect();
+            sirali.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
+            let lider = sirali.first().copied().unwrap_or((ip, 0));
+            let ikinci = sirali.get(1).map(|(_, v)| *v).unwrap_or(0);
+            (lider.0, lider.1, ikinci)
+        };
+        // Açık çoğunluk: hem eşiği geçmeli hem ikinciyi belirgin biçimde geçmeli.
+        if lider_oy < IP_VOTE_THRESHOLD || lider_oy < ikinci_oy * 2 {
+            return;
+        }
+        let mut cur = self.public_ip.lock().unwrap();
+        if *cur == Some(lider) {
+            return;
+        }
+        *cur = Some(lider);
+        drop(cur);
+        // Mevcut kimlik bu IP için HÂLÂ geçerliyse KORUNUR: yönlendirme tablolarında
+        // biriken yerimiz ancak kimlik sabit kalırsa yaşar.
+        let mut id = self.our_id.lock().unwrap();
+        let already_valid = Id::from_bytes(*id)
+            .map(|c| c.is_valid_for_ip(lider))
+            .unwrap_or(false);
+        if already_valid {
+            info!(ip = %lider, oy = lider_oy, "dış adres doğrulandı; mevcut kimlik BEP-42 uyumlu, korunuyor");
+        } else {
+            *id = *Id::from_ipv4(lider).as_bytes();
+            info!(ip = %lider, oy = lider_oy, "dış adres çoğunlukla doğrulandı → BEP-42 kimliği kuruldu");
+        }
+    }
+
     fn next_txid(&self) -> [u8; 2] {
         (self.txid.fetch_add(1, Ordering::Relaxed) as u16).to_be_bytes()
     }
@@ -450,6 +532,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         our_id: Mutex::new(initial_id),
         // BEP-42 (aşağıda): dış IP öğrenilince kimlik ondan türetilir.
         public_ip: Mutex::new(None),
+        ip_votes: Mutex::new(HashMap::new()),
         nodes: Mutex::new(VecDeque::with_capacity(config.node_queue_capacity)),
         limiter: Mutex::new(TokenBucket::new(config.max_queries_per_sec)),
         dedup: Mutex::new(RecentSet::new(config.dedup_capacity)),
@@ -492,6 +575,7 @@ pub async fn spawn(config: HarvesterConfig) -> std::io::Result<Harvester> {
         infohashes: rx,
         sink: shared.sink.clone(),
         stats,
+        shared,
         tasks,
         local_addr,
     })
@@ -705,24 +789,7 @@ async fn handle_incoming(shared: &Shared, data: &[u8], from: SocketAddrV4) {
             // hasadın en kritik ayarıdır.
             if let Some(ip) = r.reported_ip {
                 if !ip.is_private() && !ip.is_loopback() && !ip.is_unspecified() {
-                    let mut cur = shared.public_ip.lock().unwrap();
-                    if *cur != Some(ip) {
-                        *cur = Some(ip);
-                        drop(cur);
-                        // Geri yüklenen kimlik bu IP için HÂLÂ geçerliyse KORUNUR: ağdaki
-                        // yönlendirme tablolarında biriken yerimiz ancak kimlik sabit
-                        // kalırsa yaşar. Yalnız geçersizse (ör. IP değişmiş) yeniden türetilir.
-                        let mut id = shared.our_id.lock().unwrap();
-                        let already_valid = Id::from_bytes(*id)
-                            .map(|cur| cur.is_valid_for_ip(ip))
-                            .unwrap_or(false);
-                        if already_valid {
-                            info!(%ip, "dış adres öğrenildi; mevcut kimlik BEP-42 uyumlu, korunuyor");
-                        } else {
-                            *id = *Id::from_ipv4(ip).as_bytes();
-                            info!(%ip, "dış adres öğrenildi → BEP-42 uyumlu düğüm kimliği kuruldu");
-                        }
-                    }
+                    shared.vote_public_ip(ip);
                 }
             }
             // YANIT VEREN DÜĞÜMÜ KUYRUĞA GERİ KOY. `pop_nodes` sorguladığı düğümü
@@ -1063,5 +1130,51 @@ mod tests {
         let s = harvester.stats.snapshot();
         assert_eq!(s.unique_infohashes, 0);
         // drop → görevler abort olur.
+    }
+}
+
+#[cfg(test)]
+mod ip_vote_tests {
+    use super::*;
+
+    /// Dış adres, TEK bir düğümün bildirimiyle kabul edilmemeli.
+    ///
+    /// Regresyon: üretim logunda üç farklı adres dönüşümlü bildiriliyordu ve her
+    /// bildirimde kimlik yeniden kuruluyordu — yani düğüm kimliği saniyede birkaç kez
+    /// değişiyordu. Ağdaki yönlendirme tablolarında yer edinmek saatler alır; kimlik o
+    /// kadar sık değişince pasif hasat (en kaliteli aday kaynağı) sıfıra yakın kalır.
+    #[tokio::test]
+    async fn public_ip_needs_a_clear_majority() {
+        let h = spawn(HarvesterConfig {
+            port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("bağlanmalı");
+        let shared = h.shared_for_test();
+        let gercek = Ipv4Addr::new(159, 146, 35, 97);
+        let sahte = Ipv4Addr::new(31, 217, 179, 223);
+
+        // Tek bildirim kimliği DEĞİŞTİRMEMELİ.
+        shared.vote_public_ip(sahte);
+        assert_eq!(*shared.public_ip.lock().unwrap(), None, "tek oy yetmez");
+
+        // Eşiği geçen ve rakibini açık farkla geçen adres kabul edilir.
+        for _ in 0..IP_VOTE_THRESHOLD * 2 {
+            shared.vote_public_ip(gercek);
+        }
+        assert_eq!(
+            *shared.public_ip.lock().unwrap(),
+            Some(gercek),
+            "çoğunluğa ulaşan adres kabul edilmeli"
+        );
+
+        // Kabul sonrası tek tük sahte bildirim kimliği geri ALMAMALI.
+        let id_before = shared.our_id();
+        for _ in 0..3 {
+            shared.vote_public_ip(sahte);
+        }
+        assert_eq!(*shared.public_ip.lock().unwrap(), Some(gercek));
+        assert_eq!(shared.our_id(), id_before, "kimlik sabit kalmalı");
     }
 }
