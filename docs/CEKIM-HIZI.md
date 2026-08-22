@@ -347,3 +347,61 @@ Bunlar ölçülüp reddedildi; gerekçeleri `docs/PLAN-FAZ-F.md` §F9–F12'de:
   kopyalanmış SQL metinlerini planlıyordu; kopya bayatlayınca düzeltilmiş sorgular için
   hâlâ "TEMP B-TREE" raporladı. Artık planlar `dragnet_store::queries` içindeki **çalışan**
   sorgudan çıkarılıyor.
+
+## 11. Gece boyu çalıştırma: neyin işe yaramadığı (2026-08-22)
+
+Bir gece kesintisiz çalıştırma, kısa pencerelerde iyi görünen iki değişikliğin aslında
+**zarar verdiğini** gösterdi. İkisi de bu belgede "kazanç" diye yazılmıştı; ölçüm
+disiplininin (§10) neden bu kadar önemli olduğunun kanıtı.
+
+| | F13 öncesi | Gece sonrası |
+|---|---|---|
+| İsim üretimi | 146/saat | **112/saat** |
+| Ort. peer/çekim | 2,5–3,1 | **2,0** |
+| Bekleyen kuyruk | 39.000 | **102.278** |
+| BEP-51 örnek | 62/sn | 493/sn |
+
+### Hata 1 — hasadı hızlandırmak çekimi öldürüyor
+
+`crawl_batch` 4 → 16 ve bütçe 50 → 120 infohash keşfini gerçekten 8 katına çıkardı.
+Ama isim üretimi düştü. Kanıt tartışmasız: uygulama çalışırken **yeni bir DHT istemcisi
+ağa bootstrap bile edemiyordu** (`bootstrap: false`), ve aynı adaylarda peer bulma
+ölçümü 7,3 → 1,1 peer/aday'a düşüyordu; uygulama kapatılıp ağ toparlanınca geri
+yükseliyordu.
+
+Yanılgının kaynağı §4'teki "harvester sorguları tek pakettir, ucuzdur" ifadesiydi.
+Sorgu tek pakettir ama **yanıtı da pakettir** ve saniyede yüzlerce örnek hacminde bu,
+modemi doyurur. Doğrusu: *bu boru hattında infohash **bulmak** darboğaz değil —
+DHT'de yüz binlerce aday zaten birikmiş durumda. Kıt kaynak ağ bütçesidir ve onu
+çekim tarafına bırakmak gerekir.*
+
+### Hata 2 — tazelik ve peer sayısı, ikisi de tek başına yetersiz
+
+§8'de `probe_at DESC` seçilmişti. Gece ölçümünde bu sıra en kötülerden çıktı:
+
+| seçim | peer/aday | hiç peer'i olmayan |
+|---|---|---|
+| `probe_at DESC` (sıralama olarak) | 1,4 | %48 |
+| `probe_peers DESC` (sıralama olarak) | 8,3 | **%75** |
+| **taze FİLTRE + `probe_peers` SIRA** | **7,3** | **%38** |
+
+Yalnız tazelik, triyajın ürettiği rastgele BEP-51 örneklerini öne çıkarıyor — ve
+kuyruğun **%60,9'u tam 1 peer'li** (yeni araç: `--example probedist`). Yalnız peer
+sayısı ise çoktan ölmüş eski ölçümleri öne çıkarıyor. Doğrusu ikisini **ayrı rollerde**
+kullanmak: tazelik `WHERE`'de filtre, peer sayısı `ORDER BY`'da sıra.
+
+### Hata 3 — sıcak adaylar hiç sıra almıyordu
+
+Panoda 11.107 "sıcak" aday (pasif trafikte az önce görülmüş) beklerken hiçbiri
+çekilmiyordu: çoğu henüz triyajdan geçmemiştir (`probe_peers = -1`) ve
+`ORDER BY probe_peers DESC` sırasında -1 en sona düşer. Oysa ölçümde sıfır-peer oranı
+**en düşük** kaynak bunlardı (%35, triyaj ortalaması %48). Artık kotanın yarısı bu
+kaynağa ayrılmıştır (`NEXT_TO_FETCH_HOT`).
+
+### Kalan gerçek sınır: peer başına başarı
+
+Üretimde peer başına metadata başarısı **%0,7**; aynı adaylarda ağ boştayken yapılan
+ölçüm **%4** veriyor. Aradaki 6 kat, uygulamanın kendi ağ yükünden geliyor. `P(başarı)
+= 1-(1-p)^n` denkleminde p bu kadar düşükken, n'i (peer sayısı) büyütmek de sınırlı
+kalıyor. Bu yüzden bir sonraki adım **kapasiteyi düşürüp p'yi yükseltmeyi** ölçmektir:
+daha az eşzamanlı iş, ama her birinin başarı şansı daha yüksek.
