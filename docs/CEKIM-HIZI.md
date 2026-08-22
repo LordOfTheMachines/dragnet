@@ -405,3 +405,34 @@ kaynağa ayrılmıştır (`NEXT_TO_FETCH_HOT`).
 = 1-(1-p)^n` denkleminde p bu kadar düşükken, n'i (peer sayısı) büyütmek de sınırlı
 kalıyor. Bu yüzden bir sonraki adım **kapasiteyi düşürüp p'yi yükseltmeyi** ölçmektir:
 daha az eşzamanlı iş, ama her birinin başarı şansı daha yüksek.
+
+## 12. Düğüm kimliği saniyede birkaç kez değişiyordu (2026-08-22)
+
+Üretim logunda bulundu — aynı saniye içinde, dönüşümlü:
+
+```
+dış adres öğrenildi → BEP-42 kimliği kuruldu ip=31.217.179.223
+dış adres öğrenildi → BEP-42 kimliği kuruldu ip=159.146.35.97
+dış adres öğrenildi → BEP-42 kimliği kuruldu ip=190.14.141.23
+```
+
+Log boyunca **3.834** kimlik değişim olayı vardı. Sebep: BEP-42 için dış adresimizi
+yanıtlardaki `ip` alanından öğreniyoruz, ama DHT'de bazı düğümler **yanlış adres
+bildiriyor** (hatalı istemci ya da kasıtlı) ve kod her bildirimde kimliği yeniden
+kuruyordu.
+
+Bunun bedeli, §5'te "en büyük kaldıraç" diye işaretlenen şeyin ta kendisi: ağdaki
+yönlendirme tablolarında yer edinmek **saatler** alır ve gelen `announce_peer` ancak o
+birikimden sonra gelir. Kimlik saniyede birkaç kez değişince birikim hiç oluşmaz —
+ölçümde gelen announce saatte **39**'da kalıyordu. Yani F13'te eklenen "kalıcı kimlik"
+düzeltmesi, çalışma sırasında kimliğin sürekli değişmesi yüzünden pratikte etkisizdi.
+
+Düzeltme: adresler **oylanır** (`Shared::vote_public_ip`). Kimlik ancak bir adres
+eşiği (8 oy) geçip ikinciyi açık farkla (2×) geçtiğinde değiştirilir; oylar ara sıra
+yarıya indirilerek soldurulur, böylece adres gerçekten değişirse yenisi öne geçebilir.
+Doğrulama (üretim logu): oylama doğru adresi seçti (`oy=8`) ve o andan sonra kimlik
+hiç değişmedi.
+
+**Ders:** güvenilmeyen ağdan gelen bir değeri, tek bir kaynaktan duyduğu için kabul eden
+her kod yolu bir saldırı ya da bozulma yüzeyidir — hele o değer sistemin kimliğini
+belirliyorsa. DHT'de "birden çok kaynaktan doğrula" varsayılan tutum olmalıdır.
