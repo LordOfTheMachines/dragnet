@@ -48,6 +48,14 @@ pub struct Config {
     pub semantic_models_dir: String,
     /// Cross-encoder yeniden sıralayıcı (bge-reranker-v2-m3, ~570 MB, CPU).
     pub semantic_rerank: bool,
+    /// İndeks kaynağı: `local` | `remote` | `hybrid` (bkz. docs/SUNUCU.md).
+    /// Sunucu rolünde `local` bırakılır; başka bir sunucudan beslenen headless bir
+    /// düğüm kurmak isteyen `remote`/`hybrid` seçer.
+    pub sync_mode: String,
+    /// Uzak sunucu kökü (boşsa senkronizasyon yok, mod yerele düşer).
+    pub sync_url: String,
+    /// Sunucu bearer token istiyorsa.
+    pub sync_token: String,
 }
 
 impl Default for Config {
@@ -69,6 +77,9 @@ impl Default for Config {
             semantic_device: "auto".to_string(),
             semantic_models_dir: "models".to_string(),
             semantic_rerank: true,
+            sync_mode: "local".to_string(),
+            sync_url: String::new(),
+            sync_token: String::new(),
         }
     }
 }
