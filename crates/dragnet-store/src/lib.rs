@@ -255,25 +255,36 @@ pub mod queries {
     /// adaylar hiç sıra alamaz (açlık). `probe_peers` canlılık KANITI olarak WHERE'de
     /// kalır — ama önceliği tazelik belirler.
     ///
-    /// Neden `last_seen` değil de `probe_at`: yukarıdaki test adayları `probe_peers > 0`
-    /// ile, yani YALNIZ triyajdan geçmişlerden seçmişti. Üretimin WHERE'i ise daha
-    /// geniştir (hint'li ya da "sıcak" ama henüz triyaj edilmemiş kayıtları da alır) ve
-    /// orada `last_seen DESC`, kanıtsız adayları kanıtlıların önüne geçiriyordu: üretim
-    /// ölçümünde deneme başına başarı %2,4'ten %1,2'ye düştü. `probe_at DESC` ikisini
-    /// birden verir — en son ÖLÇÜLEN aday önce gelir, hiç ölçülmemişler (probe_at = 0)
-    /// doğal olarak sona düşer ve önce triyajdan geçerler.
+    /// **TAZELİK FİLTRE, KALİTE SIRA (2026-08-22 gece ölçümü).** Yukarıdaki tablo bir tuzak
+    /// içeriyordu: her iki ölçüt de TEK BAŞINA sıralamaya konduğunda yetersiz kalıyor.
+    /// Gece boyu çalıştırma sonrası aynı depoda ölçüldü (ağ boştayken, 40'ar aday):
+    ///
+    /// | seçim                                | peer/aday | hiç peer'i olmayan |
+    /// |--------------------------------------|-----------|--------------------|
+    /// | `probe_at DESC` (sıra olarak)        |    1,4    |        %48         |
+    /// | `probe_peers DESC` (sıra olarak)     |    8,3    |      **%75**       |
+    /// | **taze filtre + `probe_peers DESC`** |  **7,3**  |      **%38**       |
+    ///
+    /// Yalnız tazeliğe göre sıralamak, triyajın ürettiği rastgele BEP-51 örneklerini
+    /// (çoğu tek peer'li) öne çıkarıyor. Yalnız peer sayısına göre sıralamak ise eski
+    /// ölçümleri öne çıkarıyor ve %75'i çoktan ölmüş oluyor. Doğrusu ikisini AYRI
+    /// rollerde kullanmak: **tazelik WHERE'de filtre, peer sayısı ORDER BY'da sıra.**
+    ///
+    /// `?6` = tazelik eşiği (bu andan geriye `FRESH_PROBE_SECS`). Hint'li ve sıcak
+    /// adaylar bu filtreden muaftır: onların kanıtı zaten tazedir.
     ///
     /// `INDEXED BY` neden gerekli: SQLite kendi maliyet tahminiyle `idx_status`'u seçip
     /// bekleyen yığının TAMAMINI okuyor ve `USE TEMP B-TREE FOR ORDER BY` ile sıralıyordu
     /// (ANALYZE sonrası da değişmedi). Kısmi indeks `last_seen DESC` sırasını hazır verir,
     /// tarama `LIMIT` kadar satırda durur. İndeks migrasyonda zorunlu oluşturulur.
-    pub const NEXT_TO_FETCH_LIVE: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_probe
+    pub const NEXT_TO_FETCH_LIVE: &str = "SELECT infohash FROM torrents INDEXED BY idx_fetch_live
               WHERE metadata_status = 'pending'
                 AND (fetch_attempts = 0 OR (fetch_attempts < ?1 AND last_attempt < ?2))
+                AND (probe_at > ?6 OR hot_seen > ?3 OR hint_peers >= ?5)
                 AND (probe_peers >= ?5 OR hint_peers >= ?5
                      OR (probe_peers < 0 AND hint_peers > 0)
                      OR (probe_peers < 0 AND hot_seen IS NOT NULL AND hot_seen > ?3))
-              ORDER BY probe_at DESC
+              ORDER BY probe_peers DESC, hint_peers DESC, seen_count DESC
               LIMIT ?4";
 
     /// Kodlaması bozuk çıkmış adların bir kerelik yeniden çekimi (küçük, sınırlı kol).
@@ -752,6 +763,7 @@ impl Store {
             .bind(hot_window)
             .bind(warm_limit)
             .bind(MIN_HEALTHY_PEERS)
+            .bind(now - FRESH_PROBE_SECS)
             .fetch_all(&self.pool)
             .await?;
         // TRİYAJ EDİLMEMİŞ ("soğuk") KAYITLAR ARTIK ÇEKİLMİYOR (F13, ölçümle).
@@ -1416,20 +1428,38 @@ impl Store {
         .execute(&self.pool)
         .await?
         .rows_affected();
+        // BAYAT ÖLÇÜMLÜ, DENENMİŞ KAYITLAR. Çekim kuyruğu artık tazelik filtresi
+        // kullanıyor (`FRESH_PROBE_SECS`) ve yeniden deneme soğuması da aynı mertebede;
+        // yani bir aday soğumadan çıktığında ölçümü de bayatlamış oluyor ve kuyruğa
+        // giremiyor. Triyaj da onu almaz (`probe_at > 0`), dolayısıyla kayıt sonsuza dek
+        // ölü ağırlık olarak kalırdı. Bir kez denenip başarısız olmuş ve ölçümü bayatlamış
+        // kayıt bizim için değersizdir — canlanırsa DHT'de yeniden görülür.
+        let stale_fetch = sqlx::query(
+            "DELETE FROM torrents
+              WHERE metadata_status = 'pending' AND fetch_attempts > 0
+                AND probe_at > 0 AND probe_at < ?1
+                AND (hot_seen IS NULL OR hot_seen < ?1)",
+        )
+        .bind(now - FRESH_PROBE_SECS)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
         // Eski metrik satırları (teşhis verisi; süresiz büyümesine gerek yok).
         let _ = sqlx::query("DELETE FROM metrics WHERE bucket < ?1")
             .bind(now - METRIC_RETENTION_SECS)
             .execute(&self.pool)
             .await;
-        if a + b + c > 0 {
+        if a + b + c + stale_fetch > 0 {
             debug!(
                 pending = a,
                 unreachable = b,
                 probe_reset = c,
+                stale_fetch,
                 "ölü kayıtlar temizlendi"
             );
         }
-        Ok(a + b)
+        Ok(a + b + stale_fetch)
     }
 
     /// Bekleyen (adsız) yığını tamamen siler — adlı kayıtlar korunur. Kullanıcı isteğiyle
@@ -1842,6 +1872,15 @@ pub mod metric {
     /// içinde sildiği için keşfedilenlerin çoğu sayım anında tabloda yoktur.
     pub const DHT_HARVESTED: &str = "dht_harvested";
 }
+
+/// Triyaj ölçümünün "hâlâ geçerli" sayılma süresi (sn).
+///
+/// Ölçüm (2026-08-22): `probe_peers` değeri hızla bayatlıyor — bir gece boyunca biriken
+/// kuyrukta, triyajda **5+ peer ölçülmüş** kayıtların %75'i yeniden bakıldığında sıfır
+/// peer veriyordu. Bu yüzden peer sayısına göre sıralamadan ÖNCE tazelik filtresi gelir;
+/// yoksa sıralama "eskiden çok peer'i olan, şimdi ölü" kayıtları öne çıkarır.
+/// 6 saat, `FETCH_RETRY_COOLDOWN_SECS` ile aynı mertebede tutuldu.
+pub const FRESH_PROBE_SECS: i64 = 6 * 3600;
 
 /// Yarım kalmış bir triyaj işaretinin (probe_at set, sonuç yok) eskimiş sayılma süresi.
 /// Bu süreden eski işaretler temizlikte sıfırlanır ve kayıt yeniden ölçülebilir olur.
@@ -2578,9 +2617,16 @@ mod tests {
         // Triyaj A'da peer bulunca A kuyruğa girer; ÖLÇÜLMÜŞ peer sayısı en güçlü
         // canlılık sinyali olduğu için sıralamada başa geçer.
         store.record_probe(ih(1), 5, now).await.unwrap();
+        // Soğuma dolduğunda ölçüm de bayatlamış olmasın diye A yeniden ölçülür (üretimde
+        // bunu triyaj yapar). Tazelik filtresi olmadan A zaten elenirdi — bu, soğuma ile
+        // tazelik penceresinin çakışmasının kasıtlı sonucudur.
         let later = now + HOT_RETRY_COOLDOWN_SECS + 1;
+        store.record_probe(ih(1), 5, later).await.unwrap();
         let q2 = store.next_to_fetch(10, later).await.unwrap();
-        assert!(q2.contains(&ih(1)), "triyajdan geçmiş aday kuyruğa girer");
+        assert!(
+            q2.contains(&ih(1)),
+            "yeniden ölçülmüş aday soğuma sonrası kuyruğa girer"
+        );
         assert!(!q2.contains(&ih(3)), "triyajsız soğuk hâlâ dışarıda");
         // B (yalnız-sıcak) burada YOK ve bu kasıtlıdır: yeniden deneme soğuması (6 saat)
         // sıcaklık penceresinden (2 saat) uzun olduğu için, denenip başarısız olmuş bir
@@ -2607,13 +2653,16 @@ mod tests {
         let mut much_later = later;
         for _ in 1..MAX_FETCH_ATTEMPTS {
             much_later += HOT_RETRY_COOLDOWN_SECS + 1;
+            // Her turda yeniden ölçülür; tazelik filtresi bunu şart koşar (üretimde
+            // triyajın işi). Ölçüm tazelenmezse aday zaten kuyruğa giremez.
+            store.record_probe(ih(1), 5, much_later).await.unwrap();
             assert!(
                 store
                     .next_to_fetch(10, much_later)
                     .await
                     .unwrap()
                     .contains(&ih(1)),
-                "triyajdan geçmiş aday soğuma sonrası tekrar denenir"
+                "yeniden ölçülmüş aday soğuma sonrası tekrar denenir"
             );
         }
         store.mark_fetch_failed(ih(1)).await.unwrap();
@@ -2729,9 +2778,22 @@ mod tests {
         assert_eq!(
             q.first(),
             Some(&taze),
-            "ölçümü taze olan aday önce gelmeli (peer sayısı çok olan eski aday değil)"
+            "ölçümü taze olan aday gelmeli (peer sayısı çok olan BAYAT aday değil)"
         );
-        assert!(q.contains(&eski), "eski aday da kuyrukta kalır, ama sonra");
+        assert!(
+            !q.contains(&eski),
+            "ölçümü bayatlamış aday ELENMELİ: gece boyu ölçümde 5+ peer'li kayıtların \
+             %75'i yeniden bakıldığında sıfır peer veriyordu"
+        );
+
+        // Bayat ölçümlü ve bir kez denenmiş kayıt kuyrukta ölü ağırlık olarak kalmamalı:
+        // tazelik filtresi onu çekimden, `probe_at > 0` da triyajdan dışlar.
+        let _ = store.next_to_fetch(10, now).await.unwrap();
+        store.purge_dead(now, DAY_SECS_FOR_TEST).await.unwrap();
+        assert!(
+            !store.next_to_triage(10, now).await.unwrap().contains(&eski),
+            "temizlik bayat kaydı kuyruktan düşürmeli"
+        );
     }
 
     /// Giriş kısma, İŞLENMEMİŞ yükü ölçmelidir. Triyajdan geçmiş kayıtlar "bitmiş iş"tir

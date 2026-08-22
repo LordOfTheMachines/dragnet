@@ -274,7 +274,7 @@ async fn lookup_sweep(fetcher: Arc<MetadataFetcher>, hashes: &[InfoHash]) {
 /// seçildiği için taze adaylar hiç sıra alamıyor (açlık). Bu test iki sıralamayı aynı
 /// anda, aynı ağ koşulunda ölçer.
 async fn order_test(fetcher: Arc<MetadataFetcher>, store: &dragnet_store::Store, n: i64) {
-    let variants: [(&str, &str); 3] = [
+    let variants: [(&str, &str); 6] = [
         (
             "probe_peers DESC (üretim)",
             "SELECT infohash FROM torrents WHERE metadata_status='pending' AND probe_peers > 0
@@ -289,6 +289,24 @@ async fn order_test(fetcher: Arc<MetadataFetcher>, store: &dragnet_store::Store,
             "last_seen DESC (taze görülme)",
             "SELECT infohash FROM torrents WHERE metadata_status='pending' AND probe_peers > 0
                ORDER BY last_seen DESC LIMIT ?1",
+        ),
+        // SICAK adaylar: pasif trafikte GÖRÜLMÜŞ, yani "birileri şu anda bu torrenti
+        // arıyor/paylaşıyor". Triyajdan geçmemiş olabilirler (probe_at = 0) — mevcut
+        // sıralama onları en sona atıyor. Asıl canlı kaynak bunlar mı?
+        (
+            "hot_seen DESC (sıcak, triyajsız)",
+            "SELECT infohash FROM torrents WHERE metadata_status='pending'
+               AND hot_seen IS NOT NULL ORDER BY hot_seen DESC LIMIT ?1",
+        ),
+        (
+            "hint_peers>0 + taze (BEP-51 ipucu)",
+            "SELECT infohash FROM torrents WHERE metadata_status='pending'
+               AND hint_peers > 0 ORDER BY last_seen DESC LIMIT ?1",
+        ),
+        (
+            "probe_peers>=5 + taze ölçüm",
+            "SELECT infohash FROM torrents WHERE metadata_status='pending'
+               AND probe_peers >= 5 ORDER BY probe_at DESC LIMIT ?1",
         ),
     ];
     println!("\n=== ADAY SIRALAMASI: hangi sıra CANLI aday veriyor? ===");

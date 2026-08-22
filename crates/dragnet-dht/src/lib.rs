@@ -105,13 +105,20 @@ impl Default for HarvesterConfig {
             // Port-forward + iyi bağlantısı olanlar artırabilir.
             max_queries_per_sec: 50.0,
             crawl_tick: Duration::from_millis(100),
-            // Tık başına gönderilen sorgu. 100 ms tık ile bu, saniyede en fazla
-            // `crawl_batch × 10` sorgu demektir — yani 4 iken bütçe 50 verilse bile tavan
-            // 40'ta kalıyordu. Harvester sorguları (find_node / sample_infohashes) TEK
-            // PAKETTİR; DHT *aramalarının* (~50 paket) aksine ucuzdur, dolayısıyla
-            // infohash keşfini hızlandırmanın en ucuz yolu buradan geçer. Asıl kısılması
-            // gereken triyaj/çekim aramalarıdır (bkz. `docs/CEKIM-HIZI.md` §4).
-            crawl_batch: 16,
+            // Tık başına gönderilen sorgu; 100 ms tık ile tavan `crawl_batch × 10`/sn.
+            //
+            // ÖLÇÜM (2026-08-22, gece boyu çalıştırma): 16'ya çıkarmak infohash keşfini
+            // gerçekten 8 katına çıkardı (62 → 493 örnek/sn) AMA isim üretimi 146 → 112'ye
+            // DÜŞTÜ. Sebep: harvester sorguları tek paket olsa da yanıtları da paket ve
+            // bu hacim modemi doyuruyor. Kanıt kesin — uygulama çalışırken **yeni bir DHT
+            // istemcisi ağa bootstrap bile edemiyordu** ve aynı adaylarda peer bulma
+            // ölçümü 5 kat düşüyordu (7,3 → 1,1 peer/aday). Yani hasadı hızlandırmak,
+            // çekimin peer bulmasını doğrudan öldürüyor.
+            //
+            // Ders: bu boru hattında infohash BULMAK darboğaz değil — DHT'de 100 binlerce
+            // aday zaten birikmiş durumda. Kıt olan kaynak ağ bütçesi ve onu çekim
+            // tarafına bırakmak gerekiyor.
+            crawl_batch: 4,
             // KİMLİK DÖNDÜRME VARSAYILAN OLARAK KAPALI (0). Gerekçe: her döndürmede
             // (BEP-42 rastgele bileşeni değişir) ağ bizi YENİ bir düğüm sanar ve
             // tablolarındaki girdimiz bayatlar; pasif trafik (announce/get_peers) ise ancak
