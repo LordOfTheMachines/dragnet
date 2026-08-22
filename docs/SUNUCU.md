@@ -159,6 +159,39 @@ Cloudflare tarafında işe yarayan ayarlar:
 Kabaca boyut: kayıt başına ~200–400 bayt JSON (dosya listesiyle). 100.000 kayıtlık bir
 indeks ilk senkronizasyonda ~30 MB civarıdır, sonrası yalnız artıştır.
 
+Infohash JSON'da **40 karakterlik hex dize** olarak taşınır — `/search` ile aynı biçim
+(`dragnet-core`'da elle yazılmış serde; türetilmiş hâli 20 elemanlı sayı dizisi üretip
+iki katı yer kaplardı).
+
+### İstemci tarafı (dragnetd)
+
+Masaüstü uygulamasında mod **Ayarlar → İndeks kaynağı**'ndan seçilir. Başsız (headless)
+bir istemci için `dragnetd.toml`:
+
+```toml
+db_path      = "client.db"
+sync_mode    = "remote"                        # local | remote | hybrid
+sync_url     = "https://dragnet.ornek.com"     # API kökü; istemci /changes'i kendisi ekler
+sync_token   = "sunucudaki api_token ile aynı"
+```
+
+`remote` modda çekirdek **hiç başlatılmaz**: harvester yok, triyaj yok, metadata çekimi
+yok. O modu seçen kullanıcı tek bir DHT paketi bile göndermek istemiyordur.
+
+### Ölçülen doğrulama
+
+Sözleşme yerel geri döngüde (iki `dragnetd`, `127.0.0.1`) uçtan uca sınandı:
+
+| Beklenti | Sonuç |
+|---|---|
+| Boş istemci veritabanı sunucudan dolar | 45 sn'de 4.350, 2 dk'da 6.588 kayıt |
+| Arama sunucudan gelen veriyle çalışır | ✔ (`/search?q=tears` isabetli döndü) |
+| `remote` modda yerel tarama yok | istemci logunda **0** DHT satırı |
+| İmleç kalıcı; yeniden başlatma baştan indirmez | yeniden başlatmada `cursor=2146685` |
+
+Bunlar geri döngü ölçümleridir; gerçek internet üzerindeki hız bağlantıya ve
+Cloudflare önbelleğine bağlıdır.
+
 ## 6. Ölçüm ve sağlık
 
 Sunucuda da aynı teşhis araçları çalışır:

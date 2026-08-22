@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Torrent'i evrensel olarak tanımlayan parmak izidir. Magnet linklerinin taşıdığı
 /// `urn:btih:` değeri budur.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InfoHash([u8; 20]);
 
 impl InfoHash {
@@ -72,6 +72,23 @@ impl InfoHash {
 impl fmt::Debug for InfoHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "InfoHash({})", self.to_hex())
+    }
+}
+
+/// JSON'da infohash **40 karakterlik hex** olarak taşınır. Türetilmiş serde bunu 20
+/// elemanlı bir sayı dizisine çevirirdi: iki katı yer kaplar, `/search` çıktısıyla
+/// uyuşmaz ve logda/URL'de okunmaz. Senkronizasyon sözleşmesi hex'tir (docs/SUNUCU.md §5).
+impl Serialize for InfoHash {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for InfoHash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::from_hex(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("geçersiz infohash: {s}")))
     }
 }
 
@@ -402,6 +419,18 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn infohash_json_is_a_hex_string_not_a_byte_array() {
+        // Senkronizasyon sözleşmesi: /changes ve /search aynı biçimi kullanır.
+        let hex = "0123456789abcdef0123456789abcdef01234567";
+        let ih = InfoHash::from_hex(hex).unwrap();
+        let json = serde_json::to_string(&ih).unwrap();
+        assert_eq!(json, format!("\"{hex}\""));
+        assert_eq!(serde_json::from_str::<InfoHash>(&json).unwrap(), ih);
+        assert!(serde_json::from_str::<InfoHash>("\"kisa\"").is_err());
+        assert!(serde_json::from_str::<InfoHash>("[1,2,3]").is_err());
+    }
 
     #[test]
     fn hex_roundtrip() {
