@@ -79,10 +79,12 @@ fn default_disk_reserve() -> f64 {
 /// Ama 24'e çıkarmak da yanlıştı: her triyaj bir DHT ARAMASIDIR ve bir arama ~50 UDP
 /// sorgusu eder (harvester'ın tek-paketlik sorgularının aksine). 24 eşzamanlı arama
 /// tek başına ~400 sorgu/sn demekti ve çekimin aramalarıyla birlikte modemi taşırıyordu.
-/// 12, hem aday arzını besler hem toplam UDP yükünü tavanın altında tutar
-/// (hesap: `docs/CEKIM-HIZI.md` §4).
+/// ÖLÇÜM (2026-08-22): 12 de fazlaydı. Triyaj ve çekim aynı modemi paylaşır; ikisini
+/// birden yarıya indirince deneme başına başarı %1,1 -> %2,0 çıktı, sorgu başına yanıt
+/// oranı %33 -> %41. Aday arzı zaten saatte ~2.200; daha çok ölçüm yapmak arzı değil
+/// yalnız ağ tıkanıklığını artırıyordu (hesap: `docs/CEKIM-HIZI.md` §4 ve §11).
 fn default_triage_concurrency() -> usize {
-    12
+    6
 }
 
 fn default_tier() -> String {
@@ -102,14 +104,19 @@ impl Default for Settings {
             api_bind: "127.0.0.1:8080".to_string(),
             harvester_port: 6881,
             // Nazik varsayılan (router/internet dostu).
-            harvester_max_queries_per_sec: 50.0,
-            // ÖLÇÜM (2026-08-22, `peerstat sweep`): eşzamanlı giden TCP sayısı
-            // `fetch_workers × fetch_peer_concurrency`'dir ve verim burada tepe yapıyor:
-            //   conc=8 → %13,7 bağlanma (0,08 metadata/sn) | conc=32 → %16,7 (0,35)
-            //   conc=96 → %18,1 (1,17 metadata/sn, TEPE)   | conc=384 → %14,4 (0,82)
-            // 384'te bağlanma oranı DÜŞÜYOR: modemin bağlantı-izleme tablosu taşıyor ve
-            // kendi SYN paketlerimiz düşüyor. 12 × 8 = 96 tepe noktasıdır.
-            fetch_workers: 12,
+            // Harvester bütçesi de kısıldı: ölçümde 120/sn keşfi 8 katına çıkardı ama
+            // ağı doyurup çekimi öldürdü (bkz. `docs/CEKIM-HIZI.md` §11).
+            harvester_max_queries_per_sec: 40.0,
+            // ÖLÇÜM (2026-08-22): AZ AMA İYİ. Eşzamanlı giden TCP `fetch_workers ×
+            // fetch_peer_concurrency`'dir, ama asıl belirleyici toplam ağ yüküdür —
+            // çekim işçileri triyajla aynı modemi paylaşır. Üretimde ölçülen:
+            //   12 işçi + 12 triyaj → deneme başına başarı %1,1 | yanıt oranı %33
+            //    6 işçi +  6 triyaj → deneme başına başarı %2,0 | yanıt oranı %41
+            // Yani kapasiteyi YARIYA indirmek başarı oranını İKİYE katladı: daha az
+            // eşzamanlı iş, her birinin başarı şansı daha yüksek. Kaldı ki sağlıklı aday
+            // arzı saatte ~2.200 iken 7.000+ deneme yapmanın anlamı yok — fazlası
+            // yeniden denemelere ve ağ tıkanıklığına gidiyordu.
+            fetch_workers: 6,
             fetch_peer_concurrency: 8,
             triage_concurrency: default_triage_concurrency(),
             autostart: false,
