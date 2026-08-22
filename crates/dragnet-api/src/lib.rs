@@ -514,7 +514,7 @@ mod tests {
         let resp = app()
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/changes?since={cursor}&limit=100"))
+                    .uri(format!("/changes?since={cursor}&limit=100"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -529,7 +529,7 @@ mod tests {
         let resp = app()
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/changes?since={cursor2}"))
+                    .uri(format!("/changes?since={cursor2}"))
                     .body(Body::empty())
                     .unwrap(),
             )

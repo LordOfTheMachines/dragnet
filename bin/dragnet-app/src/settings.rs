@@ -53,6 +53,23 @@ pub struct Settings {
     /// sayısıyla ölçeklenir — ama her portun modemde yönlendirilmesi gerekir.
     #[serde(default = "default_instances")]
     pub harvester_instances: usize,
+    /// İndeksin nereden beslendiği: `local` | `remote` | `hybrid`.
+    ///
+    /// - `local`  — yalnız kendi DHT taraması (klasik davranış, varsayılan).
+    /// - `remote` — hiç taranmaz, indeks sunucudan çekilir. Zayıf makineler ya da
+    ///   crawler trafiğini istemeyen ağlar için; internet bağlantısı hiç yorulmaz.
+    /// - `hybrid` — ikisi birden; aynı kayıt iki kaynaktan gelirse birleşir (upsert).
+    ///
+    /// Semantik arama her modda YERELDE çalışır: sunucudan gelen kayıtlar da arka plan
+    /// indeksleyici tarafından embed edilir.
+    #[serde(default = "default_sync_mode")]
+    pub sync_mode: String,
+    /// Uzak sunucu kökü (ör. `https://dragnet.example.com`). Boşsa senkronizasyon yok.
+    #[serde(default)]
+    pub sync_url: String,
+    /// Sunucu bearer token istiyorsa.
+    #[serde(default)]
+    pub sync_token: String,
     /// Veritabanı bütçesi (GB; 0 = sınırsız). Aşılınca **büyüme durur**, arama sürer.
     #[serde(default)]
     pub db_max_gb: f64,
@@ -85,6 +102,12 @@ fn default_disk_reserve() -> f64 {
 /// yalnız ağ tıkanıklığını artırıyordu (hesap: `docs/CEKIM-HIZI.md` §4 ve §11).
 fn default_triage_concurrency() -> usize {
     6
+}
+
+/// Varsayılan çalışma modu: yalnız yerel. Sunucu adresi verilmeden davranış birebir
+/// eskisi gibi kalmalı — kullanıcı bilmeden dışarıya istek gitmez.
+fn default_sync_mode() -> String {
+    "local".to_string()
 }
 
 fn default_tier() -> String {
@@ -129,6 +152,9 @@ impl Default for Settings {
             disk_reserve_gb: default_disk_reserve(),
             semantic_device: default_device(),
             semantic_rerank: true,
+            sync_mode: default_sync_mode(),
+            sync_url: String::new(),
+            sync_token: String::new(),
             semantic_models_dir: String::new(),
             seed_infohashes: vec![
                 "08ada5a7a6183aae1e09d831df6748d566095a10".to_string(), // Sintel
@@ -199,6 +225,32 @@ impl Settings {
         }
     }
 
+    /// Çalışma modu (`local` | `remote` | `hybrid`).
+    ///
+    /// Sunucu adresi boşsa mod ne olursa olsun **yerele düşer**: adres olmadan uzak
+    /// senkronizasyon yapılamaz ve kullanıcıyı sessizce indekssiz bırakmak yerine
+    /// klasik davranışa dönmek doğrudur.
+    pub fn mode(&self) -> dragnet_engine::sync::SyncMode {
+        let m = dragnet_engine::sync::SyncMode::parse(&self.sync_mode);
+        if m.syncs() && self.sync_url.trim().is_empty() {
+            return dragnet_engine::sync::SyncMode::Local;
+        }
+        m
+    }
+
+    /// Uzak senkronizasyon yapılandırması (mod uzak/hibrit değilse `None`).
+    pub fn sync_config(&self) -> Option<dragnet_engine::sync::SyncConfig> {
+        if !self.mode().syncs() {
+            return None;
+        }
+        let token = self.sync_token.trim();
+        Some(dragnet_engine::sync::SyncConfig {
+            url: self.sync_url.trim().to_string(),
+            token: (!token.is_empty()).then(|| token.to_string()),
+            ..Default::default()
+        })
+    }
+
     /// Arama API'sinin dinleyeceği adresi çözer.
     pub fn api_addr(&self) -> Result<std::net::SocketAddr, String> {
         self.api_bind
@@ -239,5 +291,58 @@ impl Settings {
             device: dragnet_semantic::Device::parse(&self.semantic_device),
             models_dir: self.models_dir_abs(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dragnet_engine::sync::SyncMode;
+
+    /// Sunucu adresi verilmeden davranış birebir eski gibi kalmalı: kullanıcı bilmeden
+    /// dışarıya istek gitmez, yerel tarama sürer.
+    #[test]
+    fn defaults_stay_local_and_offline() {
+        let s = Settings::default();
+        assert_eq!(s.mode(), SyncMode::Local);
+        assert!(s.sync_config().is_none(), "adres yokken senkronizasyon yok");
+        assert!(s.mode().crawls());
+    }
+
+    /// Adres olmadan `remote` seçilirse yerele DÜŞMELİ — aksi hâlde kullanıcı hem
+    /// taramayan hem de veri çekemeyen, sessizce boş bir uygulamayla kalırdı.
+    #[test]
+    fn remote_without_url_falls_back_to_local() {
+        let s = Settings {
+            sync_mode: "remote".into(),
+            ..Default::default()
+        };
+        assert_eq!(s.mode(), SyncMode::Local);
+        assert!(s.mode().crawls(), "yerel taramaya dönmeli");
+        assert!(s.sync_config().is_none());
+    }
+
+    #[test]
+    fn remote_and_hybrid_build_sync_config() {
+        let uzak = Settings {
+            sync_mode: "remote".into(),
+            sync_url: "https://ornek.test/".into(),
+            sync_token: "  gizli  ".into(),
+            ..Default::default()
+        };
+        assert_eq!(uzak.mode(), SyncMode::Remote);
+        assert!(!uzak.mode().crawls(), "uzak modda yerel tarama olmamalı");
+        let cfg = uzak.sync_config().expect("yapılandırma");
+        assert_eq!(cfg.url, "https://ornek.test/");
+        assert_eq!(cfg.token.as_deref(), Some("gizli"), "token kırpılmalı");
+
+        let hibrit = Settings {
+            sync_mode: "hybrid".into(),
+            sync_url: "https://ornek.test".into(),
+            ..Default::default()
+        };
+        assert_eq!(hibrit.mode(), SyncMode::Hybrid);
+        assert!(hibrit.mode().crawls() && hibrit.mode().syncs());
+        assert!(hibrit.sync_config().unwrap().token.is_none());
     }
 }

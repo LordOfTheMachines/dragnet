@@ -124,8 +124,21 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Value, String> {
         "db_bytes": p.db_bytes, "free_bytes": p.free_bytes,
         "paused": p.paused, "reason": p.reason,
     });
+    // Çalışma modu + uzak senkronizasyon durumu (pano bunu ayrı bir kart olarak gösterir).
+    let (mode, sync_url) = {
+        let s = state.settings.lock().unwrap_or_else(|p| p.into_inner());
+        (s.mode(), s.sync_url.clone())
+    };
+    let sync = json!({
+        "mode": mode.as_str(),
+        "url": sync_url,
+        "records": state.sync_stats.records.load(std::sync::atomic::Ordering::Relaxed),
+        "errors": state.sync_stats.errors.load(std::sync::atomic::Ordering::Relaxed),
+        "cursor": state.sync_stats.cursor.load(std::sync::atomic::Ordering::Relaxed),
+    });
     Ok(json!({
         "scanning": scanning,
+        "sync": sync,
         "fetched": fetched,
         "total": total,
         "harvester_addr": addr,
@@ -467,6 +480,18 @@ pub async fn speed_test() -> Result<Value, String> {
 /// Taramayı başlat (çekirdeği ayarlarla ayağa kaldır).
 #[tauri::command]
 pub async fn start_scan(state: State<'_, AppState>) -> Result<Value, String> {
+    // "Yalnız uzak" modda tarama başlatmak sessizce çelişkili olurdu: kullanıcı bu modu
+    // kendi ağını yormamak için seçmiştir. Modu arkasından değiştirmek yerine açıkça söyle.
+    {
+        let s = state.settings.lock().unwrap_or_else(|p| p.into_inner());
+        if !s.mode().crawls() {
+            return Err(
+                "Uygulama 'yalnız uzak' modda: indeks sunucudan çekiliyor, yerel tarama \
+                 kapalı. Taramak için Ayarlar'dan modu 'hibrit' ya da 'yalnız yerel' yapın."
+                    .to_string(),
+            );
+        }
+    }
     let mut guard = state.engine.lock().await;
     if guard.is_none() {
         let cfg = {
@@ -530,7 +555,33 @@ pub async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Res
     // (kullanıcı ekranında port 53237 görünüyordu) — bu da modemdeki yönlendirmeyi
     // işlevsiz bırakıp pasif hasadı sıfırlıyordu. Bedeli: yeni çekirdek başlatılamazsa
     // tarama kapalı kalır (hata döndürülür, kullanıcı yeniden başlatabilir).
+    // Uzak senkronizasyonu yeni ayarlarla yeniden kur (mod/adres/token değişmiş olabilir).
+    // Eski görev her hâlükârda durdurulur: "yalnız yerel"e dönüldüğünde dışarıya istek
+    // atmaya devam etmemeli.
+    {
+        let mut task = state.sync_task.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(h) = task.take() {
+            h.abort();
+        }
+        if let Some(cfg) = settings.sync_config() {
+            tracing::info!(mode = settings.mode().as_str(), url = %cfg.url, "uzak senkronizasyon yeniden kuruldu");
+            *task = Some(dragnet_engine::sync::spawn(
+                state.store.clone(),
+                cfg,
+                std::sync::Arc::clone(&state.sync_stats),
+            ));
+        }
+    }
+
     let mut guard = state.engine.lock().await;
+    // "Yalnız uzak" moda geçildiyse tarama tamamen durur (kullanıcı bunu istedi).
+    if !settings.mode().crawls() {
+        if guard.is_some() {
+            drop(guard.take());
+            tracing::info!("yalnız-uzak moda geçildi; yerel tarama durduruldu");
+        }
+        return Ok(json!({ "ok": true }));
+    }
     if guard.is_some() {
         drop(guard.take()); // eski çekirdek burada durur, portlar serbest kalır
                             // Soketlerin işletim sistemi tarafından bırakılması bir an sürebilir.

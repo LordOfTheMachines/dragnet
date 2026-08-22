@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Uzak indeks senkronizasyonu (`sync` modülü): sunucudaki /changes akışını çeker.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { workspace = true }
 dragnet-core = { path = "../dragnet-core" }
 dragnet-dht = { path = "../dragnet-dht" }
 dragnet-meta = { path = "../dragnet-meta" }

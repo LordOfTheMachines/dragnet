@@ -536,6 +536,17 @@ impl Store {
         let _ = sqlx::query("DROP INDEX IF EXISTS idx_fetch_fresh;")
             .execute(&self.pool)
             .await;
+        // Küçük anahtar/değer tablosu: şemaya sütun eklemeye değmeyen kalıcı durum
+        // (şimdilik uzak senkronizasyon imleci).
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         // F13 — BORU HATTI METRİKLERİ (saatlik kova).
         // Neden gerekli: boru hattının iki aşaması işini bitirince kaydı SİLİYOR (triyajda
         // sıfır peer → `delete_pending`; deneme hakkı bitince → `mark_fetch_failed`).
@@ -998,6 +1009,33 @@ impl Store {
 
         tx.commit().await?;
         debug!(infohash = %rec.infohash, name = %rec.name, "torrent yazıldı");
+        Ok(())
+    }
+
+    /// Uzak senkronizasyonun kaldığı yer (`0` = hiç senkronize edilmedi).
+    ///
+    /// Kalıcı olmak zorunda: bellekte tutulsaydı uygulama her açılışta sunucudaki tüm
+    /// indeksi baştan indirirdi — yüz binlerce kayıt için hem sunucuya hem kullanıcıya
+    /// gereksiz yük.
+    pub async fn sync_cursor(&self) -> Result<i64, StoreError> {
+        let row = sqlx::query("SELECT value FROM meta WHERE key = 'sync_cursor'")
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .map(|r| r.get::<String, _>("value"))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// [`Store::sync_cursor`] değerini kalıcı yazar.
+    pub async fn set_sync_cursor(&self, cursor: i64) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO meta (key, value) VALUES ('sync_cursor', ?1)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(cursor.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

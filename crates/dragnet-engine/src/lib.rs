@@ -8,6 +8,7 @@
 //! daemon süreci gerekmez.
 
 pub mod semantic_indexer;
+pub mod sync;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

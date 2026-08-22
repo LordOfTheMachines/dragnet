@@ -40,6 +40,11 @@ pub struct AppState {
     pub rate_prev: StdMutex<(u64, Instant)>,
     /// Semantik arama yöneticisi (yuva + indeksleyici + UI durumu).
     pub semantic: std::sync::Arc<semantic::SemanticManager>,
+    /// Uzak senkronizasyon sayaçları (pano).
+    pub sync_stats: std::sync::Arc<dragnet_engine::sync::SyncStats>,
+    /// Çalışan senkronizasyon görevi (`None` = yalnız yerel mod). Ayar değişince
+    /// durdurulup yeniden kurulur.
+    pub sync_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 fn main() {
@@ -110,7 +115,11 @@ fn main() {
             }
 
             // İsteğe göre taramayı açılışta başlat (etkin db yoluna).
-            let engine = if settings.auto_scan {
+            // "Yalnız uzak" modda çekirdek HİÇ başlatılmaz: kullanıcı bu modu tam da
+            // kendi ağını yormamak için seçiyor, dolayısıyla tek bir DHT paketi bile
+            // gitmemeli. İndeks yalnız senkronizasyondan beslenir.
+            let mode = settings.mode();
+            let engine = if settings.auto_scan && mode.crawls() {
                 let cfg = settings.to_engine_config(db_path.clone());
                 match tauri::async_runtime::block_on(Engine::start(cfg)) {
                     Ok(e) => Some(e),
@@ -123,6 +132,14 @@ fn main() {
                 None
             };
 
+            // Uzak indeks senkronizasyonu (uzak/hibrit mod). Çekirdekten bağımsızdır:
+            // yalnız depoya yazar, dolayısıyla tarama kapalıyken de çalışır.
+            let sync_stats = std::sync::Arc::new(dragnet_engine::sync::SyncStats::default());
+            let sync_task = settings.sync_config().map(|cfg| {
+                tracing::info!(mode = mode.as_str(), url = %cfg.url, "uzak senkronizasyon açık");
+                dragnet_engine::sync::spawn(store.clone(), cfg, std::sync::Arc::clone(&sync_stats))
+            });
+
             app.manage(AppState {
                 store,
                 db_path,
@@ -130,6 +147,8 @@ fn main() {
                 settings: StdMutex::new(settings),
                 rate_prev: StdMutex::new((0, Instant::now())),
                 semantic,
+                sync_stats,
+                sync_task: StdMutex::new(sync_task),
             });
 
             build_tray(app.handle())?;
