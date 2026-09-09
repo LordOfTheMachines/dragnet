@@ -5,22 +5,44 @@ Bu belge `docs/SUNUCU.md`'nin **uygulama** kılavuzudur: hangi sunucuyu, nereden
 kiralayacağın; kurulumun her komutu; kendi bilgisayarını nasıl bağlayacağın; ve indeksi
 ücretli bir abonelik hâline getirmek istersen neyin hazır, neyin daha yazılmadığı.
 
-Toplam maliyet, aşağıdaki seçimle: **ayda ~4 €** (sunucu) + **yılda ~10 €** (alan adı).
+Toplam maliyet, aşağıdaki seçimle: **ayda ~6 €** (sunucu) + **yılda ~10 €** (alan adı).
 Cloudflare tarafı ücretsiz plan ile yeter.
 
 ---
 
 ## 1. Hangi sunucu — ve neden
 
-**Öneri: Hetzner Cloud, CX22, konum Helsinki (Finlandiya).**
+**Öneri: Hetzner Cloud, CX23, konum Helsinki (Finlandiya).**
 
-| | CX22 |
+| | CX23 |
 |---|---|
-| Fiyat | ~3,79–4,35 €/ay (+KDV) |
-| CPU / RAM | 2 vCPU / 4 GB |
-| Disk | 40 GB SSD |
+| Fiyat | 5,49 €/ay + 0,50 € IPv4 = **~6 €/ay** (KDV hariç) |
+| CPU / RAM | 2 vCPU (Intel) / 4 GB |
+| Disk | 40 GB NVMe |
 | Trafik | 20 TB/ay dahil |
-| IPv4 | 1 adet dahil |
+
+### DİKKAT: doğru aileyi seç — arada 3,5 kat fiyat farkı var
+
+Hetzner'in paylaşımlı sunucuları üç aileye ayrılıyor ve isimleri kolayca karışıyor:
+
+| Aile | Örnek plan | 2 vCPU + 4 GB fiyatı |
+|---|---|---|
+| **Cost-optimized (Intel)** ← **bunu al** | **CX23** | **5,49 €/ay** |
+| Cost-optimized (ARM, Ampere) | CAX11 | 5,99 €/ay |
+| Regular Performance (AMD EPYC) | CPX22 | **19,49 €/ay** (≈ 22,99 $) |
+
+Ana sayfadaki fiyat hesaplayıcısının **"Shared Regular Performance"** sekmesi yalnız
+**CPX** ailesini gösterir; oradaki 23,59 $ bundandır. Cost-optimized planlar ayrı
+sayfadadır: <https://www.hetzner.com/cloud/cost-optimized/>
+
+*ARM (CAX11) hem biraz daha pahalı hem de bir risk taşıyor: `dragnet-semantic`
+bağımlılığı ONNX Runtime derliyor ve arm64 Linux'ta hazır ikili bulamayabilir.
+Kazanç yokken bu riski almaya gerek yok — x86 olan CX23 doğru seçim.*
+
+> **Fiyatlar 2026-09-10'da üç kaynaktan doğrulandı** (Hetzner cost-optimized sayfası,
+> sparecores, costgoat). Hetzner isimlendirmeyi değiştiriyor — eski yazılarda geçen
+> "CX22" bugünkü **CX23**'tür ve o yazılardaki ~3,8 € rakamı artık geçerli değil.
+> Sipariş öncesi güncel fiyatı yukarıdaki bağlantıdan teyit et.
 
 Neden bu makine yeter — crawler CPU değil **ağ** bekler:
 
@@ -84,10 +106,12 @@ Alternatifler: **Netcup** (Almanya/Avusturya, benzer fiyat), **OVH** (Fransa/Pol
 5. **Sunucu oluştur:** *Add Server* →
    - **Location:** Helsinki
    - **Image:** Ubuntu 24.04
-   - **Type:** *Shared vCPU* → **CX22**
+   - **Type:** *Shared vCPU* → **x86 (Intel/AMD)** sekmesi → **CX23**
+     — burada satır satır fiyat yazar; CX23 ~5,49 €/ay görünmeli. **CPX** ile başlayan
+     bir plan seçersen 3,5 kat fazla ödersin (§1'deki tablo).
    - **SSH keys:** *Add SSH key* → 4. adımdaki satırı yapıştır
    - **Name:** `dragnet`
-   - *Create & Buy now*
+   - Sağdaki özet kutusunda aylık tutarı **onaylamadan önce oku**, sonra *Create & Buy now*
 6. Listede beliren **IPv4 adresini** not et. Bundan sonrası SSH ile.
 
 ---
@@ -394,9 +418,9 @@ Vergi ve şahıs şirketi/limited tarafı için mali müşavire danış — bu b
 
 ### Fiyatlandırma düşüncesi
 
-Maliyetin ayda ~4 €. Yani **ayda 5 €'luk tek bir abone bile sunucuyu karşılar.** Makul
-bir başlangıç: ücretsiz kademe (günlük sınırlı `/search`, `/changes` yok) + ~3–5 €/ay
-premium (tam `/changes` erişimi). Bant genişliği endişesi yok: 100 abonenin tam indeks
+Maliyetin ayda ~6 € (sunucu) + ~1 € (alan adı) ≈ **7 €**. Yani **ayda 5 €'luk iki abone
+sunucuyu karşılar ve üstüne kâr bırakır.** Makul bir başlangıç: ücretsiz kademe (günlük
+sınırlı `/search`, `/changes` yok) + ~3–5 €/ay premium (tam `/changes` erişimi). Bant genişliği endişesi yok: 100 abonenin tam indeks
 kopyası bile 20 TB'ın yanında görünmez.
 
 ---

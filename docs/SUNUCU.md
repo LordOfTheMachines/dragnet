@@ -54,7 +54,8 @@ kalır. Sunucuda GPU tutmak gerekmez.
 
 Gereken donanım küçüktür — crawler CPU değil **ağ** bekler:
 
-- 2 vCPU, 2 GB RAM, 40 GB disk (Hetzner CX22 mertebesi, ~5 €/ay) fazlasıyla yeter
+- 2 vCPU, 4 GB RAM, 40 GB disk (Hetzner CX23 mertebesi, ~6 €/ay) fazlasıyla yeter —
+  plan seçimi ve adım adım kurulum: `docs/VPS-KURULUM.md`
 - **UDP 6881 açık olmalı** (hem giden hem gelen); pasif hasat buna bağlıdır
 - Sunucularda genelde NAT yoktur — bu, ev bağlantısına göre büyük avantajdır
 
