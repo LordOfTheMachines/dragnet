@@ -8,7 +8,6 @@ kiralayacağın; kurulumun her komutu; kendi bilgisayarını nasıl bağlayacağ
 Toplam maliyet: **ayda ~5 €** (sunucu). Kendi bilgisayarına çekmek için alan adı,
 sertifika ya da Cloudflare gerekmez — SSH tüneli yeter (§6). Alan adı ancak indeksi
 başkalarına açmaya karar verirsen gerekir (~10 €/yıl).
-Cloudflare tarafı ücretsiz plan ile yeter.
 
 ---
 
