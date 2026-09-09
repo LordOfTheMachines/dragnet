@@ -235,8 +235,8 @@ triage_concurrency            = 24
 semantic_enabled = false
 sync_mode        = "local"
 
-db_max_gb        = 30
-disk_reserve_gb  = 4
+db_max_gb        = 60
+disk_reserve_gb  = 5
 ```
 
 ```bash
