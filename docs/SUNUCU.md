@@ -52,10 +52,10 @@ kalır. Sunucuda GPU tutmak gerekmez.
 
 ## 3. VPS kurulumu
 
-Gereken donanım küçüktür — crawler CPU değil **ağ** bekler:
+Gereken donanım küçüktür — crawler CPU değil **ağ** bekler (plan seçimi ve güncel fiyat karşılaştırması: `docs/VPS-KURULUM.md` §1):
 
-- 2 vCPU, 4 GB RAM, 40 GB disk (Hetzner CX23 mertebesi, ~6 €/ay) fazlasıyla yeter —
-  plan seçimi ve adım adım kurulum: `docs/VPS-KURULUM.md`
+- 2 vCPU, 4 GB RAM, 40 GB disk (~5 €/ay mertebesi) fazlasıyla yeter — güncel plan
+  karşılaştırması, sağlayıcı seçimi ve adım adım kurulum: `docs/VPS-KURULUM.md`
 - **UDP 6881 açık olmalı** (hem giden hem gelen); pasif hasat buna bağlıdır
 - Sunucularda genelde NAT yoktur — bu, ev bağlantısına göre büyük avantajdır
 

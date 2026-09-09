@@ -5,54 +5,76 @@ Bu belge `docs/SUNUCU.md`'nin **uygulama** kılavuzudur: hangi sunucuyu, nereden
 kiralayacağın; kurulumun her komutu; kendi bilgisayarını nasıl bağlayacağın; ve indeksi
 ücretli bir abonelik hâline getirmek istersen neyin hazır, neyin daha yazılmadığı.
 
-Toplam maliyet, aşağıdaki seçimle: **ayda ~6 €** (sunucu) + **yılda ~10 €** (alan adı).
+Toplam maliyet, aşağıdaki seçimle: **ayda ~5 €** (sunucu) + **yılda ~10 €** (alan adı).
 Cloudflare tarafı ücretsiz plan ile yeter.
 
 ---
 
 ## 1. Hangi sunucu — ve neden
 
-**Öneri: Hetzner Cloud, CX23, konum Helsinki (Finlandiya).**
+**Öneri: netcup, VPS Lite 1 G12s, konum Viyana ya da Amsterdam.**
 
-| | CX23 |
+| | VPS Lite 1 G12s |
 |---|---|
-| Fiyat | 5,49 €/ay + 0,50 € IPv4 = **~6 €/ay** (KDV hariç) |
-| CPU / RAM | 2 vCPU (Intel) / 4 GB |
-| Disk | 40 GB NVMe |
-| Trafik | 20 TB/ay dahil |
+| Fiyat | **4,88 €/ay** (KDV **dahil**; Türkiye'den alımda KDV düşer → ~4,10 €) |
+| CPU / RAM | 2 vCPU / 4 GB |
+| Disk | 80 GB SSD |
+| Trafik | dahil (sınırsız, adil kullanım) |
+| Konum | Nürnberg · Viyana · Amsterdam |
 
-### DİKKAT: doğru aileyi seç — arada 3,5 kat fiyat farkı var
+### Neden Hetzner değil: cost-optimized seri stokta yok
 
-Hetzner'in paylaşımlı sunucuları üç aileye ayrılıyor ve isimleri kolayca karışıyor:
+İlk tercih Hetzner CX23'tü (2 vCPU / 4 GB / 40 GB, 5,99 € IPv4 dahil) ama **CX ve CAX
+ailelerinin tamamı 2026 Eylül başından beri sipariş edilemiyor.** Hetzner bu seriyi
+hizmette tuttuğu eski donanımda çalıştırıyor, bu yüzden adet sınırlı. Stok bazen
+saatliğine geri geliyor (5 Eylül'de HEL1'de CX23 açıldı ve 20 dakikada tükendi), ama
+8 Eylül itibarıyla hâlâ kapalıydı — yani beklemeye dayalı bir plan yapılamaz.
 
-| Aile | Örnek plan | 2 vCPU + 4 GB fiyatı |
-|---|---|---|
-| **Cost-optimized (Intel)** ← **bunu al** | **CX23** | **5,49 €/ay** |
-| Cost-optimized (ARM, Ampere) | CAX11 | 5,99 €/ay |
-| Regular Performance (AMD EPYC) | CPX22 | **19,49 €/ay** (≈ 22,99 $) |
+Hetzner'de **sipariş edilebilir** en ucuz seçenek CPX12 (11,99 €) ya da eşdeğer
+donanım için CPX22 (19,49 € ≈ 22,99 $). Aynı makine için **3–4 kat** fark.
 
-Ana sayfadaki fiyat hesaplayıcısının **"Shared Regular Performance"** sekmesi yalnız
-**CPX** ailesini gösterir; oradaki 23,59 $ bundandır. Cost-optimized planlar ayrı
-sayfadadır: <https://www.hetzner.com/cloud/cost-optimized/>
+### Fiyat karşılaştırması (2026-09-10'da doğrulandı)
 
-*ARM (CAX11) hem biraz daha pahalı hem de bir risk taşıyor: `dragnet-semantic`
-bağımlılığı ONNX Runtime derliyor ve arm64 Linux'ta hazır ikili bulamayabilir.
-Kazanç yokken bu riski almaya gerek yok — x86 olan CX23 doğru seçim.*
+| Sağlayıcı | Plan | vCPU / RAM / Disk | Aylık | Durum |
+|---|---|---|---|---|
+| **netcup** | **VPS Lite 1 G12s** | 2 / 4 GB / 80 GB | **4,88 €** (KDV dahil) | **stokta** ← öneri |
+| netcup | VPS nano G11s | 2 / 2 GB / 60 GB | 3,08 € (KDV dahil) | stokta (yalnız Nürnberg) |
+| Contabo | Cloud VPS 4 | 4 / 8 GB / 100 GB | 5,50 € | stokta, **24 ay taahhütle** |
+| Hetzner | CX23 | 2 / 4 GB / 40 GB | 5,99 € | **STOKTA YOK** |
+| Hetzner | CPX12 | 2 / 2 GB / 40 GB | 11,99 € | stokta |
+| Hetzner | CPX22 | 2 / 4 GB / 80 GB | 19,49 € | stokta |
 
-> **Fiyatlar 2026-09-10'da üç kaynaktan doğrulandı** (Hetzner cost-optimized sayfası,
-> sparecores, costgoat). Hetzner isimlendirmeyi değiştiriyor — eski yazılarda geçen
-> "CX22" bugünkü **CX23**'tür ve o yazılardaki ~3,8 € rakamı artık geçerli değil.
-> Sipariş öncesi güncel fiyatı yukarıdaki bağlantıdan teyit et.
+**Contabo neden değil:** 5,50 € rakamı 24 aylık aboneliğin aylığa bölünmüş hâli; kısa
+vadede daha pahalı ve tek seferlik kurulum ücreti çıkabiliyor. Ayrıca port hızı 200
+Mbit/s — bizim için bant genişliği sorun değil, ama iki yıllık bağlanmaya değmez.
+
+**Bütçeyi sonuna kadar kısmak istersen** netcup VPS nano G11s (3,08 €) da yeter: 2 GB
+RAM `dragnetd`'yi rahat çalıştırır. Tek dezavantajı derlemenin dar alanda yapılması
+(swap ile çözülür, §4) ve yalnız Nürnberg'de olması.
+
+**Konum notu:** Almanya telif ihtarlarının (*Abmahnung*) en yoğun olduğu ülke. netcup'ın
+**Viyana** (Avusturya) ya da **Amsterdam** (Hollanda) lokasyonunu seçmek makineyi o
+rejimin dışına çıkarır; fiyat aynı. Hetzner'de bunun karşılığı Helsinki'ydi.
+
+> **Doğrulama:** fiyatlar 2026-09-10'da netcup ve Contabo'nun kendi sayfalarından,
+> Hetzner tarafı ise cost-optimized sayfası + iki bağımsız stok/fiyat izleyicisinden
+> (sparecores, costgoat, hetzner.thegoated.dev) alındı. Eski yazılarda geçen "CX22"
+> bugünkü CX23'tür ve oradaki ~3,8 € rakamı geçersizdir. Bu pazar hızlı değişiyor —
+> **sipariş öncesi sağlayıcının kendi sayfasından teyit et.**
 
 Neden bu makine yeter — crawler CPU değil **ağ** bekler:
 
 - **Trafik:** harvester saniyede ~120 DHT sorgusu × ~100 bayt ≈ 1 GB/gün; metadata
-  çekimi torrent başına ~50 KB. Yoğun çalışmada bile ayda ~50–100 GB. Dahil olan
-  20 TB'ın binde beşi.
+  çekimi torrent başına ~50 KB. Yoğun çalışmada bile ayda ~50–100 GB — her iki
+  sağlayıcının da dahil ettiği kotanın çok altında.
 - **Disk:** ölçüm — 3.404 kayıtlık taze bir istemci veritabanı 36 MB (FTS indeksi ve
-  dosya listeleri dahil). Kabaca **kayıt başına ~10 KB** planla: 40 GB ≈ 3–4 milyon
-  kayıt. `db_max_gb` ayarı zaten bir tavan koyar.
+  dosya listeleri dahil). Kabaca **kayıt başına ~10 KB** planla: 80 GB ≈ 7–8 milyon,
+  40 GB ≈ 3–4 milyon kayıt. `db_max_gb` ayarı zaten bir tavan koyar.
 - **RAM:** 4 GB hem `dragnetd`'ye hem derlemeye yeter (derleme için 2 GB swap ekle).
+  2 GB'lık bir planda da çalışır; orada swap zorunlu olur.
+- **Ağ:** darboğaz bant genişliği değil **paket hızı ve eşzamanlı bağlantı sayısı**.
+  Bu yüzden 200 Mbit'lik bir port bile fazlasıyla yeter; önemli olan sağlayıcının
+  yüksek paket hızını DDoS sanıp kısmaması. İlk günlerde `rate` çıktısını izle (§8).
 
 **En önemli teknik neden: sunucuda NAT yok.** Ev bağlantında modemin bağlantı-izleme
 tablosu darboğazdı — internetini kilitleyen şey oydu. Sunucuda o tavan kalkıyor;
@@ -60,15 +82,10 @@ tablosu darboğazdı — internetini kilitleyen şey oydu. Sunucuda o tavan kalk
 gönderdiği `announce_peer`/`get_peers`) açılıyor. Ölçümde bu, aday kalitesinin en iyi
 kaynağıydı.
 
-### Konum neden Helsinki
-
-Hetzner Alman şirketi; Almanya telif ihtarları (*Abmahnung*) konusunda dünyanın en
-hareketli ülkesi. Finlandiya lokasyonunu seçmek makinenin fiziksel olarak o rejimin
-dışında olmasını sağlar. Fiyat aynı.
-
 ### Sağlayıcı riski — dürüst değerlendirme
 
-Hetzner'in kullanım şartları "dosya paylaşım araçları"na sıcak bakmaz. Dragnet'in
+Almanya merkezli sağlayıcıların (netcup, Hetzner, Contabo, IONOS — hepsi) kullanım
+şartları "dosya paylaşım araçları"na sıcak bakmaz. Dragnet'in
 bu tanıma girmediğini savunabilirsin, çünkü ölçülebilir gerçekler şunlar:
 
 - **İçerik indirmiyoruz.** Peer wire üzerinden yalnız `ut_metadata` (BEP-9) çekiyoruz —
@@ -80,39 +97,58 @@ bu tanıma girmediğini savunabilirsin, çünkü ölçülebilir gerçekler şunl
 - **Trafik profili sakin.** magnetico gibi araçlar saniyede binlerce düğüme yazar;
   Dragnet 40–120 sorgu/sn ile çalışır.
 
-Yine de sıfır risk yoktur. Pratik önlem: **hazır bir açıklama metni bulundur.** Hetzner
-şikayet gelirse 24 saat içinde yanıt ister; yukarıdaki üç maddeyi İngilizce yazıp bir
-kenarda tut, aynı gün cevapla. Belgelenmiş bir "DHT crawler yüzünden sunucu kapatıldı"
-vakasına rastlanmıyor, ama garanti değil — kritik veriyi (indeks) düzenli yedekle (§8).
+Yine de sıfır risk yoktur. Pratik önlem: **hazır bir açıklama metni bulundur.**
+Sağlayıcılar şikayet gelirse genelde 24 saat içinde yanıt ister; yukarıdaki üç maddeyi
+İngilizce yazıp bir kenarda tut, aynı gün cevapla. Belgelenmiş bir "DHT crawler yüzünden
+sunucu kapatıldı" vakasına rastlanmıyor, ama garanti değil — kritik veriyi (indeks)
+**düzenli yedekle** (§8). Sunucu kapansa bile indeks elde kalırsa yeni bir sağlayıcıda
+kaldığın yerden devam edersin.
 
-Alternatifler: **Netcup** (Almanya/Avusturya, benzer fiyat), **OVH** (Fransa/Polonya),
-**Contabo** (daha çok kaynak, değişken performans). Hepsinde aynı değerlendirme geçerli.
+Konum seçimi bu riski azaltır: netcup'ta **Viyana** ya da **Amsterdam**, Hetzner'de
+**Helsinki**. Fiyat farkı yok, hukuki ortam farklı.
 
 ---
 
 ## 2. Sunucuyu kiralama (tıklama tıklama)
 
-1. **Hesap aç:** <https://accounts.hetzner.com> → *Register*. E-postanı doğrula.
-2. **Kimlik doğrulama:** ilk siparişte kimlik ve ödeme yöntemi isteyebilir (kredi kartı
-   ya da PayPal). Türkiye'den kart sorunsuz çalışır. Onay birkaç dakika–birkaç saat.
-3. **Cloud Console:** <https://console.hetzner.cloud> → *New Project* → adı `dragnet`.
-4. **SSH anahtarı üret** (kendi Windows makinende PowerShell'de):
-   ```powershell
-   ssh-keygen -t ed25519 -C "dragnet"
-   # Enter'a bas (varsayılan yol), parola sorarsa boş geçebilirsin
-   type $env:USERPROFILE\.ssh\id_ed25519.pub
-   ```
-   Çıkan tek satırı kopyala.
-5. **Sunucu oluştur:** *Add Server* →
-   - **Location:** Helsinki
-   - **Image:** Ubuntu 24.04
-   - **Type:** *Shared vCPU* → **x86 (Intel/AMD)** sekmesi → **CX23**
-     — burada satır satır fiyat yazar; CX23 ~5,49 €/ay görünmeli. **CPX** ile başlayan
-     bir plan seçersen 3,5 kat fazla ödersin (§1'deki tablo).
-   - **SSH keys:** *Add SSH key* → 4. adımdaki satırı yapıştır
-   - **Name:** `dragnet`
-   - Sağdaki özet kutusunda aylık tutarı **onaylamadan önce oku**, sonra *Create & Buy now*
-6. Listede beliren **IPv4 adresini** not et. Bundan sonrası SSH ile.
+Önce **SSH anahtarını üret** — hangi sağlayıcıyı seçersen seç gerekecek. Kendi Windows
+makinende PowerShell'de:
+
+```powershell
+ssh-keygen -t ed25519 -C "dragnet"
+# Enter'a bas (varsayılan yol), parola sorarsa boş geçebilirsin
+type $env:USERPROFILE\.ssh\id_ed25519.pub
+```
+
+Çıkan tek satırı kopyala; birazdan yapıştıracaksın.
+
+### netcup (önerilen)
+
+1. **Ürünü seç:** <https://www.netcup.com/en/server/vps-lite> → **VPS Lite 1 G12s**.
+   Sepete eklerken sayfanın üstünden ülkeyi **Türkiye** yap: fiyat KDV'siz görünecek.
+2. **Sipariş ekranında iki şeyi kontrol et:** tek seferlik bir **kurulum ücreti**
+   (*Einrichtungsgebühr / setup fee*) satırı var mı, ve **konum** olarak Viyana ya da
+   Amsterdam seçilebiliyor mu. Kurulum ücreti çıkarsa hesaba kat.
+3. **Hesap aç ve öde:** kredi kartı, PayPal ya da SEPA. Türkiye'den kart çalışır.
+   İlk siparişte kimlik doğrulaması istenebilir.
+4. **Sunucu hazır olunca** müşteri panelinden (SCP — *Server Control Panel*) işletim
+   sistemi olarak **Ubuntu 24.04** kur, SSH anahtarını ekle, **IPv4 adresini** not et.
+
+### Hetzner (CX23 stoka girerse — 3–4 kat ucuz olduğu için ara sıra bakmaya değer)
+
+1. <https://accounts.hetzner.com> → *Register*, e-postanı doğrula. İlk siparişte kimlik
+   ve ödeme yöntemi isteyebilir; onay birkaç dakika–birkaç saat sürer.
+2. <https://console.hetzner.cloud> → *New Project* → `dragnet`
+3. Stok kontrolü: <https://www.hetzner.com/cloud/cost-optimized/> — CX23 satırındaki
+   *Create* düğmesi aktifse stok var demektir.
+4. *Add Server* → **Location:** Helsinki · **Image:** Ubuntu 24.04 ·
+   **Type:** *Shared vCPU* → x86 sekmesi → **CX23** · SSH anahtarını ekle ·
+   **Name:** `dragnet`
+5. **CPX ile başlayan bir plan seçme** — aynı donanım için 3–4 kat fazla ödersin.
+   Sağdaki özet kutusunda aylık tutarı onaylamadan önce oku.
+6. **IPv4 adresini** not et.
+
+Bundan sonrası her iki sağlayıcıda aynı — gerisi SSH ile.
 
 ---
 
@@ -418,7 +454,7 @@ Vergi ve şahıs şirketi/limited tarafı için mali müşavire danış — bu b
 
 ### Fiyatlandırma düşüncesi
 
-Maliyetin ayda ~6 € (sunucu) + ~1 € (alan adı) ≈ **7 €**. Yani **ayda 5 €'luk iki abone
+Maliyetin ayda ~5 € (sunucu) + ~1 € (alan adı) ≈ **6 €**. Yani **ayda 5 €'luk iki abone
 sunucuyu karşılar ve üstüne kâr bırakır.** Makul bir başlangıç: ücretsiz kademe (günlük
 sınırlı `/search`, `/changes` yok) + ~3–5 €/ay premium (tam `/changes` erişimi). Bant genişliği endişesi yok: 100 abonenin tam indeks
 kopyası bile 20 TB'ın yanında görünmez.
