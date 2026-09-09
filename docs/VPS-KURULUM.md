@@ -5,7 +5,9 @@ Bu belge `docs/SUNUCU.md`'nin **uygulama** kılavuzudur: hangi sunucuyu, nereden
 kiralayacağın; kurulumun her komutu; kendi bilgisayarını nasıl bağlayacağın; ve indeksi
 ücretli bir abonelik hâline getirmek istersen neyin hazır, neyin daha yazılmadığı.
 
-Toplam maliyet, aşağıdaki seçimle: **ayda ~5 €** (sunucu) + **yılda ~10 €** (alan adı).
+Toplam maliyet: **ayda ~5 €** (sunucu). Kendi bilgisayarına çekmek için alan adı,
+sertifika ya da Cloudflare gerekmez — SSH tüneli yeter (§6). Alan adı ancak indeksi
+başkalarına açmaya karar verirsen gerekir (~10 €/yıl).
 Cloudflare tarafı ücretsiz plan ile yeter.
 
 ---
@@ -291,7 +293,38 @@ journalctl -u dragnet | grep "BEP-42"
 
 ---
 
-## 6. Alan adı + Cloudflare Tunnel
+## 6. Sunucuya erişim — önce SSH tüneli, alan adı gerekirse sonra
+
+İndeksi **yalnız kendi bilgisayarına** çekecekseniz alan adı, TLS sertifikası ve
+Cloudflare'e gerek yok. `api_bind = "127.0.0.1:8080"` sayesinde API dışarıya hiç
+açılmıyor; ona SSH tüneliyle bağlanılır. Bu hem bedava hem daha güvenli: token asla
+açık ağa çıkmaz, sunucuda tek açık port SSH kalır.
+
+Kendi Windows makinende, ayrı bir PowerShell penceresinde:
+
+```powershell
+ssh -N -L 8080:127.0.0.1:8080 dragnet-admin@SUNUCU_IP
+```
+
+`-N` "komut çalıştırma, sadece tüneli kur" demektir. Bu pencere açık kaldığı sürece
+kendi makinendeki `http://127.0.0.1:8080` adresi sunucudaki API'ye bağlıdır. Sına:
+
+```powershell
+curl.exe -H "Authorization: Bearer TOKEN" "http://127.0.0.1:8080/stats"
+```
+
+Masaüstü uygulamasında sunucu adresi olarak da bunu yazarsın: `http://127.0.0.1:8080`.
+
+> Tünel penceresini kapatınca senkronizasyon durur, veri kaybolmaz — imleç `meta`
+> tablosunda kalıcıdır, tüneli yeniden açtığında kaldığı yerden devam eder.
+
+**Alan adı + Cloudflare Tunnel ne zaman gerekir?** Yalnız indeksi *başkalarına* açmaya
+karar verdiğinde (§9). O zaman aşağıdaki kurulumu yaparsın; kendi kullanımın için
+gereksiz masraftır.
+
+---
+
+## 6b. Alan adı + Cloudflare Tunnel (yalnız indeksi paylaşacaksan)
 
 Tunnel'ın avantajı: sunucuda hiçbir port açmıyorsun, TLS sertifikası yönetmiyorsun,
 sunucunun gerçek IP'si dışarıya görünmüyor.
@@ -341,7 +374,7 @@ Masaüstü uygulamasında **Ayarlar → İndeks kaynağı**:
 | Alan | Değer |
 |---|---|
 | Mod | `remote` (hiç taramaz) veya `hybrid` (hem tarar hem çeker) |
-| Sunucu adresi | `https://dragnet.ornek.com` — kök adres, `/changes` eklenmez |
+| Sunucu adresi | SSH tüneliyle: **`http://127.0.0.1:8080`** · Cloudflare ile: `https://dragnet.ornek.com` — kök adres, `/changes` eklenmez |
 | Sunucu token'ı | §4'te ürettiğin token |
 
 - **`remote`** seçersen çekirdek hiç başlatılmaz: tek bir DHT paketi bile gitmez,
